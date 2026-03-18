@@ -4,7 +4,7 @@ package vm
 import "testing"
 
 func TestMapContext(t *testing.T) {
-	pool := &StringPool{strs: []string{"name", "age", "missing", "alice"}}
+	pool := NewStringPool([]string{"name", "age", "missing", "alice"})
 	dc := DataFromMap(map[string]any{
 		"name": "alice",
 		"age":  30.0,
@@ -27,7 +27,7 @@ func TestMapContext(t *testing.T) {
 }
 
 func TestNestedMapContext(t *testing.T) {
-	pool := &StringPool{strs: []string{"user.name", "user.age", "alice"}}
+	pool := NewStringPool([]string{"user.name", "user.age", "alice"})
 	dc := DataFromMap(map[string]any{
 		"user": map[string]any{
 			"name": "alice",
@@ -47,7 +47,7 @@ func TestNestedMapContext(t *testing.T) {
 }
 
 func TestJSONContext(t *testing.T) {
-	pool := &StringPool{strs: []string{"name", "bob"}}
+	pool := NewStringPool([]string{"name", "bob"})
 	dc, err := DataFromJSON(`{"name": "bob"}`, pool)
 	if err != nil {
 		t.Fatal(err)

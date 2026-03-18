@@ -67,9 +67,10 @@ func TestEvalNoMatch(t *testing.T) {
 	code = compiler.Emit(code, compiler.OpRuleMatch, 0, 0)
 
 	rs := makeRuleset(pool, code)
-	dc := DataFromMap(map[string]any{"name": "bob"}, NewStringPool(pool.Strings()))
+	sp := NewStringPool(pool.Strings())
+	dc := DataFromMap(map[string]any{"name": "bob"}, sp)
 
-	matched, err := Eval(rs, dc)
+	matched, err := EvalWithPool(rs, dc, sp)
 	if err != nil {
 		t.Fatal(err)
 	}

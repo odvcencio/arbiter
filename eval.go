@@ -40,8 +40,20 @@ func CompileJSONRules(rules []compiler.JSONRuleInput) (*compiler.CompiledRuleset
 	return compiler.CompileJSONBatch(rules)
 }
 
+// EvalContext bundles a DataContext with its StringPool so the VM can resolve
+// both compile-time and runtime-interned strings.
+type EvalContext struct {
+	DC   vm.DataContext
+	Pool *vm.StringPool
+}
+
 // Eval evaluates a compiled ruleset against a data context.
 func Eval(rs *compiler.CompiledRuleset, dc vm.DataContext) ([]vm.MatchedRule, error) {
+	// If dc was created via DataFromMap/DataFromJSON, it shares a pool.
+	// Try to extract it; otherwise create a new one.
+	if ec, ok := dc.(*evalContextWrapper); ok {
+		return vm.EvalWithPool(rs, ec.inner, ec.pool)
+	}
 	return vm.Eval(rs, dc)
 }
 
@@ -50,14 +62,30 @@ func EvalDebug(rs *compiler.CompiledRuleset, dc vm.DataContext) vm.DebugResult {
 	return vm.EvalDebug(rs, dc)
 }
 
-// DataFromMap creates a DataContext from a Go map. Pass the ruleset's string pool.
-func DataFromMap(m map[string]any, rs *compiler.CompiledRuleset) vm.DataContext {
-	pool := vm.NewStringPool(rs.Constants.Strings())
-	return vm.DataFromMap(m, pool)
+// evalContextWrapper wraps a DataContext with its StringPool.
+type evalContextWrapper struct {
+	inner vm.DataContext
+	pool  *vm.StringPool
 }
 
-// DataFromJSON creates a DataContext from JSON. Pass the ruleset's string pool.
+func (w *evalContextWrapper) Get(key string) vm.Value {
+	return w.inner.Get(key)
+}
+
+// DataFromMap creates a DataContext from a Go map.
+// The returned DataContext shares a StringPool with the evaluator.
+func DataFromMap(m map[string]any, rs *compiler.CompiledRuleset) vm.DataContext {
+	pool := vm.NewStringPool(rs.Constants.Strings())
+	dc := vm.DataFromMap(m, pool)
+	return &evalContextWrapper{inner: dc, pool: pool}
+}
+
+// DataFromJSON creates a DataContext from JSON.
 func DataFromJSON(jsonStr string, rs *compiler.CompiledRuleset) (vm.DataContext, error) {
 	pool := vm.NewStringPool(rs.Constants.Strings())
-	return vm.DataFromJSON(jsonStr, pool)
+	dc, err := vm.DataFromJSON(jsonStr, pool)
+	if err != nil {
+		return nil, err
+	}
+	return &evalContextWrapper{inner: dc, pool: pool}, nil
 }

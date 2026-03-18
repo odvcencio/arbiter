@@ -80,8 +80,9 @@ func (f *Flags) Variant(flag string, ctx map[string]any) string {
 	rs := f.ruleset
 	f.mu.RUnlock()
 
-	dc := vm.DataFromMap(ctx, vm.NewStringPool(rs.Constants.Strings()))
-	matched, err := vm.Eval(rs, dc)
+	sp := vm.NewStringPool(rs.Constants.Strings())
+	dc := vm.DataFromMap(ctx, sp)
+	matched, err := vm.EvalWithPool(rs, dc, sp)
 	if err != nil {
 		return ""
 	}
@@ -108,8 +109,9 @@ func (f *Flags) AllFlags(ctx map[string]any) map[string]string {
 	rs := f.ruleset
 	f.mu.RUnlock()
 
-	dc := vm.DataFromMap(ctx, vm.NewStringPool(rs.Constants.Strings()))
-	matched, err := vm.Eval(rs, dc)
+	sp := vm.NewStringPool(rs.Constants.Strings())
+	dc := vm.DataFromMap(ctx, sp)
+	matched, err := vm.EvalWithPool(rs, dc, sp)
 	if err != nil {
 		return nil
 	}

@@ -45,10 +45,10 @@ type VM struct {
 	locals  map[string]Value // iterator variable bindings
 }
 
-func newVM(rs *compiler.CompiledRuleset) *VM {
+func newVM(rs *compiler.CompiledRuleset, sp *StringPool) *VM {
 	return &VM{
 		pool:    rs.Constants,
-		strPool: NewStringPool(rs.Constants.Strings()),
+		strPool: sp,
 		locals:  make(map[string]Value),
 	}
 }
@@ -78,11 +78,16 @@ func (vm *VM) peek() Value {
 
 // Eval evaluates all rules in the compiled ruleset against the data context.
 func Eval(rs *compiler.CompiledRuleset, dc DataContext) ([]MatchedRule, error) {
+	return EvalWithPool(rs, dc, NewStringPool(rs.Constants.Strings()))
+}
+
+// EvalWithPool evaluates using a shared StringPool (for runtime-interned strings).
+func EvalWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) ([]MatchedRule, error) {
 	if rs == nil {
 		return nil, fmt.Errorf("nil ruleset")
 	}
 
-	vm := newVM(rs)
+	vm := newVM(rs, sp)
 	var matched []MatchedRule
 
 	for _, rule := range rs.Rules {
@@ -92,21 +97,21 @@ func Eval(rs *compiler.CompiledRuleset, dc DataContext) ([]MatchedRule, error) {
 
 		if result {
 			mr := MatchedRule{
-				Name:     vm.pool.GetString(rule.NameIdx),
+				Name:     vm.strPool.Get(rule.NameIdx),
 				Priority: int(rule.Priority),
 			}
 			if int(rule.ActionIdx) < len(rs.Actions) {
 				action := rs.Actions[rule.ActionIdx]
-				mr.Action = vm.pool.GetString(action.NameIdx)
+				mr.Action = vm.strPool.Get(action.NameIdx)
 				mr.Params = vm.evalActionParams(rs.Instructions, action.Params, dc)
 			}
 			matched = append(matched, mr)
 		} else if rule.FallbackIdx != 0 && int(rule.FallbackIdx) < len(rs.Actions) {
 			action := rs.Actions[rule.FallbackIdx]
 			mr := MatchedRule{
-				Name:     vm.pool.GetString(rule.NameIdx),
+				Name:     vm.strPool.Get(rule.NameIdx),
 				Priority: int(rule.Priority),
-				Action:   vm.pool.GetString(action.NameIdx),
+				Action:   vm.strPool.Get(action.NameIdx),
 				Params:   vm.evalActionParams(rs.Instructions, action.Params, dc),
 				Fallback: true,
 			}
@@ -120,7 +125,7 @@ func Eval(rs *compiler.CompiledRuleset, dc DataContext) ([]MatchedRule, error) {
 // EvalDebug evaluates with full tracing.
 func EvalDebug(rs *compiler.CompiledRuleset, dc DataContext) DebugResult {
 	start := time.Now()
-	vm := newVM(rs)
+	vm := newVM(rs, NewStringPool(rs.Constants.Strings()))
 	var result DebugResult
 
 	for _, rule := range rs.Rules {
@@ -130,18 +135,18 @@ func EvalDebug(rs *compiler.CompiledRuleset, dc DataContext) DebugResult {
 
 		if ok {
 			mr := MatchedRule{
-				Name:     vm.pool.GetString(rule.NameIdx),
+				Name:     vm.strPool.Get(rule.NameIdx),
 				Priority: int(rule.Priority),
 			}
 			if int(rule.ActionIdx) < len(rs.Actions) {
 				action := rs.Actions[rule.ActionIdx]
-				mr.Action = vm.pool.GetString(action.NameIdx)
+				mr.Action = vm.strPool.Get(action.NameIdx)
 				mr.Params = vm.evalActionParams(rs.Instructions, action.Params, dc)
 			}
 			result.Matched = append(result.Matched, mr)
 		} else {
 			result.Failed = append(result.Failed, FailedRule{
-				Name: vm.pool.GetString(rule.NameIdx),
+				Name: vm.strPool.Get(rule.NameIdx),
 			})
 		}
 	}
@@ -197,7 +202,7 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 				vm.push(NullVal())
 			}
 		case compiler.OpLoadVar:
-			key := vm.pool.GetString(arg)
+			key := vm.strPool.Get(arg)
 			if v, ok := vm.locals[key]; ok {
 				vm.push(v)
 			} else {
@@ -379,7 +384,7 @@ func (vm *VM) evalActionParams(instrs []byte, params []compiler.ActionParam, dc 
 		vm.evalCondition(instrs, p.ValueOff, p.ValueLen, dc)
 		if vm.sp > 0 {
 			v := vm.pop()
-			key := vm.pool.GetString(p.KeyIdx)
+			key := vm.strPool.Get(p.KeyIdx)
 			result[key] = vm.valueToAny(v)
 		}
 	}
@@ -395,7 +400,7 @@ func (vm *VM) valueToAny(v Value) any {
 	case TypeNumber:
 		return v.Num
 	case TypeString:
-		return vm.pool.GetString(v.Str)
+		return vm.strPool.Get(v.Str)
 	default:
 		return nil
 	}
@@ -417,7 +422,7 @@ func (vm *VM) valEqual(a, b Value) bool {
 		if a.Str == b.Str {
 			return true
 		}
-		return vm.pool.GetString(a.Str) == vm.pool.GetString(b.Str)
+		return vm.strPool.Get(a.Str) == vm.strPool.Get(b.Str)
 	default:
 		return false
 	}
@@ -432,7 +437,7 @@ func (vm *VM) toNum(v Value) float64 {
 
 func (vm *VM) toStr(v Value) string {
 	if v.Typ == TypeString {
-		return vm.pool.GetString(v.Str)
+		return vm.strPool.Get(v.Str)
 	}
 	return ""
 }
