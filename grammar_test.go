@@ -258,6 +258,91 @@ func TestParseMixedAndOr(t *testing.T) {
 }
 
 // =============================================================================
+// SEGMENT & FLAG PARSE TESTS
+// =============================================================================
+
+func TestParseSegment(t *testing.T) {
+	input := `segment enterprise_us {
+		plan == "enterprise" and country == "US"
+	}`
+	result := parseArb(t, input)
+	if !strings.Contains(result, "segment_declaration") {
+		t.Error("expected segment_declaration node")
+	}
+}
+
+func TestParseFlag(t *testing.T) {
+	input := `flag checkout_v2 type multivariate default "control" {
+		owner: "oscar"
+		ticket: "ENG-1234"
+		requires payments_enabled
+		when internal then "treatment"
+		when enterprise_us rollout 20 then "treatment"
+	}`
+	result := parseArb(t, input)
+	if !strings.Contains(result, "flag_declaration") {
+		t.Error("expected flag_declaration node")
+	}
+}
+
+func TestParseFlagKillSwitch(t *testing.T) {
+	input := `flag dark_mode type boolean default false kill_switch {
+		owner: "design-team"
+	}`
+	result := parseArb(t, input)
+	if !strings.Contains(result, "kill_switch") {
+		t.Error("expected kill_switch in parse tree")
+	}
+}
+
+func TestParseFlagBoolean(t *testing.T) {
+	input := `flag payments type boolean default false {
+		when enterprise_us then true
+	}`
+	result := parseArb(t, input)
+	if !strings.Contains(result, "flag_declaration") {
+		t.Error("expected flag_declaration node")
+	}
+}
+
+func TestParseSegmentAndFlag(t *testing.T) {
+	input := `
+segment internal {
+	user.email ends_with "@m31labs.dev"
+}
+
+segment enterprise_us {
+	user.plan == "enterprise" and user.country == "US"
+}
+
+flag checkout_v2 type multivariate default "control" {
+	owner: "oscar"
+	ticket: "ENG-1234"
+	expires: "2026-06-01"
+	requires payments_enabled
+	when internal then "treatment"
+	when enterprise_us rollout 20 then "treatment"
+}
+
+flag payments_enabled type boolean default false {
+	owner: "oscar"
+	when enterprise_us then true
+}
+
+flag dark_mode type boolean default false kill_switch {
+	owner: "design-team"
+}
+`
+	result := parseArb(t, input)
+	if !strings.Contains(result, "segment_declaration") {
+		t.Error("expected segment_declaration")
+	}
+	if !strings.Contains(result, "flag_declaration") {
+		t.Error("expected flag_declaration")
+	}
+}
+
+// =============================================================================
 // TRANSPILE TESTS
 // =============================================================================
 

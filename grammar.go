@@ -45,6 +45,8 @@ func ArbiterGrammar() *Grammar {
 		Sym("feature_declaration"),
 		Sym("const_declaration"),
 		Sym("rule_declaration"),
+		Sym("segment_declaration"),
+		Sym("flag_declaration"),
 	))
 
 	// --- Comments (extras — auto-skipped) ---
@@ -124,6 +126,62 @@ func ArbiterGrammar() *Grammar {
 		Field("value", Sym("_expr")),
 		Optional(Str(",")),
 	))
+
+	// --- Segment declaration ---
+	g.Define("segment_declaration", Seq(
+		Str("segment"),
+		Field("name", Sym("identifier")),
+		Str("{"),
+		Field("condition", Sym("_expr")),
+		Str("}"),
+	))
+
+	// --- Flag declaration ---
+	g.Define("flag_declaration", Seq(
+		Str("flag"),
+		Field("name", Sym("identifier")),
+		Optional(Seq(Str("type"), Field("flag_type", Choice(Str("boolean"), Str("multivariate"))))),
+		Optional(Seq(Str("default"), Field("default_value", Sym("_primary")))),
+		Optional(Field("kill_switch", Sym("kill_switch"))),
+		Str("{"),
+		Repeat(Sym("_flag_body")),
+		Str("}"),
+	))
+
+	g.Define("_flag_body", Choice(
+		Sym("flag_metadata"),
+		Sym("flag_requires"),
+		Sym("flag_rule"),
+	))
+
+	// owner: "oscar", ticket: "ENG-1234", etc.
+	g.Define("flag_metadata", Seq(
+		Field("key", Sym("identifier")),
+		Str(":"),
+		Field("value", Sym("string_literal")),
+	))
+
+	// requires payments_enabled
+	g.Define("flag_requires", Seq(
+		Str("requires"),
+		Field("flag_name", Sym("identifier")),
+	))
+
+	// when segment_name [rollout N] then "variant"
+	// OR when { expr } [rollout N] then "variant"
+	g.Define("flag_rule", Seq(
+		Str("when"),
+		Field("condition", Choice(
+			Sym("identifier"),                          // segment reference
+			Seq(Str("{"), Sym("_expr"), Str("}")),      // inline condition
+		)),
+		Optional(Seq(Str("rollout"), Field("rollout", Sym("number_literal")))),
+		Str("then"),
+		Field("variant", Sym("_primary")),
+	))
+
+	// kill_switch as named node so it appears in the CST
+	g.Define("kill_switch", Str("kill_switch"))
 
 	// --- Expression hierarchy ---
 	// Two levels: _expr includes logical operators, _value_expr does not.
