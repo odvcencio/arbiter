@@ -81,7 +81,8 @@ func (f *Flags) ReloadFile(path string) error {
 	return f.Reload(source)
 }
 
-// Enabled returns true if the flag is enabled (non-default) for the given context.
+// Enabled returns true if the flag is on for boolean flags,
+// or non-default for multivariate flags.
 func (f *Flags) Enabled(flag string, ctx map[string]any) bool {
 	f.mu.RLock()
 	def, ok := f.defs[flag]
@@ -89,7 +90,11 @@ func (f *Flags) Enabled(flag string, ctx map[string]any) bool {
 	if !ok {
 		return false
 	}
-	v := f.evalVariant(def, ctx, nil)
+	rc := newRequestCache(f, ctx)
+	v := rc.evalVariant(def, nil)
+	if def.Type == FlagBoolean {
+		return v == "true"
+	}
 	return v != def.Default
 }
 
@@ -102,7 +107,8 @@ func (f *Flags) Variant(flag string, ctx map[string]any) string {
 	if !ok {
 		return ""
 	}
-	return f.evalVariant(def, ctx, nil)
+	rc := newRequestCache(f, ctx)
+	return rc.evalVariant(def, nil)
 }
 
 // AllFlags returns all flag variants for the given context.
@@ -111,9 +117,10 @@ func (f *Flags) AllFlags(ctx map[string]any) map[string]string {
 	defs := f.defs
 	f.mu.RUnlock()
 
+	rc := newRequestCache(f, ctx)
 	result := make(map[string]string, len(defs))
 	for key, def := range defs {
-		result[key] = f.evalVariant(def, ctx, nil)
+		result[key] = rc.evalVariant(def, nil)
 	}
 	return result
 }
@@ -138,7 +145,8 @@ func (f *Flags) Explain(flag string, ctx map[string]any) FlagEvaluation {
 	}
 
 	var trace []TraceStep
-	variant := f.evalVariant(def, ctx, &trace)
+	rc := newRequestCache(f, ctx)
+	variant := rc.evalVariant(def, &trace)
 
 	reason := buildReason(def, variant, trace, segs)
 
@@ -154,7 +162,6 @@ func (f *Flags) Explain(flag string, ctx map[string]any) FlagEvaluation {
 }
 
 // Bucket returns a deterministic 0-99 bucket for a user ID.
-// Use this for percentage-based rollouts.
 // The same user ID always gets the same bucket.
 func Bucket(userID string) int {
 	h := sha256.Sum256([]byte(userID))
@@ -163,11 +170,6 @@ func Bucket(userID string) int {
 }
 
 // Handler returns an HTTP handler that serves flag state as JSON.
-// GET /flags?user_id=xxx&org=yyy&plan=zzz&env=production
-// Response: {"new_dashboard": "treatment", "ai_features": "enabled"}
-//
-// GET /explain?flag=checkout_v2&user_id=xxx
-// Response: FlagEvaluation JSON
 func (f *Flags) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -193,11 +195,46 @@ func (f *Flags) Handler() http.Handler {
 	return mux
 }
 
-// --- Internal evaluation ---
+// --- Per-request cache ---
+// Memoizes segment results, prerequisite results, and nested context
+// so shared segments are only evaluated once per request.
 
-// evalVariant implements the core evaluation logic.
-// If trace is non-nil, it records each evaluation step.
-func (f *Flags) evalVariant(def *FlagDef, ctx map[string]any, trace *[]TraceStep) string {
+type requestCache struct {
+	flags      *Flags
+	ctx        map[string]any
+	nestedCtx  map[string]any       // computed once
+	segResults map[string]bool      // segment name → result
+	prereqResults map[string]string // flag key → variant (for cycle detection + memo)
+	evalStack  map[string]bool      // flags currently being evaluated (cycle detection)
+}
+
+func newRequestCache(f *Flags, ctx map[string]any) *requestCache {
+	return &requestCache{
+		flags:         f,
+		ctx:           ctx,
+		nestedCtx:     nestDottedKeys(ctx),
+		segResults:    make(map[string]bool),
+		prereqResults: make(map[string]string),
+		evalStack:     make(map[string]bool),
+	}
+}
+
+// evalVariant implements the core evaluation logic with memoization and cycle detection.
+func (rc *requestCache) evalVariant(def *FlagDef, trace *[]TraceStep) string {
+	// Cycle detection
+	if rc.evalStack[def.Key] {
+		if trace != nil {
+			*trace = append(*trace, TraceStep{
+				Check:  "cycle detection",
+				Result: false,
+				Detail: fmt.Sprintf("prerequisite cycle detected involving %s", def.Key),
+			})
+		}
+		return def.Default
+	}
+	rc.evalStack[def.Key] = true
+	defer func() { delete(rc.evalStack, def.Key) }()
+
 	// 1. Kill switch
 	if def.KillSwitch {
 		if trace != nil {
@@ -212,14 +249,20 @@ func (f *Flags) evalVariant(def *FlagDef, ctx map[string]any, trace *[]TraceStep
 
 	// 2. Prerequisites
 	for _, prereq := range def.Prerequisites {
-		f.mu.RLock()
-		prereqDef, ok := f.defs[prereq]
-		f.mu.RUnlock()
+		rc.flags.mu.RLock()
+		prereqDef, ok := rc.flags.defs[prereq]
+		rc.flags.mu.RUnlock()
 
 		prereqPassed := false
 		if ok {
-			prereqVariant := f.evalVariant(prereqDef, ctx, nil)
-			prereqPassed = prereqVariant != prereqDef.Default
+			// Check memo first
+			if cached, hasCached := rc.prereqResults[prereq]; hasCached {
+				prereqPassed = cached != prereqDef.Default
+			} else {
+				prereqVariant := rc.evalVariant(prereqDef, nil)
+				rc.prereqResults[prereq] = prereqVariant
+				prereqPassed = prereqVariant != prereqDef.Default
+			}
 		}
 
 		if trace != nil {
@@ -237,37 +280,24 @@ func (f *Flags) evalVariant(def *FlagDef, ctx map[string]any, trace *[]TraceStep
 	}
 
 	// 3. Evaluate rules in order
-	f.mu.RLock()
-	segs := f.segments
-	f.mu.RUnlock()
-
 	for _, rule := range def.Rules {
 		segMatched := false
 		var segDetail string
 
 		if rule.SegmentName != "" {
-			seg, ok := segs[rule.SegmentName]
-			if ok {
-				segMatched = evalSegment(seg, ctx)
-				segDetail = fmt.Sprintf("%s -> %v", seg.source, segMatched)
-			} else {
-				segDetail = fmt.Sprintf("segment %q not found", rule.SegmentName)
-			}
-		} else if rule.InlineExpr != "" {
-			// Compile and evaluate inline expression
-			inlineSeg, err := compileSegment("inline", rule.InlineExpr)
-			if err == nil {
-				segMatched = evalSegment(inlineSeg, ctx)
-				segDetail = fmt.Sprintf("%s -> %v", rule.InlineExpr, segMatched)
-			} else {
-				segDetail = fmt.Sprintf("compile error: %v", err)
-			}
+			segMatched, segDetail = rc.evalSegmentCached(rule.SegmentName)
+		} else if rule.CompiledInline != nil {
+			segMatched = evalCompiledSegment(rule.CompiledInline, rc.nestedCtx)
+			segDetail = fmt.Sprintf("%s -> %v", rule.InlineExpr, segMatched)
 		}
 
 		if trace != nil {
 			checkName := "segment " + rule.SegmentName
 			if rule.SegmentName == "" {
 				checkName = "inline condition"
+			}
+			if rule.Rollout > 0 {
+				checkName += fmt.Sprintf(" rollout %d%%", rule.Rollout)
 			}
 			*trace = append(*trace, TraceStep{
 				Check:  checkName,
@@ -283,9 +313,9 @@ func (f *Flags) evalVariant(def *FlagDef, ctx map[string]any, trace *[]TraceStep
 		// Check rollout
 		if rule.Rollout > 0 {
 			userID := ""
-			if uid, ok := ctx["user.id"].(string); ok {
+			if uid, ok := rc.ctx["user.id"].(string); ok {
 				userID = uid
-			} else if uid, ok := ctx["user_id"].(string); ok {
+			} else if uid, ok := rc.ctx["user_id"].(string); ok {
 				userID = uid
 			}
 			bucket := Bucket(userID)
@@ -295,7 +325,7 @@ func (f *Flags) evalVariant(def *FlagDef, ctx map[string]any, trace *[]TraceStep
 				*trace = append(*trace, TraceStep{
 					Check:  fmt.Sprintf("rollout %d%%", rule.Rollout),
 					Result: rolloutPassed,
-					Detail: fmt.Sprintf("bucket(%s) = %d, threshold = %d", userID, bucket, rule.Rollout),
+					Detail: fmt.Sprintf("bucket(%q) = %d, threshold = %d", userID, bucket, rule.Rollout),
 				})
 			}
 
@@ -311,10 +341,30 @@ func (f *Flags) evalVariant(def *FlagDef, ctx map[string]any, trace *[]TraceStep
 	return def.Default
 }
 
-func evalSegment(seg *compiledSegment, ctx map[string]any) bool {
-	nested := nestDottedKeys(ctx)
+// evalSegmentCached evaluates a segment with memoization.
+func (rc *requestCache) evalSegmentCached(name string) (bool, string) {
+	if result, ok := rc.segResults[name]; ok {
+		return result, fmt.Sprintf("%s -> %v (cached)", name, result)
+	}
+
+	rc.flags.mu.RLock()
+	seg, ok := rc.flags.segments[name]
+	rc.flags.mu.RUnlock()
+
+	if !ok {
+		rc.segResults[name] = false
+		return false, fmt.Sprintf("segment %q not found", name)
+	}
+
+	matched := evalCompiledSegment(seg, rc.nestedCtx)
+	rc.segResults[name] = matched
+	return matched, fmt.Sprintf("%s -> %v", seg.source, matched)
+}
+
+// evalCompiledSegment evaluates a precompiled segment against a nested context.
+func evalCompiledSegment(seg *compiledSegment, nestedCtx map[string]any) bool {
 	sp := vm.NewStringPool(seg.ruleset.Constants.Strings())
-	dc := vm.DataFromMap(nested, sp)
+	dc := vm.DataFromMap(nestedCtx, sp)
 	matched, err := vm.EvalWithPool(seg.ruleset, dc, sp)
 	if err != nil {
 		return false
@@ -322,9 +372,9 @@ func evalSegment(seg *compiledSegment, ctx map[string]any) bool {
 	return len(matched) > 0
 }
 
-// nestDottedKeys converts a flat map with dotted keys (e.g. "user.plan" -> "enterprise")
-// into a nested map (e.g. {"user": {"plan": "enterprise"}}).
-// Non-dotted keys are preserved as-is.
+// --- Helpers ---
+
+// nestDottedKeys converts a flat map with dotted keys into a nested map.
 func nestDottedKeys(flat map[string]any) map[string]any {
 	result := make(map[string]any)
 	for k, v := range flat {
@@ -509,16 +559,11 @@ func parseFlagRule(node *gotreesitter.Node, source []byte, lang *gotreesitter.La
 	rule := FlagRule{}
 
 	// Condition: either identifier (segment ref) or inline { expr }
-	// The "condition" field may point to the identifier directly,
-	// or to the "{" token when it's an inline condition.
-	// We detect the pattern by checking if the condition field is an identifier.
 	condNode := node.ChildByFieldName("condition", lang)
 	if condNode != nil && condNode.Type(lang) == "identifier" {
 		rule.SegmentName = nodeText(condNode, source)
 	} else {
 		// Inline condition: find the expression node between braces.
-		// Walk all named children of the flag_rule node to find the expression
-		// that isn't the variant node.
 		variantNode := node.ChildByFieldName("variant", lang)
 		for i := 0; i < int(node.NamedChildCount()); i++ {
 			child := node.NamedChild(i)
@@ -527,13 +572,18 @@ func parseFlagRule(node *gotreesitter.Node, source []byte, lang *gotreesitter.La
 			}
 			childType := child.Type(lang)
 			if childType == "number_literal" {
-				// Could be rollout number, skip it
-				// Check if preceding anonymous sibling is "rollout"
 				continue
 			}
-			// This should be the inline expression
 			rule.InlineExpr = strings.TrimSpace(nodeText(child, source))
 			break
+		}
+		// Precompile inline condition at load time (not eval time)
+		if rule.InlineExpr != "" {
+			compiled, err := compileSegment("inline", rule.InlineExpr)
+			if err != nil {
+				return rule, fmt.Errorf("compile inline condition: %w", err)
+			}
+			rule.CompiledInline = compiled
 		}
 	}
 
@@ -591,10 +641,12 @@ func buildHTTPContext(r *http.Request) map[string]any {
 
 func buildReason(def *FlagDef, variant string, trace []TraceStep, segs map[string]*compiledSegment) string {
 	if variant == def.Default {
-		// Find why it's the default
 		for _, step := range trace {
 			if step.Check == "kill_switch" && step.Result {
 				return "kill-switched"
+			}
+			if step.Check == "cycle detection" && !step.Result {
+				return "prerequisite cycle detected"
 			}
 			if strings.HasPrefix(step.Check, "requires ") && !step.Result {
 				return fmt.Sprintf("prerequisite %s not met", strings.TrimPrefix(step.Check, "requires "))
@@ -602,7 +654,6 @@ func buildReason(def *FlagDef, variant string, trace []TraceStep, segs map[strin
 		}
 		return "no rules matched"
 	}
-	// Find which rule matched
 	for _, step := range trace {
 		if strings.HasPrefix(step.Check, "segment ") && step.Result {
 			return fmt.Sprintf("matched %s", step.Check)

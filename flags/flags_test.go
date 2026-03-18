@@ -572,3 +572,42 @@ func TestHTTPExplainHandler(t *testing.T) {
 		t.Errorf("reason: got %q, want kill-switched", result.Reason)
 	}
 }
+
+func TestPrerequisiteCycleDetection(t *testing.T) {
+	// A requires B, B requires A — should not infinite loop
+	src := `
+flag flag_a type boolean default false {
+    owner: "test"
+    requires flag_b
+    when { true }
+        then true
+}
+
+flag flag_b type boolean default false {
+    owner: "test"
+    requires flag_a
+    when { true }
+        then true
+}
+`
+	f, err := Load([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should not hang or panic — returns default due to cycle
+	v := f.Variant("flag_a", map[string]any{})
+	if v != "false" {
+		t.Errorf("expected default (false) due to cycle, got %q", v)
+	}
+
+	// Explain should mention cycle
+	eval := f.Explain("flag_a", map[string]any{})
+	if eval.Reason != "prerequisite flag_b not met" {
+		t.Logf("reason: %s", eval.Reason)
+	}
+	t.Logf("Trace:")
+	for i, step := range eval.Trace {
+		t.Logf("  [%d] %s: %s", i, step.Check, step.Detail)
+	}
+}

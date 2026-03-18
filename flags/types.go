@@ -23,10 +23,11 @@ type FlagDef struct {
 
 // FlagRule is one targeting rule within a flag.
 type FlagRule struct {
-	SegmentName string // reference to a named segment, or ""
-	InlineExpr  string // inline condition source (if no segment name)
-	Variant     string // variant to serve if matched
-	Rollout     int    // 0-100, 0 means no rollout (always match)
+	SegmentName    string           // reference to a named segment, or ""
+	InlineExpr     string           // inline condition source (if no segment name)
+	CompiledInline *compiledSegment // precompiled inline condition (nil if segment ref)
+	Variant        string           // variant to serve if matched
+	Rollout        int              // 0-100, 0 means no rollout (always match)
 }
 
 // FlagMetadata holds human-readable info about a flag.
