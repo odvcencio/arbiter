@@ -58,7 +58,9 @@ func (c *jsonCompiler) compileRule(r JSONRuleInput) error {
 	if err := json.Unmarshal([]byte(r.Condition), &cond); err != nil {
 		return fmt.Errorf("parse condition: %w", err)
 	}
-	c.compileNode(cond)
+	if err := c.compileNode(cond); err != nil {
+		return fmt.Errorf("compile condition: %w", err)
+	}
 	c.code = Emit(c.code, OpRuleMatch, 0, 0)
 	condLen := uint32(len(c.code)) - condOff
 
@@ -70,7 +72,9 @@ func (c *jsonCompiler) compileRule(r JSONRuleInput) error {
 			return fmt.Errorf("parse action: %w", err)
 		}
 	}
-	c.compileActionJSON(act)
+	if err := c.compileActionJSON(act); err != nil {
+		return fmt.Errorf("compile action: %w", err)
+	}
 
 	c.rules = append(c.rules, RuleHeader{
 		NameIdx:      nameIdx,
@@ -83,14 +87,19 @@ func (c *jsonCompiler) compileRule(r JSONRuleInput) error {
 	return nil
 }
 
-func (c *jsonCompiler) compileNode(node map[string]any) {
+func (c *jsonCompiler) compileNode(node map[string]any) error {
 	// Logical: {"OpLogic": "&&", "Conditions": [...]}
 	if opLogic, ok := node["OpLogic"].(string); ok {
-		conditions, _ := node["Conditions"].([]any)
+		conditions, err := jsonNodes(node["Conditions"], "Conditions")
+		if err != nil {
+			return err
+		}
 		if opLogic == "not" && len(conditions) > 0 {
-			c.compileNode(conditions[0].(map[string]any))
+			if err := c.compileNode(conditions[0]); err != nil {
+				return err
+			}
 			c.code = Emit(c.code, OpNot, 0, 0)
-			return
+			return nil
 		}
 		jumpOp := OpJumpIfFalse
 		logicOp := OpAnd
@@ -99,13 +108,17 @@ func (c *jsonCompiler) compileNode(node map[string]any) {
 			logicOp = OpOr
 		}
 		for i, cond := range conditions {
-			c.compileNode(cond.(map[string]any))
+			if err := c.compileNode(cond); err != nil {
+				return err
+			}
 			if i < len(conditions)-1 {
 				// Emit short-circuit jump, compile next condition, emit logic op, backpatch.
 				jumpPos := len(c.code)
 				c.code = Emit(c.code, jumpOp, 0, 0)
 
-				c.compileNode(conditions[i+1].(map[string]any))
+				if err := c.compileNode(conditions[i+1]); err != nil {
+					return err
+				}
 				c.code = Emit(c.code, logicOp, 0, 0)
 				dist := uint16(len(c.code) - jumpPos - InstrSize)
 				c.code[jumpPos+2] = byte(dist)
@@ -115,46 +128,67 @@ func (c *jsonCompiler) compileNode(node map[string]any) {
 				for j := i + 2; j < len(conditions); j++ {
 					jumpPos2 := len(c.code)
 					c.code = Emit(c.code, jumpOp, 0, 0)
-					c.compileNode(conditions[j].(map[string]any))
+					if err := c.compileNode(conditions[j]); err != nil {
+						return err
+					}
 					c.code = Emit(c.code, logicOp, 0, 0)
 					dist2 := uint16(len(c.code) - jumpPos2 - InstrSize)
 					c.code[jumpPos2+2] = byte(dist2)
 					c.code[jumpPos2+3] = byte(dist2 >> 8)
 				}
-				return
+				return nil
 			}
 		}
-		return
+		return nil
+	}
+
+	if _, ok := node["ForeachOperator"]; ok {
+		return c.compileForeach(node)
 	}
 
 	// Comparison/Collection/String: {"Operator": "==", "Lhs": {...}, "Rhs": {...}}
 	if operator, ok := node["Operator"].(string); ok {
-		if lhs, ok := node["Lhs"].(map[string]any); ok {
-			c.compileValue(lhs)
+		if lhs, has := node["Lhs"]; has {
+			lhsNode, err := jsonNode(lhs, "Lhs")
+			if err != nil {
+				return err
+			}
+			if err := c.compileValue(lhsNode); err != nil {
+				return err
+			}
 		}
-		if rhs, ok := node["Rhs"].(map[string]any); ok {
-			c.compileValue(rhs)
+		if rhs, has := node["Rhs"]; has {
+			rhsNode, err := jsonNode(rhs, "Rhs")
+			if err != nil {
+				return err
+			}
+			if err := c.compileValue(rhsNode); err != nil {
+				return err
+			}
 		}
 		c.emitOperator(operator)
-		return
+		return nil
 	}
 
 	// MathExpr at top level.
-	if mathExpr, ok := node["MathExpr"].(map[string]any); ok {
-		c.compileNode(mathExpr)
-		return
+	if mathExpr, has := node["MathExpr"]; has {
+		mathNode, err := jsonNode(mathExpr, "MathExpr")
+		if err != nil {
+			return err
+		}
+		return c.compileNode(mathNode)
 	}
 
 	// Value node — delegate.
-	c.compileValue(node)
+	return c.compileValue(node)
 }
 
-func (c *jsonCompiler) compileValue(node map[string]any) {
+func (c *jsonCompiler) compileValue(node map[string]any) error {
 	// Variable reference.
 	if varExpr, ok := node["VarExpr"].(string); ok {
 		idx := c.pool.String(varExpr)
 		c.code = Emit(c.code, OpLoadVar, 0, idx)
-		return
+		return nil
 	}
 
 	// Constant value.
@@ -174,16 +208,16 @@ func (c *jsonCompiler) compileValue(node map[string]any) {
 		} else {
 			c.code = Emit(c.code, OpLoadNull, 0, 0)
 		}
-		return
+		return nil
 	}
 
 	// Constant list.
 	if constList, ok := node["ConstList"].([]any); ok {
 		var items []intern.PoolValue
-		for _, item := range constList {
-			m, ok := item.(map[string]any)
-			if !ok {
-				continue
+		for i, item := range constList {
+			m, err := jsonNode(item, fmt.Sprintf("ConstList[%d]", i))
+			if err != nil {
+				return err
 			}
 			if s, ok := m["StrConst"].(string); ok {
 				items = append(items, intern.PoolValue{Typ: intern.TypeString, Str: c.pool.String(s)})
@@ -198,17 +232,64 @@ func (c *jsonCompiler) compileValue(node map[string]any) {
 		// VM recognises OpLoadNull with flags=TypeList as list-load.
 		c.code = Emit(c.code, OpLoadNull, intern.TypeList, idx)
 		c.code = Emit(c.code, OpLoadNull, 0xFF, length)
-		return
+		return nil
 	}
 
 	// Math expression used as a value.
-	if mathExpr, ok := node["MathExpr"].(map[string]any); ok {
-		c.compileNode(mathExpr)
-		return
+	if mathExpr, has := node["MathExpr"]; has {
+		mathNode, err := jsonNode(mathExpr, "MathExpr")
+		if err != nil {
+			return err
+		}
+		return c.compileNode(mathNode)
 	}
 
 	// Fallback: null.
 	c.code = Emit(c.code, OpLoadNull, 0, 0)
+	return nil
+}
+
+func (c *jsonCompiler) compileForeach(node map[string]any) error {
+	logic, _ := node["ForeachLogic"].(string)
+	var flag uint8
+	switch logic {
+	case "||":
+		flag = FlagAny
+	case "!||":
+		flag = FlagNone
+	default:
+		flag = FlagAll
+	}
+
+	varName, ok := node["ForeachVar"].(string)
+	if !ok || varName == "" {
+		return fmt.Errorf("ForeachVar: expected non-empty string")
+	}
+
+	lhs, err := jsonNode(node["Lhs"], "Lhs")
+	if err != nil {
+		return err
+	}
+	if err := c.compileValue(lhs); err != nil {
+		return err
+	}
+
+	varIdx := c.pool.String(varName)
+	c.code = Emit(c.code, OpIterBegin, flag, varIdx)
+
+	body, err := jsonNode(node["Condition"], "Condition")
+	if err != nil {
+		return err
+	}
+	bodyStart := len(c.code)
+	if err := c.compileNode(body); err != nil {
+		return err
+	}
+	bodyLen := uint16(len(c.code) - bodyStart)
+
+	c.code = Emit(c.code, OpIterNext, flag, bodyLen)
+	c.code = Emit(c.code, OpIterEnd, flag, 0)
+	return nil
 }
 
 func (c *jsonCompiler) emitOperator(op string) {
@@ -274,10 +355,10 @@ func (c *jsonCompiler) emitOperator(op string) {
 	}
 }
 
-func (c *jsonCompiler) compileActionJSON(act map[string]any) {
+func (c *jsonCompiler) compileActionJSON(act map[string]any) error {
 	if act == nil {
 		c.actions = append(c.actions, ActionEntry{})
-		return
+		return nil
 	}
 	name, _ := act["ActionName"].(string)
 	nameIdx := c.pool.String(name)
@@ -287,8 +368,12 @@ func (c *jsonCompiler) compileActionJSON(act map[string]any) {
 		for key, val := range paramMap {
 			keyIdx := c.pool.String(key)
 			valOff := uint32(len(c.code))
-			if vm, ok := val.(map[string]any); ok {
-				c.compileValue(vm)
+			vm, err := jsonNode(val, "ParamMap."+key)
+			if err != nil {
+				return err
+			}
+			if err := c.compileValue(vm); err != nil {
+				return err
 			}
 			valLen := uint32(len(c.code)) - valOff
 			params = append(params, ActionParam{KeyIdx: keyIdx, ValueOff: valOff, ValueLen: valLen})
@@ -296,4 +381,29 @@ func (c *jsonCompiler) compileActionJSON(act map[string]any) {
 	}
 
 	c.actions = append(c.actions, ActionEntry{NameIdx: nameIdx, Params: params})
+	return nil
+}
+
+func jsonNode(v any, field string) (map[string]any, error) {
+	node, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%s: expected object", field)
+	}
+	return node, nil
+}
+
+func jsonNodes(v any, field string) ([]map[string]any, error) {
+	items, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s: expected array", field)
+	}
+	nodes := make([]map[string]any, 0, len(items))
+	for i, item := range items {
+		node, err := jsonNode(item, fmt.Sprintf("%s[%d]", field, i))
+		if err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes, nil
 }

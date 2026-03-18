@@ -70,3 +70,17 @@ func TestPoolCounts(t *testing.T) {
 		t.Errorf("number count: got %d, want 1", p.NumberCount())
 	}
 }
+
+func TestPoolOutOfBoundsLookupsAreSafe(t *testing.T) {
+	p := NewPool()
+
+	if got := p.GetString(99); got != "" {
+		t.Errorf("GetString out of bounds: got %q, want empty string", got)
+	}
+	if got := p.GetNumber(99); got != 0 {
+		t.Errorf("GetNumber out of bounds: got %f, want 0", got)
+	}
+	if got := p.GetList(99, 1); got != nil {
+		t.Errorf("GetList out of bounds: got %v, want nil", got)
+	}
+}

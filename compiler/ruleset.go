@@ -10,16 +10,23 @@ type CompiledRuleset struct {
 	Rules        []RuleHeader
 	Actions      []ActionEntry
 	Templates    []TemplateEntry
+	Prereqs      []uint16
 }
 
 // RuleHeader stores metadata for one rule within the compiled ruleset.
 type RuleHeader struct {
-	NameIdx      uint16 // index into Constants.strings
-	Priority     int32
-	ConditionOff uint32 // byte offset into Instructions
-	ConditionLen uint32 // byte length of condition bytecode
-	ActionIdx    uint16 // index into Actions table
-	FallbackIdx  uint16 // 0 = none
+	NameIdx        uint16 // index into Constants.strings
+	Priority       int32
+	ConditionOff   uint32 // byte offset into Instructions
+	ConditionLen   uint32 // byte length of condition bytecode
+	ActionIdx      uint16 // index into Actions table
+	FallbackIdx    uint16 // 0 = none
+	KillSwitch     bool
+	Rollout        uint8
+	PrereqOff      uint16
+	PrereqLen      uint16
+	SegmentNameIdx uint16
+	HasSegment     bool
 }
 
 // ActionEntry stores a rule's action or fallback.

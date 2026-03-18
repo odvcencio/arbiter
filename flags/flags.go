@@ -1,8 +1,6 @@
 package flags
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,22 +13,16 @@ import (
 	gotreesitter "github.com/odvcencio/gotreesitter"
 
 	"github.com/odvcencio/arbiter"
-	"github.com/odvcencio/arbiter/compiler"
-	"github.com/odvcencio/arbiter/vm"
+	"github.com/odvcencio/arbiter/govern"
+	"github.com/odvcencio/arbiter/internal/parseutil"
 )
 
 // Flags is a compiled flag ruleset with first-class flag concepts and rich explainability.
 type Flags struct {
 	mu       sync.RWMutex
-	defs     map[string]*FlagDef        // flag key -> definition
-	segments map[string]*compiledSegment // segment name -> compiled condition
-	source   []byte                     // original source for reload
-}
-
-type compiledSegment struct {
-	name    string
-	source  string                     // original condition text
-	ruleset *compiler.CompiledRuleset  // compiled condition bytecode
+	defs     map[string]*FlagDef
+	segments *govern.SegmentSet
+	source   []byte
 }
 
 // Load parses .arb source, extracts flags + segments, and compiles segments.
@@ -41,7 +33,6 @@ func Load(source []byte) (*Flags, error) {
 	}
 	return f, nil
 }
-
 
 // LoadFile loads and compiles flags from a file path.
 func LoadFile(path string) (*Flags, error) {
@@ -91,8 +82,8 @@ func (f *Flags) Enabled(flag string, ctx map[string]any) bool {
 	if !ok {
 		return false
 	}
-	rc := newRequestCache(f, ctx)
-	v := rc.evalVariantName(def, nil)
+	rc := govern.NewRequestCache(f.segments, ctx)
+	v := f.evalVariantName(def, rc, nil)
 	if def.Type == FlagBoolean {
 		return v == "true"
 	}
@@ -107,8 +98,8 @@ func (f *Flags) Variant(flag string, ctx map[string]any) ServedVariant {
 	if !ok {
 		return ServedVariant{}
 	}
-	rc := newRequestCache(f, ctx)
-	name := rc.evalVariantName(def, nil)
+	rc := govern.NewRequestCache(f.segments, ctx)
+	name := f.evalVariantName(def, rc, nil)
 	return f.resolveVariant(def, name)
 }
 
@@ -120,8 +111,8 @@ func (f *Flags) VariantName(flag string, ctx map[string]any) string {
 	if !ok {
 		return ""
 	}
-	rc := newRequestCache(f, ctx)
-	return rc.evalVariantName(def, nil)
+	rc := govern.NewRequestCache(f.segments, ctx)
+	return f.evalVariantName(def, rc, nil)
 }
 
 // AllFlags returns all flag variants for the given context.
@@ -130,10 +121,10 @@ func (f *Flags) AllFlags(ctx map[string]any) map[string]ServedVariant {
 	defs := f.defs
 	f.mu.RUnlock()
 
-	rc := newRequestCache(f, ctx)
+	rc := govern.NewRequestCache(f.segments, ctx)
 	result := make(map[string]ServedVariant, len(defs))
 	for key, def := range defs {
-		name := rc.evalVariantName(def, nil)
+		name := f.evalVariantName(def, rc, nil)
 		result[key] = f.resolveVariantRedacted(def, name)
 	}
 	return result
@@ -198,7 +189,6 @@ func (f *Flags) Explain(flag string, ctx map[string]any) FlagEvaluation {
 
 	f.mu.RLock()
 	def, ok := f.defs[flag]
-	segs := f.segments
 	f.mu.RUnlock()
 
 	if !ok {
@@ -211,18 +201,18 @@ func (f *Flags) Explain(flag string, ctx map[string]any) FlagEvaluation {
 		}
 	}
 
-	var trace []TraceStep
-	rc := newRequestCache(f, ctx)
-	name := rc.evalVariantName(def, &trace)
+	trace := &govern.Trace{}
+	rc := govern.NewRequestCache(f.segments, ctx)
+	name := f.evalVariantName(def, rc, trace)
 
-	reason := buildReason(def, name, trace, segs)
+	reason := buildReason(def, name, trace.Steps)
 
 	return FlagEvaluation{
 		Flag:      flag,
 		Variant:   f.resolveVariantRedacted(def, name),
 		IsDefault: name == def.Default,
 		Reason:    reason,
-		Trace:     trace,
+		Trace:     trace.Steps,
 		Metadata:  def.Metadata,
 		Elapsed:   time.Since(start),
 	}
@@ -231,9 +221,7 @@ func (f *Flags) Explain(flag string, ctx map[string]any) FlagEvaluation {
 // Bucket returns a deterministic 0-99 bucket for a user ID.
 // The same user ID always gets the same bucket.
 func Bucket(userID string) int {
-	h := sha256.Sum256([]byte(userID))
-	n := binary.BigEndian.Uint32(h[:4])
-	return int(n % 100)
+	return govern.Bucket(userID)
 }
 
 // Handler returns an HTTP handler that serves flag state as JSON.
@@ -262,227 +250,134 @@ func (f *Flags) Handler() http.Handler {
 	return mux
 }
 
-// --- Per-request cache ---
-// Memoizes segment results, prerequisite results, and nested context
-// so shared segments are only evaluated once per request.
-
-type requestCache struct {
-	flags      *Flags
-	ctx        map[string]any
-	nestedCtx  map[string]any       // computed once
-	segResults map[string]bool      // segment name → result
-	prereqResults map[string]string // flag key → variant (for cycle detection + memo)
-	evalStack  map[string]bool      // flags currently being evaluated (cycle detection)
-}
-
-func newRequestCache(f *Flags, ctx map[string]any) *requestCache {
-	return &requestCache{
-		flags:         f,
-		ctx:           ctx,
-		nestedCtx:     nestDottedKeys(ctx),
-		segResults:    make(map[string]bool),
-		prereqResults: make(map[string]string),
-		evalStack:     make(map[string]bool),
-	}
-}
-
-// evalVariant implements the core evaluation logic with memoization and cycle detection.
-func (rc *requestCache) evalVariantName(def *FlagDef, trace *[]TraceStep) string {
-	// Cycle detection
-	if rc.evalStack[def.Key] {
-		if trace != nil {
-			*trace = append(*trace, TraceStep{
-				Check:  "cycle detection",
-				Result: false,
-				Detail: fmt.Sprintf("prerequisite cycle detected involving %s", def.Key),
-			})
-		}
-		return def.Default
-	}
-	rc.evalStack[def.Key] = true
-	defer func() { delete(rc.evalStack, def.Key) }()
-
-	// 1. Kill switch
-	if def.KillSwitch {
-		if trace != nil {
-			*trace = append(*trace, TraceStep{
-				Check:  "kill_switch",
-				Result: true,
-				Detail: "flag is kill-switched, returning default",
-			})
-		}
-		return def.Default
+func (f *Flags) evalVariantName(def *FlagDef, rc *govern.RequestCache, trace *govern.Trace) string {
+	if cached, ok := rc.FlagVariant(def.Key); ok {
+		return cached
 	}
 
-	// 2. Prerequisites
-	for _, prereq := range def.Prerequisites {
-		rc.flags.mu.RLock()
-		prereqDef, ok := rc.flags.defs[prereq]
-		rc.flags.mu.RUnlock()
+	result := def.Default
+	defer func() {
+		rc.RecordFlagResult(def.Key, result, def.Default)
+	}()
 
-		prereqPassed := false
-		if ok {
-			// Check memo first
-			if cached, hasCached := rc.prereqResults[prereq]; hasCached {
-				prereqPassed = cached != prereqDef.Default
-			} else {
-				prereqVariant := rc.evalVariantName(prereqDef, nil)
-				rc.prereqResults[prereq] = prereqVariant
-				prereqPassed = prereqVariant != prereqDef.Default
-			}
-		}
-
-		if trace != nil {
-			detail := fmt.Sprintf("%s -> %v", prereq, prereqPassed)
-			*trace = append(*trace, TraceStep{
-				Check:  fmt.Sprintf("requires %s", prereq),
-				Result: prereqPassed,
-				Detail: detail,
-			})
-		}
-
-		if !prereqPassed {
-			return def.Default
-		}
+	if rc.HasCycle(def.Key) {
+		trace.Append("cycle detection", false,
+			fmt.Sprintf("prerequisite cycle detected involving %s", def.Key))
+		return result
 	}
 
-	// 3. Evaluate rules in order
+	rc.Enter(def.Key)
+	defer rc.Leave(def.Key)
+
+	if govern.IsKillSwitched(def.KillSwitch, trace) {
+		return result
+	}
+
+	if !f.prerequisitesMet(def, rc, trace) {
+		return result
+	}
+
 	for _, rule := range def.Rules {
-		segMatched := false
-		var segDetail string
-
-		if rule.SegmentName != "" {
-			segMatched, segDetail = rc.evalSegmentCached(rule.SegmentName)
-		} else if rule.CompiledInline != nil {
-			segMatched = evalCompiledSegment(rule.CompiledInline, rc.nestedCtx)
-			segDetail = fmt.Sprintf("%s -> %v", rule.InlineExpr, segMatched)
-		}
-
-		if trace != nil {
-			checkName := "segment " + rule.SegmentName
-			if rule.SegmentName == "" {
-				checkName = "inline condition"
-			}
-			if rule.Rollout > 0 {
-				checkName += fmt.Sprintf(" rollout %d%%", rule.Rollout)
-			}
-			*trace = append(*trace, TraceStep{
-				Check:  checkName,
-				Result: segMatched,
-				Detail: segDetail,
-			})
-		}
-
-		if !segMatched {
+		if !f.ruleMatches(rule, rc, trace) {
 			continue
 		}
-
-		// Check rollout
-		if rule.Rollout > 0 {
-			userID := ""
-			if uid, ok := rc.ctx["user.id"].(string); ok {
-				userID = uid
-			} else if uid, ok := rc.ctx["user_id"].(string); ok {
-				userID = uid
-			}
-			bucket := Bucket(userID)
-			rolloutPassed := bucket < rule.Rollout
-
-			if trace != nil {
-				*trace = append(*trace, TraceStep{
-					Check:  fmt.Sprintf("rollout %d%%", rule.Rollout),
-					Result: rolloutPassed,
-					Detail: fmt.Sprintf("bucket(%q) = %d, threshold = %d", userID, bucket, rule.Rollout),
-				})
-			}
-
-			if !rolloutPassed {
-				continue
-			}
-		}
-
-		return rule.Variant
-	}
-
-	// 4. No rules matched -> return default
-	return def.Default
-}
-
-// evalSegmentCached evaluates a segment with memoization.
-func (rc *requestCache) evalSegmentCached(name string) (bool, string) {
-	if result, ok := rc.segResults[name]; ok {
-		return result, fmt.Sprintf("%s -> %v (cached)", name, result)
-	}
-
-	rc.flags.mu.RLock()
-	seg, ok := rc.flags.segments[name]
-	rc.flags.mu.RUnlock()
-
-	if !ok {
-		rc.segResults[name] = false
-		return false, fmt.Sprintf("segment %q not found", name)
-	}
-
-	matched := evalCompiledSegment(seg, rc.nestedCtx)
-	rc.segResults[name] = matched
-	return matched, fmt.Sprintf("%s -> %v", seg.source, matched)
-}
-
-// evalCompiledSegment evaluates a precompiled segment against a nested context.
-func evalCompiledSegment(seg *compiledSegment, nestedCtx map[string]any) bool {
-	sp := vm.NewStringPool(seg.ruleset.Constants.Strings())
-	dc := vm.DataFromMap(nestedCtx, sp)
-	matched, err := vm.EvalWithPool(seg.ruleset, dc, sp)
-	if err != nil {
-		return false
-	}
-	return len(matched) > 0
-}
-
-// --- Helpers ---
-
-// nestDottedKeys converts a flat map with dotted keys into a nested map.
-func nestDottedKeys(flat map[string]any) map[string]any {
-	result := make(map[string]any)
-	for k, v := range flat {
-		parts := strings.Split(k, ".")
-		if len(parts) == 1 {
-			result[k] = v
+		if !f.rolloutAllows(rule, rc, trace) {
 			continue
 		}
-		current := result
-		for i, part := range parts {
-			if i == len(parts)-1 {
-				current[part] = v
-			} else {
-				next, ok := current[part].(map[string]any)
-				if !ok {
-					next = make(map[string]any)
-					current[part] = next
-				}
-				current = next
-			}
-		}
+		result = rule.Variant
+		return result
 	}
+
 	return result
 }
 
-func compileSegment(name, conditionSource string) (*compiledSegment, error) {
-	syntheticSource := fmt.Sprintf("rule __seg_%s { when { %s } then Match {} }", name, conditionSource)
+func (f *Flags) prerequisitesMet(def *FlagDef, rc *govern.RequestCache, trace *govern.Trace) bool {
+	for _, prereq := range def.Prerequisites {
+		passed := f.prerequisitePassed(prereq, rc)
+		trace.Append("requires "+prereq, passed, fmt.Sprintf("%s -> %v", prereq, passed))
+		if !passed {
+			return false
+		}
+	}
+	return true
+}
+
+func (f *Flags) prerequisitePassed(name string, rc *govern.RequestCache) bool {
+	f.mu.RLock()
+	prereqDef, ok := f.defs[name]
+	f.mu.RUnlock()
+	if !ok {
+		return rc.PrerequisiteMet(name)
+	}
+
+	if cached, ok := rc.FlagVariant(name); ok {
+		return cached != prereqDef.Default
+	}
+
+	prereqVariant := f.evalVariantName(prereqDef, rc, nil)
+	return prereqVariant != prereqDef.Default
+}
+
+func (f *Flags) ruleMatches(rule FlagRule, rc *govern.RequestCache, trace *govern.Trace) bool {
+	matched, detail := f.ruleMatchDetail(rule, rc)
+	checkName := "segment " + rule.SegmentName
+	if rule.SegmentName == "" {
+		checkName = "inline condition"
+	}
+	if rule.Rollout > 0 {
+		checkName += fmt.Sprintf(" rollout %d%%", rule.Rollout)
+	}
+	trace.Append(checkName, matched, detail)
+	return matched
+}
+
+func (f *Flags) ruleMatchDetail(rule FlagRule, rc *govern.RequestCache) (bool, string) {
+	if rule.SegmentName != "" {
+		return rc.EvalSegment(rule.SegmentName)
+	}
+	if rule.CompiledInline != nil {
+		matched := rule.CompiledInline.Eval(rc.NestedContext())
+		return matched, fmt.Sprintf("%s -> %v", rule.InlineExpr, matched)
+	}
+	return false, "no segment or inline condition"
+}
+
+func (f *Flags) rolloutAllows(rule FlagRule, rc *govern.RequestCache, trace *govern.Trace) bool {
+	if rule.Rollout <= 0 {
+		return true
+	}
+	userID := govern.RolloutUserID(rc.Context())
+	bucket := govern.Bucket(userID)
+	allowed := bucket < rule.Rollout
+	trace.Append(
+		fmt.Sprintf("rollout %d%%", rule.Rollout),
+		allowed,
+		fmt.Sprintf("bucket(%q) = %d, threshold = %d", userID, bucket, rule.Rollout),
+	)
+	return allowed
+}
+
+func compileInlineSegment(conditionSource string) (*govern.CompiledSegment, error) {
+	syntheticSource := fmt.Sprintf("rule __inline { when { %s } then Match {} }", conditionSource)
 	rs, err := arbiter.Compile([]byte(syntheticSource))
 	if err != nil {
-		return nil, fmt.Errorf("compile segment %s: %w", name, err)
+		return nil, fmt.Errorf("compile inline condition: %w", err)
 	}
-	return &compiledSegment{
-		name:    name,
-		source:  conditionSource,
-		ruleset: rs,
+	return &govern.CompiledSegment{
+		Name:    "inline",
+		Source:  conditionSource,
+		Ruleset: rs,
 	}, nil
 }
 
 // --- CST parsing ---
 
 func (f *Flags) parse(source []byte) error {
+	full, err := arbiter.CompileFull(source)
+	if err != nil {
+		return fmt.Errorf("compile segments: %w", err)
+	}
+
 	lang, err := arbiter.GetLanguage()
 	if err != nil {
 		return fmt.Errorf("get language: %w", err)
@@ -500,7 +395,7 @@ func (f *Flags) parse(source []byte) error {
 	}
 
 	f.defs = make(map[string]*FlagDef)
-	f.segments = make(map[string]*compiledSegment)
+	f.segments = full.Segments
 	f.source = source
 
 	// Walk the CST
@@ -509,17 +404,6 @@ func (f *Flags) parse(source []byte) error {
 		nodeType := child.Type(lang)
 
 		switch nodeType {
-		case "segment_declaration":
-			seg, err := parseSegment(child, source, lang)
-			if err != nil {
-				return fmt.Errorf("parse segment: %w", err)
-			}
-			compiled, err := compileSegment(seg.Name, seg.Source)
-			if err != nil {
-				return fmt.Errorf("compile segment %s: %w", seg.Name, err)
-			}
-			f.segments[seg.Name] = compiled
-
 		case "flag_declaration":
 			def, err := parseFlag(child, source, lang)
 			if err != nil {
@@ -530,23 +414,6 @@ func (f *Flags) parse(source []byte) error {
 	}
 
 	return nil
-}
-
-func parseSegment(node *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (*Segment, error) {
-	nameNode := node.ChildByFieldName("name", lang)
-	condNode := node.ChildByFieldName("condition", lang)
-
-	if nameNode == nil || condNode == nil {
-		return nil, fmt.Errorf("segment missing name or condition")
-	}
-
-	name := nodeText(nameNode, source)
-	condSource := strings.TrimSpace(nodeText(condNode, source))
-
-	return &Segment{
-		Name:   name,
-		Source: condSource,
-	}, nil
 }
 
 func parseFlag(node *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (*FlagDef, error) {
@@ -569,7 +436,7 @@ func parseFlag(node *gotreesitter.Node, source []byte, lang *gotreesitter.Langua
 
 	// Default
 	if defaultNode := node.ChildByFieldName("default_value", lang); defaultNode != nil {
-		def.Default = stripQuotes(nodeText(defaultNode, source))
+		def.Default = parseutil.StripQuotes(nodeText(defaultNode, source))
 	}
 
 	// Kill switch
@@ -590,7 +457,7 @@ func parseFlag(node *gotreesitter.Node, source []byte, lang *gotreesitter.Langua
 				key = nodeText(keyNode, source)
 			}
 			if valNode := child.ChildByFieldName("value", lang); valNode != nil {
-				value = stripQuotes(nodeText(valNode, source))
+				value = parseutil.StripQuotes(nodeText(valNode, source))
 			}
 			switch key {
 			case "owner":
@@ -676,7 +543,7 @@ func parseFlag(node *gotreesitter.Node, source []byte, lang *gotreesitter.Langua
 func parseVariantDecl(node *gotreesitter.Node, source []byte, lang *gotreesitter.Language) *VariantDef {
 	vd := &VariantDef{}
 	if nameNode := node.ChildByFieldName("name", lang); nameNode != nil {
-		vd.Name = stripQuotes(nodeText(nameNode, source))
+		vd.Name = parseutil.StripQuotes(nodeText(nameNode, source))
 	}
 	vd.Values = parseParamBlock(node, source, lang)
 	return vd
@@ -706,17 +573,17 @@ func parseConstValue(node *gotreesitter.Node, source []byte, lang *gotreesitter.
 		n, _ := strconv.ParseFloat(text, 64)
 		return n
 	case "string_literal":
-		return stripQuotes(text)
+		return parseutil.StripQuotes(text)
 	case "bool_literal":
 		return text == "true"
 	case "secret_ref":
 		refNode := node.ChildByFieldName("ref", lang)
 		if refNode != nil {
-			return SecretValue{Ref: stripQuotes(nodeText(refNode, source))}
+			return SecretValue{Ref: parseutil.StripQuotes(nodeText(refNode, source))}
 		}
 		return SecretValue{Ref: ""}
 	default:
-		return stripQuotes(text)
+		return parseutil.StripQuotes(text)
 	}
 }
 
@@ -782,9 +649,9 @@ func parseFlagRule(node *gotreesitter.Node, source []byte, lang *gotreesitter.La
 		}
 		// Precompile inline condition at load time (not eval time)
 		if rule.InlineExpr != "" {
-			compiled, err := compileSegment("inline", rule.InlineExpr)
+			compiled, err := compileInlineSegment(rule.InlineExpr)
 			if err != nil {
-				return rule, fmt.Errorf("compile inline condition: %w", err)
+				return rule, err
 			}
 			rule.CompiledInline = compiled
 		}
@@ -793,19 +660,13 @@ func parseFlagRule(node *gotreesitter.Node, source []byte, lang *gotreesitter.La
 	// Rollout
 	if rolloutNode := node.ChildByFieldName("rollout", lang); rolloutNode != nil {
 		rolloutText := nodeText(rolloutNode, source)
-		n := 0
-		for _, ch := range rolloutText {
-			if ch >= '0' && ch <= '9' {
-				n = n*10 + int(ch-'0')
-			}
-		}
-		rule.Rollout = n
+		rule.Rollout = parseutil.ParseInt(rolloutText)
 	}
 
 	// Variant
 	if variantNode := node.ChildByFieldName("variant", lang); variantNode != nil {
 		variantText := nodeText(variantNode, source)
-		rule.Variant = stripQuotes(variantText)
+		rule.Variant = parseutil.StripQuotes(variantText)
 	}
 
 	return rule, nil
@@ -815,13 +676,6 @@ func parseFlagRule(node *gotreesitter.Node, source []byte, lang *gotreesitter.La
 
 func nodeText(n *gotreesitter.Node, source []byte) string {
 	return string(source[n.StartByte():n.EndByte()])
-}
-
-func stripQuotes(s string) string {
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return s[1 : len(s)-1]
-	}
-	return s
 }
 
 func buildHTTPContext(r *http.Request) map[string]any {
@@ -842,7 +696,7 @@ func buildHTTPContext(r *http.Request) map[string]any {
 	return ctx
 }
 
-func buildReason(def *FlagDef, variant string, trace []TraceStep, segs map[string]*compiledSegment) string {
+func buildReason(def *FlagDef, variant string, trace []TraceStep) string {
 	if variant == def.Default {
 		for _, step := range trace {
 			if step.Check == "kill_switch" && step.Result {

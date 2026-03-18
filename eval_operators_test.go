@@ -681,17 +681,78 @@ func TestEvalVarToVarComparison(t *testing.T) {
 
 func TestEvalContains(t *testing.T) {
 	src := `rule T { when { tags contains "vip" } then A {} }`
-	// contains checks if a list variable contains a value
-	// Since list values from DataFromMap return NullVal (TODO in datacontext.go),
-	// this tests the compile path even if eval returns false
-	rs, err := Compile([]byte(src))
-	if err != nil {
-		t.Fatalf("compile: %v", err)
+	if !evalRule(t, src, map[string]any{"tags": []string{"vip", "premium"}}) {
+		t.Error("expected contains to match runtime list values")
 	}
-	dc := DataFromMap(map[string]any{"tags": []any{"vip", "premium"}}, rs)
-	_, err = Eval(rs, dc)
-	if err != nil {
-		t.Fatalf("eval should not error: %v", err)
+}
+
+func TestEvalRetains(t *testing.T) {
+	src := `rule T { when { ["vip", "pro"] retains ["pro", "gold"] } then A {} }`
+	if !evalRule(t, src, map[string]any{}) {
+		t.Error("expected retains to match overlapping lists")
+	}
+}
+
+func TestEvalSubsetOf(t *testing.T) {
+	src := `rule T { when { ["vip"] subset_of ["vip", "pro"] } then A {} }`
+	if !evalRule(t, src, map[string]any{}) {
+		t.Error("expected subset_of to match")
+	}
+}
+
+func TestEvalSupersetOf(t *testing.T) {
+	src := `rule T { when { ["vip", "pro"] superset_of ["vip"] } then A {} }`
+	if !evalRule(t, src, map[string]any{}) {
+		t.Error("expected superset_of to match")
+	}
+}
+
+func TestEvalVagueContains(t *testing.T) {
+	src := `rule T { when { ["premium", "standard"] vague_contains "mium" } then A {} }`
+	if !evalRule(t, src, map[string]any{}) {
+		t.Error("expected vague_contains to match substring in list element")
+	}
+}
+
+func TestEvalQuantifierAny(t *testing.T) {
+	src := `rule T { when { any item in items { item > 0 } } then A {} }`
+	if !evalRule(t, src, map[string]any{"items": []any{-1.0, 2.0}}) {
+		t.Error("expected any quantifier to match")
+	}
+}
+
+func TestEvalQuantifierAll(t *testing.T) {
+	src := `rule T { when { all item in items { item > 0 } } then A {} }`
+	if !evalRule(t, src, map[string]any{"items": []any{1.0, 2.0}}) {
+		t.Error("expected all quantifier to match")
+	}
+	if evalRule(t, src, map[string]any{"items": []any{1.0, -1.0}}) {
+		t.Error("expected all quantifier to fail when one item fails")
+	}
+}
+
+func TestEvalQuantifierNone(t *testing.T) {
+	src := `rule T { when { none item in items { item > 0 } } then A {} }`
+	if !evalRule(t, src, map[string]any{"items": []any{-1.0, -2.0}}) {
+		t.Error("expected none quantifier to match")
+	}
+	if evalRule(t, src, map[string]any{"items": []any{-1.0, 2.0}}) {
+		t.Error("expected none quantifier to fail when one item matches")
+	}
+}
+
+func TestEvalQuantifierMemberAccess(t *testing.T) {
+	src := `rule T { when { any item in cart.items { item.price > 100 } } then A {} }`
+	data := map[string]any{
+		"cart": map[string]any{
+			"items": []any{
+				map[string]any{"price": 50.0},
+				map[string]any{"price": 150.0},
+			},
+		},
+	}
+	if !evalRule(t, src, data) {
+		t.Error("expected quantifier locals to resolve nested member access")
 	}
 }
 

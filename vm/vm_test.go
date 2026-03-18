@@ -126,3 +126,50 @@ func TestEvalShortCircuitAnd(t *testing.T) {
 		t.Fatalf("expected 0 matches (short-circuit false), got %d", len(matched))
 	}
 }
+
+func TestEvalStackOverflowReturnsError(t *testing.T) {
+	pool := intern.NewPool()
+	var code []byte
+	for i := 0; i < maxStack+1; i++ {
+		code = compiler.Emit(code, compiler.OpLoadBool, 0, 1)
+	}
+	code = compiler.Emit(code, compiler.OpRuleMatch, 0, 0)
+
+	rs := makeRuleset(pool, code)
+	dc := DataFromMap(map[string]any{}, NewStringPool(pool.Strings()))
+
+	if _, err := Eval(rs, dc); err == nil {
+		t.Fatal("expected stack overflow to return an error")
+	}
+}
+
+func TestRegexCompilationIsCached(t *testing.T) {
+	pool := intern.NewPool()
+	nameIdx := pool.String("name")
+	patternIdx := pool.String("^[a-z]+$")
+
+	var code []byte
+	code = compiler.Emit(code, compiler.OpLoadVar, 0, nameIdx)
+	code = compiler.Emit(code, compiler.OpLoadStr, 0, patternIdx)
+	code = compiler.Emit(code, compiler.OpMatches, 0, 0)
+	code = compiler.Emit(code, compiler.OpRuleMatch, 0, 0)
+
+	rs := makeRuleset(pool, code)
+	sp := NewStringPool(pool.Strings())
+	dc := DataFromMap(map[string]any{"name": "alice"}, sp)
+	vm := newVM(rs, sp)
+
+	if !vm.evalCondition(rs.Instructions, 0, uint32(len(code)), dc) {
+		t.Fatal("expected first regex evaluation to match")
+	}
+	if len(vm.regexes) != 1 {
+		t.Fatalf("expected one cached regex after first eval, got %d", len(vm.regexes))
+	}
+	vm.sp = 0
+	if !vm.evalCondition(rs.Instructions, 0, uint32(len(code)), dc) {
+		t.Fatal("expected second regex evaluation to match")
+	}
+	if len(vm.regexes) != 1 {
+		t.Fatalf("expected cached regex count to stay at 1, got %d", len(vm.regexes))
+	}
+}

@@ -34,6 +34,17 @@ type DebugResult struct {
 	Matched []MatchedRule
 	Failed  []FailedRule
 	Elapsed time.Duration
+	Error   error
+}
+
+type iterState struct {
+	kind    uint8
+	varName string
+	items   []any
+	index   int
+	result  bool
+	prev    any
+	hadPrev bool
 }
 
 // VM is the bytecode evaluator.
@@ -42,20 +53,27 @@ type VM struct {
 	sp      int
 	pool    *intern.Pool
 	strPool *StringPool
-	locals  map[string]Value // iterator variable bindings
+	locals  map[string]any // iterator variable bindings
+	iters   []iterState
+	regexes map[string]*regexp.Regexp
+	badRe   map[string]struct{}
+	err     error
+	ip      uint32
 }
 
 func newVM(rs *compiler.CompiledRuleset, sp *StringPool) *VM {
 	return &VM{
 		pool:    rs.Constants,
 		strPool: sp,
-		locals:  make(map[string]Value),
 	}
 }
 
 func (vm *VM) push(v Value) {
 	if vm.sp >= maxStack {
-		return // stack overflow -- silently drop
+		if vm.err == nil {
+			vm.err = fmt.Errorf("stack overflow at instruction %d", vm.ip)
+		}
+		return
 	}
 	vm.stack[vm.sp] = v
 	vm.sp++
@@ -92,8 +110,14 @@ func EvalWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) 
 
 	for _, rule := range rs.Rules {
 		vm.sp = 0 // reset stack per rule
+		clear(vm.locals)
+		vm.iters = vm.iters[:0]
+		vm.err = nil
 
 		result := vm.evalCondition(rs.Instructions, rule.ConditionOff, rule.ConditionLen, dc)
+		if vm.err != nil {
+			return nil, fmt.Errorf("rule %s: %w", vm.strPool.Get(rule.NameIdx), vm.err)
+		}
 
 		if result {
 			mr := MatchedRule{
@@ -103,7 +127,11 @@ func EvalWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) 
 			if int(rule.ActionIdx) < len(rs.Actions) {
 				action := rs.Actions[rule.ActionIdx]
 				mr.Action = vm.strPool.Get(action.NameIdx)
-				mr.Params = vm.evalActionParams(rs.Instructions, action.Params, dc)
+				params, err := vm.evalActionParams(rs.Instructions, action.Params, dc)
+				if err != nil {
+					return nil, fmt.Errorf("rule %s action %s: %w", mr.Name, mr.Action, err)
+				}
+				mr.Params = params
 			}
 			matched = append(matched, mr)
 		} else if rule.FallbackIdx != 0 && int(rule.FallbackIdx) < len(rs.Actions) {
@@ -112,9 +140,13 @@ func EvalWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) 
 				Name:     vm.strPool.Get(rule.NameIdx),
 				Priority: int(rule.Priority),
 				Action:   vm.strPool.Get(action.NameIdx),
-				Params:   vm.evalActionParams(rs.Instructions, action.Params, dc),
 				Fallback: true,
 			}
+			params, err := vm.evalActionParams(rs.Instructions, action.Params, dc)
+			if err != nil {
+				return nil, fmt.Errorf("rule %s fallback %s: %w", mr.Name, mr.Action, err)
+			}
+			mr.Params = params
 			matched = append(matched, mr)
 		}
 	}
@@ -124,14 +156,29 @@ func EvalWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) 
 
 // EvalDebug evaluates with full tracing.
 func EvalDebug(rs *compiler.CompiledRuleset, dc DataContext) DebugResult {
+	return EvalDebugWithPool(rs, dc, NewStringPool(rs.Constants.Strings()))
+}
+
+// EvalDebugWithPool evaluates with full tracing using a shared StringPool.
+func EvalDebugWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) DebugResult {
 	start := time.Now()
-	vm := newVM(rs, NewStringPool(rs.Constants.Strings()))
+	vm := newVM(rs, sp)
 	var result DebugResult
 
 	for _, rule := range rs.Rules {
 		vm.sp = 0
+		clear(vm.locals)
+		vm.iters = vm.iters[:0]
+		vm.err = nil
 
 		ok := vm.evalCondition(rs.Instructions, rule.ConditionOff, rule.ConditionLen, dc)
+		if vm.err != nil {
+			result.Error = fmt.Errorf("rule %s: %w", vm.strPool.Get(rule.NameIdx), vm.err)
+			result.Failed = append(result.Failed, FailedRule{
+				Name: vm.strPool.Get(rule.NameIdx),
+			})
+			break
+		}
 
 		if ok {
 			mr := MatchedRule{
@@ -141,7 +188,14 @@ func EvalDebug(rs *compiler.CompiledRuleset, dc DataContext) DebugResult {
 			if int(rule.ActionIdx) < len(rs.Actions) {
 				action := rs.Actions[rule.ActionIdx]
 				mr.Action = vm.strPool.Get(action.NameIdx)
-				mr.Params = vm.evalActionParams(rs.Instructions, action.Params, dc)
+				params, err := vm.evalActionParams(rs.Instructions, action.Params, dc)
+				if err != nil {
+					result.Error = fmt.Errorf("rule %s action %s: %w", mr.Name, mr.Action, err)
+					result.Failed = append(result.Failed, FailedRule{Name: mr.Name})
+					result.Elapsed = time.Since(start)
+					return result
+				}
+				mr.Params = params
 			}
 			result.Matched = append(result.Matched, mr)
 		} else {
@@ -163,6 +217,7 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 		if ip+compiler.InstrSize > uint32(len(instrs)) {
 			break
 		}
+		vm.ip = ip
 
 		var buf [compiler.InstrSize]byte
 		copy(buf[:], instrs[ip:ip+compiler.InstrSize])
@@ -171,7 +226,7 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 		switch op {
 		case compiler.OpLoadStr:
 			if flags != 0 {
-				// CST compiler encodes lists as OpLoadStr with flags=listLen, arg=listIdx
+				// Legacy list encoding kept for compatibility with older in-memory bytecode.
 				vm.push(ListVal(arg, uint16(flags)))
 			} else {
 				vm.push(StrVal(arg))
@@ -182,18 +237,7 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 			vm.push(BoolVal(arg == 1))
 		case compiler.OpLoadNull:
 			if flags == intern.TypeList {
-				// List load: this instruction carries listIdx in arg.
-				// The next instruction (OpLoadNull, flags=0xFF) carries listLen.
-				listIdx := arg
-				ip += compiler.InstrSize
-				if ip+compiler.InstrSize <= uint32(len(instrs)) {
-					var buf2 [compiler.InstrSize]byte
-					copy(buf2[:], instrs[ip:ip+compiler.InstrSize])
-					_, _, listLen := compiler.DecodeInstr(buf2)
-					vm.push(ListVal(listIdx, listLen))
-				} else {
-					vm.push(NullVal())
-				}
+				ip = vm.decodeListPair(instrs, ip, end, arg)
 			} else if flags == 0xFF {
 				// Part of a list load pair — should not be reached standalone.
 				// If reached, it's a no-op (the list case above consumed it).
@@ -203,8 +247,8 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 			}
 		case compiler.OpLoadVar:
 			key := vm.strPool.Get(arg)
-			if v, ok := vm.locals[key]; ok {
-				vm.push(v)
+			if raw, ok := vm.lookupLocal(key); ok {
+				vm.push(anyToValue(raw, vm.strPool))
 			} else {
 				vm.push(dc.Get(key))
 			}
@@ -298,8 +342,8 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 			vm.push(BoolVal(strings.HasSuffix(vm.toStr(a), vm.toStr(b))))
 		case compiler.OpMatches:
 			b, a := vm.pop(), vm.pop()
-			re, err := regexp.Compile(vm.toStr(b))
-			if err != nil {
+			re := vm.regex(vm.toStr(b))
+			if re == nil {
 				vm.push(BoolVal(false))
 			} else {
 				vm.push(BoolVal(re.MatchString(vm.toStr(a))))
@@ -318,12 +362,21 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 		case compiler.OpNotContains:
 			b, a := vm.pop(), vm.pop()
 			vm.push(BoolVal(!vm.listContainsVal(a, b)))
-
-		// Stubs for collection ops not yet fully wired
-		case compiler.OpRetains, compiler.OpNotRetains,
-			compiler.OpVagueContains, compiler.OpSubsetOf, compiler.OpSupersetOf:
-			_, _ = vm.pop(), vm.pop()
-			vm.push(BoolVal(false))
+		case compiler.OpRetains:
+			b, a := vm.pop(), vm.pop()
+			vm.push(BoolVal(vm.listRetains(a, b)))
+		case compiler.OpNotRetains:
+			b, a := vm.pop(), vm.pop()
+			vm.push(BoolVal(!vm.listRetains(a, b)))
+		case compiler.OpVagueContains:
+			b, a := vm.pop(), vm.pop()
+			vm.push(BoolVal(vm.listVagueContains(a, b)))
+		case compiler.OpSubsetOf:
+			b, a := vm.pop(), vm.pop()
+			vm.push(BoolVal(vm.listSubsetOf(a, b)))
+		case compiler.OpSupersetOf:
+			b, a := vm.pop(), vm.pop()
+			vm.push(BoolVal(vm.listSubsetOf(b, a)))
 
 		// Range
 		case compiler.OpBetweenCC:
@@ -343,17 +396,78 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 			n, l, h := vm.toNum(val), vm.toNum(lo), vm.toNum(hi)
 			vm.push(BoolVal(n > l && n <= h))
 
-		// Quantifiers -- stubs for now
 		case compiler.OpIterBegin:
-			_ = flags // ANY=0, ALL=1, NONE=2
-			// TODO: implement in Task 7
+			list := vm.pop()
+			iter := iterState{
+				kind:    flags,
+				varName: vm.strPool.Get(arg),
+				items:   vm.listEntries(list),
+				result:  flags != compiler.FlagAny,
+			}
+			if vm.locals == nil {
+				vm.locals = make(map[string]any)
+			}
+			if prev, ok := vm.locals[iter.varName]; ok {
+				iter.prev = prev
+				iter.hadPrev = true
+			}
+			vm.iters = append(vm.iters, iter)
+
+			if len(iter.items) == 0 {
+				nextIP, found := vm.findMatchingIterNext(instrs, ip, end)
+				if found {
+					ip = nextIP
+				}
+				break
+			}
+
+			vm.locals[iter.varName] = iter.items[0]
 
 		case compiler.OpIterNext:
-			// TODO: implement in Task 7
+			if len(vm.iters) == 0 {
+				break
+			}
+			bodyResult := vm.pop().AsBool()
+			iter := &vm.iters[len(vm.iters)-1]
+
+			switch iter.kind {
+			case compiler.FlagAny:
+				if bodyResult {
+					iter.result = true
+					break
+				}
+			case compiler.FlagAll:
+				if !bodyResult {
+					iter.result = false
+					break
+				}
+			case compiler.FlagNone:
+				if bodyResult {
+					iter.result = false
+					break
+				}
+			}
+
+			iter.index++
+			if iter.index < len(iter.items) {
+				vm.locals[iter.varName] = iter.items[iter.index]
+				ip -= uint32(arg)
+				continue
+			}
 
 		case compiler.OpIterEnd:
-			// TODO: implement in Task 7
-			vm.push(BoolVal(false))
+			if len(vm.iters) == 0 {
+				vm.push(BoolVal(false))
+				break
+			}
+			iter := vm.iters[len(vm.iters)-1]
+			vm.iters = vm.iters[:len(vm.iters)-1]
+			if iter.hadPrev {
+				vm.locals[iter.varName] = iter.prev
+			} else {
+				delete(vm.locals, iter.varName)
+			}
+			vm.push(BoolVal(iter.result))
 
 		// Rule match
 		case compiler.OpRuleMatch:
@@ -361,6 +475,9 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 			if vm.sp > 0 {
 				return vm.peek().AsBool()
 			}
+			return false
+		}
+		if vm.err != nil {
 			return false
 		}
 
@@ -374,21 +491,27 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 	return false
 }
 
-func (vm *VM) evalActionParams(instrs []byte, params []compiler.ActionParam, dc DataContext) map[string]any {
+func (vm *VM) evalActionParams(instrs []byte, params []compiler.ActionParam, dc DataContext) (map[string]any, error) {
 	if len(params) == 0 {
-		return nil
+		return nil, nil
 	}
 	result := make(map[string]any, len(params))
 	for _, p := range params {
 		vm.sp = 0
+		clear(vm.locals)
+		vm.iters = vm.iters[:0]
+		vm.err = nil
 		vm.evalCondition(instrs, p.ValueOff, p.ValueLen, dc)
+		if vm.err != nil {
+			return nil, vm.err
+		}
 		if vm.sp > 0 {
 			v := vm.pop()
 			key := vm.strPool.Get(p.KeyIdx)
 			result[key] = vm.valueToAny(v)
 		}
 	}
-	return result
+	return result, nil
 }
 
 func (vm *VM) valueToAny(v Value) any {
@@ -401,6 +524,13 @@ func (vm *VM) valueToAny(v Value) any {
 		return v.Num
 	case TypeString:
 		return vm.strPool.Get(v.Str)
+	case TypeList:
+		if items, ok := v.Any.([]any); ok {
+			return items
+		}
+		return vm.poolListToAny(v.ListIdx, v.ListLen)
+	case TypeObject:
+		return v.Any
 	default:
 		return nil
 	}
@@ -446,12 +576,204 @@ func (vm *VM) listContainsVal(list, val Value) bool {
 	if list.Typ != TypeList {
 		return false
 	}
-	items := vm.pool.GetList(list.ListIdx, list.ListLen)
-	for _, item := range items {
-		iv := Value{Typ: item.Typ, Num: item.Num, Str: item.Str, Bool: item.Bool}
-		if vm.valEqual(iv, val) {
+
+	if items, ok := list.Any.([]any); ok {
+		for _, item := range items {
+			if vm.valEqual(anyToValue(item, vm.strPool), val) {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, item := range vm.pool.GetList(list.ListIdx, list.ListLen) {
+		if vm.valEqual(vm.poolValueToValue(item), val) {
 			return true
 		}
 	}
 	return false
+}
+
+func (vm *VM) decodeListPair(instrs []byte, ip, end uint32, listIdx uint16) uint32 {
+	nextIP := ip + compiler.InstrSize
+	if nextIP+compiler.InstrSize > uint32(len(instrs)) || nextIP >= end {
+		vm.err = fmt.Errorf("malformed list encoding at instruction %d", ip)
+		vm.push(NullVal())
+		return ip
+	}
+	var buf [compiler.InstrSize]byte
+	copy(buf[:], instrs[nextIP:nextIP+compiler.InstrSize])
+	op, flags, listLen := compiler.DecodeInstr(buf)
+	if op != compiler.OpLoadNull || flags != 0xFF {
+		vm.err = fmt.Errorf("malformed list encoding at instruction %d", ip)
+		vm.push(NullVal())
+		return ip
+	}
+	vm.push(ListVal(listIdx, listLen))
+	return nextIP
+}
+
+func (vm *VM) regex(pattern string) *regexp.Regexp {
+	if re, ok := vm.regexes[pattern]; ok {
+		return re
+	}
+	if _, ok := vm.badRe[pattern]; ok {
+		return nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		if vm.badRe == nil {
+			vm.badRe = make(map[string]struct{})
+		}
+		vm.badRe[pattern] = struct{}{}
+		return nil
+	}
+	if vm.regexes == nil {
+		vm.regexes = make(map[string]*regexp.Regexp)
+	}
+	vm.regexes[pattern] = re
+	return re
+}
+
+func (vm *VM) listRetains(a, b Value) bool {
+	for _, item := range vm.listValues(a) {
+		if vm.listContainsVal(b, item) {
+			return true
+		}
+	}
+	return false
+}
+
+func (vm *VM) listSubsetOf(a, b Value) bool {
+	for _, item := range vm.listValues(a) {
+		if !vm.listContainsVal(b, item) {
+			return false
+		}
+	}
+	return a.Typ == TypeList && b.Typ == TypeList
+}
+
+func (vm *VM) listVagueContains(list, needle Value) bool {
+	needleStr := vm.toStr(needle)
+	if needleStr == "" {
+		return false
+	}
+	for _, item := range vm.listValues(list) {
+		if item.Typ == TypeString && strings.Contains(vm.toStr(item), needleStr) {
+			return true
+		}
+	}
+	return false
+}
+
+func (vm *VM) listValues(list Value) []Value {
+	if list.Typ != TypeList {
+		return nil
+	}
+	if items, ok := list.Any.([]any); ok {
+		values := make([]Value, 0, len(items))
+		for _, item := range items {
+			values = append(values, anyToValue(item, vm.strPool))
+		}
+		return values
+	}
+	items := vm.pool.GetList(list.ListIdx, list.ListLen)
+	values := make([]Value, 0, len(items))
+	for _, item := range items {
+		values = append(values, vm.poolValueToValue(item))
+	}
+	return values
+}
+
+func (vm *VM) listEntries(list Value) []any {
+	if list.Typ != TypeList {
+		return nil
+	}
+	if items, ok := list.Any.([]any); ok {
+		return items
+	}
+	return vm.poolListToAny(list.ListIdx, list.ListLen)
+}
+
+func (vm *VM) poolListToAny(idx, length uint16) []any {
+	items := vm.pool.GetList(idx, length)
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, vm.poolValueToAny(item))
+	}
+	return out
+}
+
+func (vm *VM) poolValueToAny(item intern.PoolValue) any {
+	switch item.Typ {
+	case intern.TypeNull:
+		return nil
+	case intern.TypeBool:
+		return item.Bool
+	case intern.TypeNumber:
+		return item.Num
+	case intern.TypeString:
+		return vm.strPool.Get(item.Str)
+	case intern.TypeList:
+		return vm.poolListToAny(item.ListIdx, item.ListLen)
+	default:
+		return nil
+	}
+}
+
+func (vm *VM) poolValueToValue(item intern.PoolValue) Value {
+	switch item.Typ {
+	case intern.TypeNull:
+		return NullVal()
+	case intern.TypeBool:
+		return BoolVal(item.Bool)
+	case intern.TypeNumber:
+		return NumVal(item.Num)
+	case intern.TypeString:
+		return StrVal(item.Str)
+	case intern.TypeList:
+		return ListVal(item.ListIdx, item.ListLen)
+	default:
+		return NullVal()
+	}
+}
+
+func (vm *VM) lookupLocal(key string) (any, bool) {
+	if v, ok := vm.locals[key]; ok {
+		return v, true
+	}
+	dot := strings.IndexByte(key, '.')
+	if dot <= 0 {
+		return nil, false
+	}
+	base, ok := vm.locals[key[:dot]]
+	if !ok {
+		return nil, false
+	}
+	return resolve(base, key[dot+1:]), true
+}
+
+func (vm *VM) findMatchingIterNext(instrs []byte, beginIP, end uint32) (uint32, bool) {
+	depth := 0
+	for pos := beginIP + compiler.InstrSize; pos < end; pos += compiler.InstrSize {
+		if pos+compiler.InstrSize > uint32(len(instrs)) {
+			break
+		}
+		var buf [compiler.InstrSize]byte
+		copy(buf[:], instrs[pos:pos+compiler.InstrSize])
+		op, _, _ := compiler.DecodeInstr(buf)
+		switch op {
+		case compiler.OpIterBegin:
+			depth++
+		case compiler.OpIterEnd:
+			if depth > 0 {
+				depth--
+			}
+		case compiler.OpIterNext:
+			if depth == 0 {
+				return pos, true
+			}
+		}
+	}
+	return 0, false
 }

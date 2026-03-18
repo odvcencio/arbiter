@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/odvcencio/arbiter/internal/parseutil"
 	gotreesitter "github.com/odvcencio/gotreesitter"
 )
 
@@ -24,9 +25,9 @@ func getArbiterLanguage() (*gotreesitter.Language, error) {
 
 // TranspileResult holds the parsed output of an .arb file.
 type TranspileResult struct {
-	Features map[string]Feature       `json:"features,omitempty"`
-	Consts   map[string]any           `json:"consts,omitempty"`
-	Rules    []RuleOutput             `json:"rules"`
+	Features map[string]Feature `json:"features,omitempty"`
+	Consts   map[string]any     `json:"consts,omitempty"`
+	Rules    []RuleOutput       `json:"rules"`
 }
 
 type Feature struct {
@@ -62,9 +63,10 @@ func Transpile(source []byte) (string, error) {
 	}
 
 	t := &arbTranspiler{
-		src:    source,
-		lang:   lang,
-		consts: make(map[string]any),
+		src:      source,
+		lang:     lang,
+		consts:   make(map[string]any),
+		segments: make(map[string]any),
 	}
 
 	result := t.emitSourceFile(root)
@@ -95,13 +97,15 @@ func TranspileRule(source []byte, ruleName string) (string, error) {
 	}
 
 	t := &arbTranspiler{
-		src:    source,
-		lang:   lang,
-		consts: make(map[string]any),
+		src:      source,
+		lang:     lang,
+		consts:   make(map[string]any),
+		segments: make(map[string]any),
 	}
 
 	// First pass: collect consts
 	t.collectConsts(root)
+	t.collectSegments(root)
 
 	// Find the named rule
 	for i := 0; i < int(root.NamedChildCount()); i++ {
@@ -122,9 +126,10 @@ func TranspileRule(source []byte, ruleName string) (string, error) {
 }
 
 type arbTranspiler struct {
-	src    []byte
-	lang   *gotreesitter.Language
-	consts map[string]any
+	src      []byte
+	lang     *gotreesitter.Language
+	consts   map[string]any
+	segments map[string]any
 }
 
 func (t *arbTranspiler) text(n *gotreesitter.Node) string {
@@ -147,6 +152,7 @@ func (t *arbTranspiler) emitSourceFile(n *gotreesitter.Node) *TranspileResult {
 
 	// First pass: collect consts
 	t.collectConsts(n)
+	t.collectSegments(n)
 
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		c := n.NamedChild(i)
@@ -176,6 +182,21 @@ func (t *arbTranspiler) collectConsts(root *gotreesitter.Node) {
 	}
 }
 
+func (t *arbTranspiler) collectSegments(root *gotreesitter.Node) {
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		c := root.NamedChild(i)
+		if t.nodeType(c) != "segment_declaration" {
+			continue
+		}
+		nameNode := t.childByField(c, "name")
+		condNode := t.childByField(c, "condition")
+		if nameNode == nil || condNode == nil {
+			continue
+		}
+		t.segments[t.text(nameNode)] = t.emitExpr(condNode)
+	}
+}
+
 func (t *arbTranspiler) emitFeature(n *gotreesitter.Node) Feature {
 	f := Feature{
 		Fields: make(map[string]string),
@@ -184,7 +205,7 @@ func (t *arbTranspiler) emitFeature(n *gotreesitter.Node) Feature {
 		f.Name = t.text(nameNode)
 	}
 	if srcNode := t.childByField(n, "source"); srcNode != nil {
-		f.Source = stripQuotes(t.text(srcNode))
+		f.Source = parseutil.StripQuotes(t.text(srcNode))
 	}
 
 	for i := 0; i < int(n.NamedChildCount()); i++ {
@@ -205,14 +226,12 @@ func (t *arbTranspiler) emitRule(n *gotreesitter.Node) RuleOutput {
 		rule.Name = t.text(nameNode)
 	}
 	if priNode := t.childByField(n, "priority"); priNode != nil {
-		rule.Priority = parseInt(t.text(priNode))
+		rule.Priority = parseutil.ParseInt(t.text(priNode))
 	}
 
 	// Condition
 	if whenNode := t.childByField(n, "condition"); whenNode != nil {
-		if exprNode := t.childByField(whenNode, "expr"); exprNode != nil {
-			rule.Condition = t.emitExpr(exprNode)
-		}
+		rule.Condition = t.emitWhenCondition(whenNode)
 	}
 
 	// Action
@@ -226,6 +245,29 @@ func (t *arbTranspiler) emitRule(n *gotreesitter.Node) RuleOutput {
 	}
 
 	return rule
+}
+
+func (t *arbTranspiler) emitWhenCondition(n *gotreesitter.Node) any {
+	exprNode := t.childByField(n, "expr")
+	if exprNode == nil {
+		return nil
+	}
+	condition := t.emitExpr(exprNode)
+
+	segNode := t.childByField(n, "segment")
+	if segNode == nil {
+		return condition
+	}
+
+	segExpr, ok := t.segments[t.text(segNode)]
+	if !ok {
+		return condition
+	}
+
+	return map[string]any{
+		"OpLogic":    "&&",
+		"Conditions": []any{segExpr, condition},
+	}
 }
 
 func (t *arbTranspiler) emitAction(n *gotreesitter.Node) map[string]any {
@@ -255,23 +297,63 @@ func (t *arbTranspiler) emitExpr(n *gotreesitter.Node) any {
 	}
 
 	switch t.nodeType(n) {
-	// --- Logical ---
 	case "or_expr":
 		return t.emitLogical(n, "||")
 	case "and_expr":
 		return t.emitLogical(n, "&&")
 	case "not_expr":
-		operand := t.emitExpr(t.childByField(n, "operand"))
-		return map[string]any{
-			"OpLogic":    "not",
-			"Conditions": []any{operand},
-		}
-
-	// --- Comparison ---
+		return t.emitNot(n)
 	case "comparison_expr":
 		return t.emitComparison(n)
+	case "in_expr":
+		return t.emitCollectionOp(n)
+	case "not_in_expr":
+		return t.emitCollectionOp(n)
+	case "contains_expr":
+		return t.emitCollectionOp(n)
+	case "not_contains_expr":
+		return t.emitCollectionOp(n)
+	case "retains_expr":
+		return t.emitCollectionOp(n)
+	case "not_retains_expr":
+		return t.emitCollectionOp(n)
+	case "subset_of_expr":
+		return t.emitCollectionOp(n)
+	case "superset_of_expr":
+		return t.emitCollectionOp(n)
+	case "vague_contains_expr":
+		return t.emitCollectionOp(n)
+	case "starts_with_expr":
+		return t.emitStringOp(n)
+	case "ends_with_expr":
+		return t.emitStringOp(n)
+	case "matches_expr":
+		return t.emitStringOp(n)
+	case "between_expr":
+		return t.emitBetween(n)
+	case "is_null_expr":
+		return t.emitNullCheck(n, "IS_NULL")
+	case "is_not_null_expr":
+		return t.emitNullCheck(n, "!IS_NULL")
+	case "math_expr":
+		return t.emitMath(n)
+	case "quantifier_expr":
+		return t.emitQuantifier(n)
+	default:
+		return t.emitPrimary(n)
+	}
+}
 
-	// --- Collection operators ---
+func (t *arbTranspiler) emitNot(n *gotreesitter.Node) map[string]any {
+	operand := t.emitExpr(t.childByField(n, "operand"))
+	return map[string]any{
+		"OpLogic":    "not",
+		"Conditions": []any{operand},
+	}
+}
+
+func (t *arbTranspiler) emitCollectionOp(n *gotreesitter.Node) map[string]any {
+	switch t.nodeType(n) {
 	case "in_expr":
 		return t.emitBinaryOp(n, "LIST_IN")
 	case "not_in_expr":
@@ -290,40 +372,33 @@ func (t *arbTranspiler) emitExpr(n *gotreesitter.Node) any {
 		return t.emitBinaryOp(n, "SUB_LIST_CONTAINS")
 	case "vague_contains_expr":
 		return t.emitBinaryOp(n, "LIST_VAGUE_CONTAINS")
+	default:
+		return map[string]any{"_raw": t.text(n)}
+	}
+}
 
-	// --- String operators ---
+func (t *arbTranspiler) emitStringOp(n *gotreesitter.Node) map[string]any {
+	switch t.nodeType(n) {
 	case "starts_with_expr":
 		return t.emitBinaryOp(n, "STRING_START_WITH")
 	case "ends_with_expr":
 		return t.emitBinaryOp(n, "STRING_END_WITH")
 	case "matches_expr":
 		return t.emitBinaryOp(n, "CONTAIN_REGEXP")
+	default:
+		return map[string]any{"_raw": t.text(n)}
+	}
+}
 
-	// --- Range ---
-	case "between_expr":
-		return t.emitBetween(n)
+func (t *arbTranspiler) emitNullCheck(n *gotreesitter.Node, operator string) map[string]any {
+	return map[string]any{
+		"Operator": operator,
+		"Lhs":      t.emitExpr(t.childByField(n, "left")),
+	}
+}
 
-	// --- Null checks ---
-	case "is_null_expr":
-		return map[string]any{
-			"Operator": "IS_NULL",
-			"Lhs":      t.emitExpr(t.childByField(n, "left")),
-		}
-	case "is_not_null_expr":
-		return map[string]any{
-			"Operator": "!IS_NULL",
-			"Lhs":      t.emitExpr(t.childByField(n, "left")),
-		}
-
-	// --- Math ---
-	case "math_expr":
-		return t.emitMath(n)
-
-	// --- Quantifiers ---
-	case "quantifier_expr":
-		return t.emitQuantifier(n)
-
-	// --- Primaries ---
+func (t *arbTranspiler) emitPrimary(n *gotreesitter.Node) any {
+	switch t.nodeType(n) {
 	case "member_expr":
 		return t.emitMember(n)
 	case "identifier":
@@ -338,9 +413,7 @@ func (t *arbTranspiler) emitExpr(n *gotreesitter.Node) any {
 		return t.emitList(n)
 	case "paren_expr":
 		return t.emitExpr(t.childByField(n, "expr"))
-
 	default:
-		// Recurse into single-child wrapper nodes
 		if n.NamedChildCount() == 1 {
 			return t.emitExpr(n.NamedChild(0))
 		}
@@ -372,34 +445,8 @@ func (t *arbTranspiler) emitLogical(n *gotreesitter.Node, opLogic string) map[st
 
 func (t *arbTranspiler) emitComparison(n *gotreesitter.Node) map[string]any {
 	left := t.emitExpr(t.childByField(n, "left"))
-	opNode := t.childByField(n, "op")
 	right := t.emitExpr(t.childByField(n, "right"))
-
-	opStr := ""
-	if opNode != nil {
-		opStr = t.text(opNode)
-	} else {
-		// The operator is an anonymous token between the left and right children.
-		// Scan the source bytes between left and right to extract it.
-		leftNode := t.childByField(n, "left")
-		rightNode := t.childByField(n, "right")
-		if leftNode != nil && rightNode != nil {
-			between := strings.TrimSpace(string(t.src[leftNode.EndByte():rightNode.StartByte()]))
-			opStr = between
-		}
-		if opStr == "" {
-			// Last resort: scan all children
-			for i := 0; i < int(n.ChildCount()); i++ {
-				c := n.Child(i)
-				txt := t.text(c)
-				if txt == "==" || txt == "!=" || txt == ">" || txt == "<" || txt == ">=" || txt == "<=" {
-					opStr = txt
-					break
-				}
-			}
-		}
-	}
-	arishemOp := mapComparisonOp(opStr)
+	arishemOp := mapComparisonOp(t.comparisonOp(n))
 
 	return map[string]any{
 		"Operator": arishemOp,
@@ -473,7 +520,7 @@ func (t *arbTranspiler) emitQuantifier(n *gotreesitter.Node) map[string]any {
 		"ForeachLogic":    foreachLogic,
 		"ForeachVar":      varName,
 		"Lhs":             collection,
-		"Condition":        body,
+		"Condition":       body,
 	}
 }
 
@@ -507,12 +554,12 @@ func (t *arbTranspiler) emitIdentifier(n *gotreesitter.Node) any {
 
 func (t *arbTranspiler) emitNumber(n *gotreesitter.Node) map[string]any {
 	text := t.text(n)
-	num := parseFloat(text)
+	num := parseutil.ParseFloat(text)
 	return map[string]any{"Const": map[string]any{"NumConst": num}}
 }
 
 func (t *arbTranspiler) emitString(n *gotreesitter.Node) map[string]any {
-	text := stripQuotes(t.text(n))
+	text := parseutil.StripQuotes(t.text(n))
 	return map[string]any{"Const": map[string]any{"StrConst": text}}
 }
 
@@ -532,6 +579,25 @@ func (t *arbTranspiler) emitList(n *gotreesitter.Node) map[string]any {
 
 // --- Helpers ---
 
+func (t *arbTranspiler) comparisonOp(n *gotreesitter.Node) string {
+	if opNode := t.childByField(n, "op"); opNode != nil {
+		return strings.TrimSpace(t.text(opNode))
+	}
+	for i := 0; i < int(n.ChildCount()); i++ {
+		txt := strings.TrimSpace(t.text(n.Child(i)))
+		switch txt {
+		case "==", "!=", ">", "<", ">=", "<=":
+			return txt
+		}
+	}
+	leftNode := t.childByField(n, "left")
+	rightNode := t.childByField(n, "right")
+	if leftNode != nil && rightNode != nil {
+		return strings.TrimSpace(string(t.src[leftNode.EndByte():rightNode.StartByte()]))
+	}
+	return ""
+}
+
 func mapComparisonOp(op string) string {
 	switch strings.TrimSpace(op) {
 	case "==":
@@ -549,53 +615,4 @@ func mapComparisonOp(op string) string {
 	default:
 		return op
 	}
-}
-
-func stripQuotes(s string) string {
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return s[1 : len(s)-1]
-	}
-	return s
-}
-
-func parseInt(s string) int {
-	n := 0
-	for _, c := range s {
-		if c >= '0' && c <= '9' {
-			n = n*10 + int(c-'0')
-		}
-	}
-	return n
-}
-
-func parseFloat(s string) float64 {
-	negative := false
-	if len(s) > 0 && s[0] == '-' {
-		negative = true
-		s = s[1:]
-	}
-
-	var result float64
-	decimal := false
-	divisor := 1.0
-
-	for _, c := range s {
-		if c == '.' {
-			decimal = true
-			continue
-		}
-		if c >= '0' && c <= '9' {
-			if decimal {
-				divisor *= 10
-				result += float64(c-'0') / divisor
-			} else {
-				result = result*10 + float64(c-'0')
-			}
-		}
-	}
-
-	if negative {
-		result = -result
-	}
-	return result
 }

@@ -3,6 +3,8 @@ package flags
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/odvcencio/arbiter/govern"
 )
 
 // FlagType represents boolean or multivariate flags.
@@ -40,13 +42,13 @@ const (
 type FlagDef struct {
 	Key           string
 	Type          FlagType
-	Default       string                  // default variant name ("false", "control", etc.)
+	Default       string // default variant name ("false", "control", etc.)
 	KillSwitch    bool
-	Prerequisites []string                // flag keys that must be enabled
-	Rules         []FlagRule              // ordered targeting rules
-	Variants      map[string]*VariantDef  // declared variant definitions (nil if undeclared)
-	DefaultValues map[string]any          // defaults { ... } block — inherited by all variants
-	Schema        map[string]ValueType    // inferred field types (validated at load time)
+	Prerequisites []string               // flag keys that must be enabled
+	Rules         []FlagRule             // ordered targeting rules
+	Variants      map[string]*VariantDef // declared variant definitions (nil if undeclared)
+	DefaultValues map[string]any         // defaults { ... } block — inherited by all variants
+	Schema        map[string]ValueType   // inferred field types (validated at load time)
 	Metadata      FlagMetadata
 }
 
@@ -58,11 +60,11 @@ type VariantDef struct {
 
 // FlagRule is one targeting rule within a flag.
 type FlagRule struct {
-	SegmentName    string           // reference to a named segment, or ""
-	InlineExpr     string           // inline condition source (if no segment name)
-	CompiledInline *compiledSegment // precompiled inline condition (nil if segment ref)
-	Variant        string           // variant name to serve if matched
-	Rollout        int              // 0-100, 0 means no rollout (always match)
+	SegmentName    string                  // reference to a named segment, or ""
+	InlineExpr     string                  // inline condition source (if no segment name)
+	CompiledInline *govern.CompiledSegment // precompiled inline condition (nil if segment ref)
+	Variant        string                  // variant name to serve if matched
+	Rollout        int                     // 0-100, 0 means no rollout (always match)
 }
 
 // FlagMetadata holds human-readable info about a flag.
@@ -83,7 +85,7 @@ type Segment struct {
 // For boolean flags without payloads, Values is nil.
 // For multivariate flags with declared variants, Values contains the payload.
 type ServedVariant struct {
-	Name   string         `json:"name"`            // variant name ("treatment", "true", etc.)
+	Name   string         `json:"name"`             // variant name ("treatment", "true", etc.)
 	Values map[string]any `json:"values,omitempty"` // payload (nil if no variant block declared)
 }
 
@@ -171,8 +173,4 @@ type FlagEvaluation struct {
 }
 
 // TraceStep records one check in the evaluation.
-type TraceStep struct {
-	Check  string `json:"check"`  // "kill_switch", "requires payments_enabled", "segment internal"
-	Result bool   `json:"result"`
-	Detail string `json:"detail"` // "user.email ends_with \"@m31labs.dev\" -> true"
-}
+type TraceStep = govern.TraceStep

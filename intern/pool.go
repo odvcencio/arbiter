@@ -68,17 +68,28 @@ func (p *Pool) List(items []PoolValue) (uint16, uint16) {
 
 // GetString returns the string at the given pool index.
 func (p *Pool) GetString(idx uint16) string {
+	if int(idx) >= len(p.strings) {
+		return ""
+	}
 	return p.strings[idx]
 }
 
 // GetNumber returns the number at the given pool index.
 func (p *Pool) GetNumber(idx uint16) float64 {
+	if int(idx) >= len(p.numbers) {
+		return 0
+	}
 	return p.numbers[idx]
 }
 
 // GetList returns a slice of pool values from the flat list storage.
 func (p *Pool) GetList(idx, length uint16) []PoolValue {
-	return p.lists[idx : idx+length]
+	start := int(idx)
+	end := start + int(length)
+	if start > len(p.lists) || end > len(p.lists) {
+		return nil
+	}
+	return p.lists[start:end]
 }
 
 // StringCount returns the number of unique interned strings.

@@ -1,19 +1,120 @@
 # arbiter
 
-High-performance rule engine with a human-readable DSL. Compiles to bytecode and evaluates rules at **163ns per rule** — 8,500x faster than Arishem, with 108x less memory.
+A compact language for governed outcomes.
 
-Write rules once, run them anywhere: native bytecode VM, Arishem JSON, or target other platforms.
+Every decision your software makes — approve this transaction, show this variant, block this request, apply this discount — is a governed outcome. Arbiter gives those decisions a language, compiles them to bytecode, and evaluates them in **204 nanoseconds**.
+
+```
+.arb source ──→ Parser ──→ Compiler ──→ Bytecode VM (~204ns/eval)
+                              │
+                              ├──→ Arishem JSON (compatibility)
+                              ├──→ CEL
+                              ├──→ Rego / OPA
+                              └──→ Drools DRL
+```
+
+The toolchain: a [tree-sitter grammar](https://github.com/odvcencio/gotreesitter), a bytecode compiler with constant interning, a stack-based VM, and code generators for five targets. Pure Go. No CGo. No runtime dependencies. Write governance once, run it anywhere.
 
 ## Performance
 
-Benchmarked against [ByteDance/Arishem](https://github.com/bytedance/arishem) issue [#28](https://github.com/bytedance/arishem/issues/28) (10K-rule memory benchmark):
+Arbiter's numbers come from this repo's benchmarks. Arishem figures are from [ByteDance/Arishem](https://github.com/bytedance/arishem) issue [#28](https://github.com/bytedance/arishem/issues/28).
 
 | Metric | Arishem | Arbiter | Improvement |
 |--------|---------|---------|-------------|
 | 10K rule compile memory | 7.8 GB | 72 MB | **108x less** |
 | 10K rule allocations | 153M | 940K | **163x fewer** |
 | 5K rule eval memory | 3.9 GB | 160 KB | **24,375x less** |
-| Single rule eval | ~1.4ms | 163ns | **8,500x faster** |
+| Single rule eval | ~1.4ms | ~204ns | **~6,900x faster** |
+
+Fixed 256-element stack. Zero heap allocation during evaluation. The constant pool interns all strings and numbers — 10K rules referencing the same field names share one copy. The entire instruction buffer for 10K rules fits in ~800KB.
+
+## Governance
+
+Segments, rollouts, kill switches, prerequisites, explainability — these are governance primitives. They apply to any outcome, whether it's a rule deciding an action or a flag serving a variant.
+
+### Rules
+
+```python
+rule FreeShipping {
+    when {
+        user.cart_total >= 35
+        and user.region != "XX"
+    }
+    then ApplyShipping {
+        cost: 0,
+        method: "standard",
+    }
+}
+```
+
+### Segments
+
+Reusable conditions. Define once, reference anywhere.
+
+```python
+segment beta_users {
+    when { user.cohort matches "^beta_" }
+}
+
+segment high_value {
+    when { user.lifetime_spend > 10000 }
+}
+```
+
+### Kill Switches
+
+Instant global off-switch on any governed outcome.
+
+```python
+flag payments {
+    default: enabled
+    variant disabled { reason: "maintenance" }
+
+    kill_switch
+    when { region in ["EU"] } serve disabled
+}
+```
+
+### Rollouts
+
+Gradual exposure. Works on any targeting rule.
+
+```python
+when { user.id % 100 < 20 } serve treatment rollout 50
+```
+
+### Feature Flags
+
+Flags add one concept to the governance model: **variants** — named outcomes with typed payloads. Everything else (segments, rollouts, kill switches, prerequisites, explainability) is shared.
+
+```python
+flag checkout_v2 {
+    description: "New checkout flow"
+    default: control
+
+    variant treatment {
+        show_new_ui: true,
+        layout: "single_page",
+    }
+
+    when segment beta_users serve treatment
+    when { user.id % 100 < 20 } serve treatment rollout 50
+}
+```
+
+Schema validation, secret references, request-level caching, hot reload, HTTP serving, explainability traces — all come along.
+
+### Explainability
+
+Every evaluation produces a full decision trace.
+
+```go
+eval := flags.Explain("checkout_v2", ctx)
+// eval.Variant: "treatment"
+// eval.Reason: "segment:beta_users"
+// eval.Segments: ["beta_users": true]
+// eval.Chain: [prerequisite → segment → rollout → variant]
+```
 
 ## Before / After
 
@@ -37,7 +138,7 @@ Benchmarked against [ByteDance/Arishem](https://github.com/bytedance/arishem) is
 }
 ```
 
-**After** — 4 lines of arbiter:
+**After** — arbiter:
 
 ```python
 rule FreeShipping {
@@ -51,20 +152,6 @@ rule FreeShipping {
     }
 }
 ```
-
-## How It Works
-
-```
-.arb source ──→ Parser ──→ Compiler ──→ Bytecode VM (163ns/rule)
-                              │
-                              ├──→ Arishem JSON (compatibility)
-                              ├──→ Rego (planned)
-                              └──→ Drools DRL (planned)
-```
-
-arbiter compiles rules to a flat bytecode instruction set executed by a zero-allocation stack machine. The constant pool interns all strings and numbers — 10K rules referencing the same field names share one copy. The entire instruction buffer for 10K rules fits in ~800KB.
-
-Built on [gotreesitter](https://github.com/odvcencio/gotreesitter), a pure-Go tree-sitter implementation. No generated files. No CGo. No runtime dependencies.
 
 ## Install
 
@@ -93,7 +180,7 @@ arbiter emit rules.arb --rule FreeShipping
 arbiter check rules.arb
 ```
 
-### Go Library
+### Go Library — Rules
 
 ```go
 // Compile from .arb source
@@ -115,7 +202,7 @@ dc := arbiter.DataFromMap(map[string]any{
     },
 }, ruleset)
 
-// Evaluate — 163ns per rule
+// Evaluate — ~204ns per rule
 matched, err := arbiter.Eval(ruleset, dc)
 for _, m := range matched {
     fmt.Printf("%s → %s %v\n", m.Name, m.Action, m.Params)
@@ -127,9 +214,30 @@ fmt.Printf("matched: %d, failed: %d, elapsed: %s\n",
     len(debug.Matched), len(debug.Failed), debug.Elapsed)
 ```
 
-### Migrating from Arishem
+### Go Library — Flags
 
-One-line change:
+```go
+f, err := flags.Load(source)
+
+// Simple evaluation
+variant := f.Variant("checkout_v2", ctx)
+fmt.Println(variant.Name) // "treatment"
+
+// Decode typed payload
+var config CheckoutConfig
+variant.Decode(&config)
+
+// Full explainability
+eval := f.Explain("checkout_v2", ctx)
+
+// Hot reload from file
+f, _ = flags.Watch("flags.arb")
+
+// Serve over HTTP
+http.Handle("/flags", f.Handler())
+```
+
+### Migrating from Arishem
 
 ```go
 // Before (Arishem — 7.8GB for 10K rules)
@@ -137,7 +245,7 @@ rule, _ := arishem.NewPriorityRule(name, priority, condJSON, actJSON)
 dc, _ := arishem.DataContext(ctx, inputJSON)
 arishem.ExecuteRules([]arishem.RuleTarget{rule}, dc)
 
-// After (Arbiter — 72MB for 10K rules, 163ns/rule eval)
+// After (Arbiter — 72MB for 10K rules, ~204ns/rule eval)
 ruleset, _ := arbiter.CompileJSONRules([]arbiter.JSONRule{{name, priority, condJSON, actJSON}})
 dc, _ := arbiter.DataFromJSON(inputJSON, ruleset)
 matched, _ := arbiter.Eval(ruleset, dc)
@@ -264,12 +372,15 @@ none item in cart.items { item.banned == true }
 ## Architecture
 
 ```
-intern/       String/number constant pool — deduplicates across all rules
+intern/       Constant pool — deduplicates strings and numbers across all rules
 compiler/     CST → bytecode compiler + Arishem JSON loader
-vm/           Stack-based bytecode evaluator (zero-allocation hot path)
+vm/           Stack-based bytecode VM (fixed 256-element stack, zero-alloc eval)
+flags/        Feature flags, segments, rollouts, kill switches
+emit/         Code generators: Rego, CEL, Drools DRL
+decompile/    Bytecode → Arishem JSON
 ```
 
-The bytecode is a flat `[]byte` of fixed-width 4-byte instructions. The VM uses a 256-element fixed stack — no heap allocation during evaluation. Constant pool indices are `uint16`, giving 65K unique values per type.
+Flat `[]byte` of fixed-width 4-byte instructions: `[opcode(1B), flags(1B), arg(2B)]`. Constant pool indices are `uint16`, giving 65K unique values per type. The tree-sitter grammar gives any supporting editor syntax highlighting, folding, and structural navigation for `.arb` files.
 
 ## Examples
 

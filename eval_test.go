@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/odvcencio/arbiter/compiler"
 )
 
 func TestCompileAndEval(t *testing.T) {
@@ -98,7 +96,7 @@ func TestCompileJSONRulesAndEval(t *testing.T) {
 	condJSON := `{"OpLogic":"&&","Conditions":[{"Operator":"==","Lhs":{"VarExpr":"fromId"},"Rhs":{"Const":{"StrConst":"HuangShan"}}},{"Operator":"LIST_IN","Lhs":{"VarExpr":"customerGroupId"},"Rhs":{"ConstList":[{"StrConst":"10549"},{"StrConst":"N"}]}}]}`
 	actJSON := `{"ActionName":"approve","ParamMap":{"reason":{"Const":{"StrConst":"matched"}}}}`
 
-	rules := []compiler.JSONRuleInput{
+	rules := []JSONRule{
 		{Name: "rule1", Priority: 0, Condition: condJSON, Action: actJSON},
 	}
 
@@ -127,6 +125,57 @@ func TestCompileJSONRulesAndEval(t *testing.T) {
 	}
 	if matched[0].Action != "approve" {
 		t.Errorf("expected action approve, got %s", matched[0].Action)
+	}
+}
+
+func TestCompileJSONRulesAndEvalQuantifier(t *testing.T) {
+	condJSON := `{"ForeachOperator":"FOREACH","ForeachLogic":"||","ForeachVar":"item","Lhs":{"VarExpr":"items"},"Condition":{"Operator":">","Lhs":{"VarExpr":"item"},"Rhs":{"Const":{"NumConst":0}}}}`
+	actJSON := `{"ActionName":"approve"}`
+
+	rs, err := CompileJSONRules([]JSONRule{{
+		Name:      "rule1",
+		Priority:  0,
+		Condition: condJSON,
+		Action:    actJSON,
+	}})
+	if err != nil {
+		t.Fatalf("CompileJSONRules: %v", err)
+	}
+
+	dc, err := DataFromJSON(`{"items":[-1,2]}`, rs)
+	if err != nil {
+		t.Fatalf("DataFromJSON: %v", err)
+	}
+
+	matched, err := Eval(rs, dc)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(matched) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matched))
+	}
+}
+
+func TestEvalDebugUsesWrappedPool(t *testing.T) {
+	rs, err := Compile([]byte(`rule T { when { name == "alice" } then A {} }`))
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	dc := DataFromMap(map[string]any{"name": "bob"}, rs)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("EvalDebug should not panic, got %v", r)
+		}
+	}()
+
+	debug := EvalDebug(rs, dc)
+	if len(debug.Matched) != 0 {
+		t.Fatalf("expected 0 matches, got %d", len(debug.Matched))
+	}
+	if len(debug.Failed) != 1 {
+		t.Fatalf("expected 1 failed rule, got %d", len(debug.Failed))
 	}
 }
 

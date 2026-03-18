@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	gotreesitter "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/arbiter/intern"
+	"github.com/odvcencio/arbiter/internal/parseutil"
+	gotreesitter "github.com/odvcencio/gotreesitter"
 )
 
 // CompileCST walks a gotreesitter parse tree for an .arb source file and
@@ -98,9 +99,9 @@ func (c *cstCompiler) collectConsts(root *gotreesitter.Node) {
 func (c *cstCompiler) resolveConst(n *gotreesitter.Node) constVal {
 	switch c.nodeType(n) {
 	case "number_literal":
-		return constVal{kind: "number", num: parseFloat(c.text(n))}
+		return constVal{kind: "number", num: parseutil.ParseFloat(c.text(n))}
 	case "string_literal":
-		return constVal{kind: "string", str: stripQuotes(c.text(n))}
+		return constVal{kind: "string", str: parseutil.StripQuotes(c.text(n))}
 	case "bool_literal":
 		return constVal{kind: "bool", b: c.text(n) == "true"}
 	case "list_literal":
@@ -121,9 +122,9 @@ func (c *cstCompiler) resolveConst(n *gotreesitter.Node) constVal {
 func (c *cstCompiler) exprToPoolValue(n *gotreesitter.Node) intern.PoolValue {
 	switch c.nodeType(n) {
 	case "number_literal":
-		return intern.PoolValue{Typ: intern.TypeNumber, Num: parseFloat(c.text(n))}
+		return intern.PoolValue{Typ: intern.TypeNumber, Num: parseutil.ParseFloat(c.text(n))}
 	case "string_literal":
-		s := stripQuotes(c.text(n))
+		s := parseutil.StripQuotes(c.text(n))
 		idx := c.pool.String(s)
 		return intern.PoolValue{Typ: intern.TypeString, Str: idx}
 	case "bool_literal":
@@ -145,11 +146,35 @@ func (c *cstCompiler) compileRule(n *gotreesitter.Node, rs *CompiledRuleset) (Ru
 	}
 
 	if priNode := c.childByField(n, "priority"); priNode != nil {
-		rh.Priority = int32(parseInt(c.text(priNode)))
+		rh.Priority = int32(parseutil.ParseInt(c.text(priNode)))
+	}
+
+	if c.childByField(n, "kill_switch") != nil {
+		rh.KillSwitch = true
+	}
+
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		child := n.NamedChild(i)
+		if c.nodeType(child) != "rule_requires" {
+			continue
+		}
+		nameNode := c.childByField(child, "name")
+		if nameNode == nil {
+			continue
+		}
+		if rh.PrereqLen == 0 {
+			rh.PrereqOff = uint16(len(rs.Prereqs))
+		}
+		rs.Prereqs = append(rs.Prereqs, c.pool.String(c.text(nameNode)))
+		rh.PrereqLen++
 	}
 
 	// Condition
 	if whenNode := c.childByField(n, "condition"); whenNode != nil {
+		if segNode := c.childByField(whenNode, "segment"); segNode != nil {
+			rh.SegmentNameIdx = c.pool.String(c.text(segNode))
+			rh.HasSegment = true
+		}
 		if exprNode := c.childByField(whenNode, "expr"); exprNode != nil {
 			condOff := uint32(len(rs.Instructions))
 			var code []byte
@@ -172,6 +197,17 @@ func (c *cstCompiler) compileRule(n *gotreesitter.Node, rs *CompiledRuleset) (Ru
 		fbIdx := uint16(len(rs.Actions))
 		rs.Actions = append(rs.Actions, c.compileAction(fallbackNode, rs))
 		rh.FallbackIdx = fbIdx
+	}
+
+	if rolloutNode := c.childByField(n, "rollout"); rolloutNode != nil {
+		valueNode := c.childByField(rolloutNode, "value")
+		if valueNode != nil {
+			rollout := parseutil.ParseInt(c.text(valueNode))
+			if rollout < 0 || rollout > 100 {
+				return rh, fmt.Errorf("rule %s: rollout must be between 0 and 100", c.text(c.childByField(n, "name")))
+			}
+			rh.Rollout = uint8(rollout)
+		}
 	}
 
 	return rh, nil
@@ -302,21 +338,30 @@ func (c *cstCompiler) compileExpr(code []byte, n *gotreesitter.Node) []byte {
 	}
 }
 
-// compileAnd emits: left, right, OpAnd.
-// The VM's JumpIfFalse pops unconditionally, so true short-circuit requires
-// a plain Jump opcode (not yet available). We emit the correct non-short-circuit
-// form and can add short-circuit as an optimization later.
+// compileAnd emits left, then short-circuits past the RHS if false.
 func (c *cstCompiler) compileAnd(code []byte, n *gotreesitter.Node) []byte {
 	code = c.compileExpr(code, c.childByField(n, "left"))
+	jumpPos := len(code)
+	code = Emit(code, OpJumpIfFalse, 0, 0)
 	code = c.compileExpr(code, c.childByField(n, "right"))
-	return Emit(code, OpAnd, 0, 0)
+	code = Emit(code, OpAnd, 0, 0)
+	dist := uint16(len(code) - jumpPos - InstrSize)
+	code[jumpPos+2] = byte(dist)
+	code[jumpPos+3] = byte(dist >> 8)
+	return code
 }
 
-// compileOr emits: left, right, OpOr.
+// compileOr emits left, then short-circuits past the RHS if true.
 func (c *cstCompiler) compileOr(code []byte, n *gotreesitter.Node) []byte {
 	code = c.compileExpr(code, c.childByField(n, "left"))
+	jumpPos := len(code)
+	code = Emit(code, OpJumpIfTrue, 0, 0)
 	code = c.compileExpr(code, c.childByField(n, "right"))
-	return Emit(code, OpOr, 0, 0)
+	code = Emit(code, OpOr, 0, 0)
+	dist := uint16(len(code) - jumpPos - InstrSize)
+	code[jumpPos+2] = byte(dist)
+	code[jumpPos+3] = byte(dist >> 8)
+	return code
 }
 
 // compileComparison emits: lhs, rhs, comparison_opcode.
@@ -324,28 +369,7 @@ func (c *cstCompiler) compileComparison(code []byte, n *gotreesitter.Node) []byt
 	code = c.compileExpr(code, c.childByField(n, "left"))
 	code = c.compileExpr(code, c.childByField(n, "right"))
 
-	opStr := ""
-	if opNode := c.childByField(n, "op"); opNode != nil {
-		opStr = c.text(opNode)
-	} else {
-		leftNode := c.childByField(n, "left")
-		rightNode := c.childByField(n, "right")
-		if leftNode != nil && rightNode != nil {
-			opStr = strings.TrimSpace(string(c.src[leftNode.EndByte():rightNode.StartByte()]))
-		}
-		if opStr == "" {
-			for i := 0; i < int(n.ChildCount()); i++ {
-				ch := n.Child(i)
-				txt := c.text(ch)
-				if txt == "==" || txt == "!=" || txt == ">" || txt == "<" || txt == ">=" || txt == "<=" {
-					opStr = txt
-					break
-				}
-			}
-		}
-	}
-
-	return Emit(code, mapComparisonOpcode(strings.TrimSpace(opStr)), 0, 0)
+	return Emit(code, mapComparisonOpcode(c.comparisonOp(n)), 0, 0)
 }
 
 func mapComparisonOpcode(op string) OpCode {
@@ -506,20 +530,18 @@ func (c *cstCompiler) emitConstVal(code []byte, cv constVal) []byte {
 		return Emit(code, OpLoadBool, 0, arg)
 	case "list":
 		listIdx, listLen := c.pool.List(cv.listItems)
-		// Encode list: flags = listLen (uint8, max 255 elements), arg = listIdx.
-		// The VM reconstructs ListVal from these fields.
-		return Emit(code, OpLoadStr, uint8(listLen), listIdx)
+		return c.emitListLoad(code, listIdx, listLen)
 	default:
 		return Emit(code, OpLoadNull, 0, 0)
 	}
 }
 
 func (c *cstCompiler) compileNumber(code []byte, n *gotreesitter.Node) []byte {
-	return Emit(code, OpLoadNum, 0, c.pool.Number(parseFloat(c.text(n))))
+	return Emit(code, OpLoadNum, 0, c.pool.Number(parseutil.ParseFloat(c.text(n))))
 }
 
 func (c *cstCompiler) compileString(code []byte, n *gotreesitter.Node) []byte {
-	return Emit(code, OpLoadStr, 0, c.pool.String(stripQuotes(c.text(n))))
+	return Emit(code, OpLoadStr, 0, c.pool.String(parseutil.StripQuotes(c.text(n))))
 }
 
 func (c *cstCompiler) compileBool(code []byte, n *gotreesitter.Node) []byte {
@@ -536,53 +558,29 @@ func (c *cstCompiler) compileList(code []byte, n *gotreesitter.Node) []byte {
 		items = append(items, c.exprToPoolValue(n.NamedChild(i)))
 	}
 	listIdx, listLen := c.pool.List(items)
-	return Emit(code, OpLoadStr, uint8(listLen), listIdx)
+	return c.emitListLoad(code, listIdx, listLen)
 }
 
-// --- Helpers ---
-
-func stripQuotes(s string) string {
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
-		return s[1 : len(s)-1]
-	}
-	return s
+func (c *cstCompiler) emitListLoad(code []byte, listIdx, listLen uint16) []byte {
+	code = Emit(code, OpLoadNull, intern.TypeList, listIdx)
+	return Emit(code, OpLoadNull, 0xFF, listLen)
 }
 
-func parseInt(s string) int {
-	n := 0
-	for _, ch := range s {
-		if ch >= '0' && ch <= '9' {
-			n = n*10 + int(ch-'0')
+func (c *cstCompiler) comparisonOp(n *gotreesitter.Node) string {
+	if opNode := c.childByField(n, "op"); opNode != nil {
+		return strings.TrimSpace(c.text(opNode))
+	}
+	for i := 0; i < int(n.ChildCount()); i++ {
+		txt := strings.TrimSpace(c.text(n.Child(i)))
+		switch txt {
+		case "==", "!=", ">", "<", ">=", "<=":
+			return txt
 		}
 	}
-	return n
-}
-
-func parseFloat(s string) float64 {
-	negative := false
-	if len(s) > 0 && s[0] == '-' {
-		negative = true
-		s = s[1:]
+	leftNode := c.childByField(n, "left")
+	rightNode := c.childByField(n, "right")
+	if leftNode != nil && rightNode != nil {
+		return strings.TrimSpace(string(c.src[leftNode.EndByte():rightNode.StartByte()]))
 	}
-	var result float64
-	decimal := false
-	divisor := 1.0
-	for _, ch := range s {
-		if ch == '.' {
-			decimal = true
-			continue
-		}
-		if ch >= '0' && ch <= '9' {
-			if decimal {
-				divisor *= 10
-				result += float64(ch-'0') / divisor
-			} else {
-				result = result*10 + float64(ch-'0')
-			}
-		}
-	}
-	if negative {
-		result = -result
-	}
-	return result
+	return ""
 }

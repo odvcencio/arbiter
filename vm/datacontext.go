@@ -22,6 +22,9 @@ func NewStringPool(strs []string) *StringPool {
 }
 
 func (sp *StringPool) Get(idx uint16) string {
+	if int(idx) >= len(sp.strs) {
+		return ""
+	}
 	return sp.strs[idx]
 }
 
@@ -66,18 +69,25 @@ func (mc *mapContext) Get(key string) Value {
 	return anyToValue(val, mc.pool)
 }
 
-// resolve walks dot-separated keys through nested maps.
-func resolve(data map[string]any, key string) any {
+// resolve walks dot-separated keys through nested values.
+func resolve(current any, key string) any {
 	parts := strings.Split(key, ".")
-	var current any = data
 	for _, part := range parts {
-		m, ok := current.(map[string]any)
-		if !ok {
+		current = resolvePart(current, part)
+		if current == nil {
 			return nil
 		}
-		current = m[part]
 	}
 	return current
+}
+
+func resolvePart(current any, part string) any {
+	switch v := current.(type) {
+	case map[string]any:
+		return v[part]
+	}
+
+	return nil
 }
 
 // anyToValue converts a Go value to a VM Value.
@@ -86,17 +96,116 @@ func anyToValue(v any, pool *StringPool) Value {
 		return NullVal()
 	}
 	switch val := v.(type) {
+	case Value:
+		return val
 	case bool:
 		return BoolVal(val)
 	case float64:
 		return NumVal(val)
+	case float32:
+		return NumVal(float64(val))
+	case int:
+		return NumVal(float64(val))
+	case int8:
+		return NumVal(float64(val))
+	case int16:
+		return NumVal(float64(val))
+	case int32:
+		return NumVal(float64(val))
+	case int64:
+		return NumVal(float64(val))
+	case uint:
+		return NumVal(float64(val))
+	case uint8:
+		return NumVal(float64(val))
+	case uint16:
+		return NumVal(float64(val))
+	case uint32:
+		return NumVal(float64(val))
+	case uint64:
+		return NumVal(float64(val))
 	case string:
 		return StrVal(pool.Intern(val))
+	case json.Number:
+		if n, err := val.Float64(); err == nil {
+			return NumVal(n)
+		}
+		return NullVal()
 	case []any:
-		// Lists from JSON are converted at lookup time
-		// This is the one allocation path
-		return NullVal() // TODO: handle in Task 7 when list support is wired
+		return DynListVal(val)
+	case []string:
+		return DynListVal(stringsToAny(val))
+	case []float64:
+		return DynListVal(float64sToAny(val))
+	case []float32:
+		return DynListVal(float32sToAny(val))
+	case []int:
+		return DynListVal(intsToAny(val))
+	case []int64:
+		return DynListVal(int64sToAny(val))
+	case []bool:
+		return DynListVal(boolsToAny(val))
+	case []map[string]any:
+		return DynListVal(mapsToAny(val))
+	case map[string]any:
+		return ObjectVal(val)
 	default:
 		return NullVal()
 	}
+}
+
+func stringsToAny(src []string) []any {
+	out := make([]any, len(src))
+	for i, v := range src {
+		out[i] = v
+	}
+	return out
+}
+
+func float64sToAny(src []float64) []any {
+	out := make([]any, len(src))
+	for i, v := range src {
+		out[i] = v
+	}
+	return out
+}
+
+func float32sToAny(src []float32) []any {
+	out := make([]any, len(src))
+	for i, v := range src {
+		out[i] = v
+	}
+	return out
+}
+
+func intsToAny(src []int) []any {
+	out := make([]any, len(src))
+	for i, v := range src {
+		out[i] = v
+	}
+	return out
+}
+
+func int64sToAny(src []int64) []any {
+	out := make([]any, len(src))
+	for i, v := range src {
+		out[i] = v
+	}
+	return out
+}
+
+func boolsToAny(src []bool) []any {
+	out := make([]any, len(src))
+	for i, v := range src {
+		out[i] = v
+	}
+	return out
+}
+
+func mapsToAny(src []map[string]any) []any {
+	out := make([]any, len(src))
+	for i, v := range src {
+		out[i] = v
+	}
+	return out
 }

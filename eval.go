@@ -2,32 +2,49 @@ package arbiter
 
 import (
 	"fmt"
+	"strings"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 
 	"github.com/odvcencio/arbiter/compiler"
+	"github.com/odvcencio/arbiter/govern"
 	"github.com/odvcencio/arbiter/vm"
 )
 
 // Compile compiles .arb source into a CompiledRuleset.
 func Compile(source []byte) (*compiler.CompiledRuleset, error) {
-	lang, err := GetLanguage()
+	lang, root, err := parseSource(source)
 	if err != nil {
-		return nil, fmt.Errorf("get language: %w", err)
+		return nil, err
 	}
-
-	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.Parse(source)
-	if err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
-	}
-
-	root := tree.RootNode()
-	if root.HasError() {
-		return nil, fmt.Errorf("parse errors in arbiter source")
-	}
-
 	return compiler.CompileCST(root, source, lang)
+}
+
+// CompileResult includes a ruleset and any compiled top-level segments.
+type CompileResult struct {
+	Ruleset  *compiler.CompiledRuleset
+	Segments *govern.SegmentSet
+}
+
+// CompileFull compiles .arb source and extracts top-level segments.
+func CompileFull(source []byte) (*CompileResult, error) {
+	lang, root, err := parseSource(source)
+	if err != nil {
+		return nil, err
+	}
+
+	rs, err := compiler.CompileCST(root, source, lang)
+	if err != nil {
+		return nil, err
+	}
+	segs, err := compileSegments(root, source, lang)
+	if err != nil {
+		return nil, err
+	}
+	return &CompileResult{
+		Ruleset:  rs,
+		Segments: segs,
+	}, nil
 }
 
 // CompileJSON compiles a single Arishem JSON rule.
@@ -35,8 +52,11 @@ func CompileJSON(condJSON, actJSON string) (*compiler.CompiledRuleset, error) {
 	return compiler.CompileJSONRule("rule0", 0, condJSON, actJSON)
 }
 
+// JSONRule is the public alias for one Arishem-format JSON rule.
+type JSONRule = compiler.JSONRuleInput
+
 // CompileJSONRules compiles a batch of Arishem JSON rules.
-func CompileJSONRules(rules []compiler.JSONRuleInput) (*compiler.CompiledRuleset, error) {
+func CompileJSONRules(rules []JSONRule) (*compiler.CompiledRuleset, error) {
 	return compiler.CompileJSONBatch(rules)
 }
 
@@ -49,6 +69,9 @@ type EvalContext struct {
 
 // Eval evaluates a compiled ruleset against a data context.
 func Eval(rs *compiler.CompiledRuleset, dc vm.DataContext) ([]vm.MatchedRule, error) {
+	if rs == nil {
+		return nil, fmt.Errorf("nil ruleset")
+	}
 	// If dc was created via DataFromMap/DataFromJSON, it shares a pool.
 	// Try to extract it; otherwise create a new one.
 	if ec, ok := dc.(*evalContextWrapper); ok {
@@ -59,7 +82,24 @@ func Eval(rs *compiler.CompiledRuleset, dc vm.DataContext) ([]vm.MatchedRule, er
 
 // EvalDebug evaluates with full debug trace.
 func EvalDebug(rs *compiler.CompiledRuleset, dc vm.DataContext) vm.DebugResult {
+	if rs == nil {
+		return vm.DebugResult{Error: fmt.Errorf("nil ruleset")}
+	}
+	if ec, ok := dc.(*evalContextWrapper); ok {
+		return vm.EvalDebugWithPool(rs, ec.inner, ec.pool)
+	}
 	return vm.EvalDebug(rs, dc)
+}
+
+// EvalGoverned evaluates a compiled ruleset with rule governance enabled.
+func EvalGoverned(rs *compiler.CompiledRuleset, dc vm.DataContext, segments *govern.SegmentSet, ctx map[string]any) ([]vm.MatchedRule, *govern.Trace, error) {
+	if rs == nil {
+		return nil, &govern.Trace{}, fmt.Errorf("nil ruleset")
+	}
+	if ec, ok := dc.(*evalContextWrapper); ok {
+		return evalGovernedWithPool(rs, ec.inner, ec.pool, segments, ctx)
+	}
+	return evalGovernedWithPool(rs, dc, vm.NewStringPool(rs.Constants.Strings()), segments, ctx)
 }
 
 // evalContextWrapper wraps a DataContext with its StringPool.
@@ -88,4 +128,158 @@ func DataFromJSON(jsonStr string, rs *compiler.CompiledRuleset) (vm.DataContext,
 		return nil, err
 	}
 	return &evalContextWrapper{inner: dc, pool: pool}, nil
+}
+
+func parseSource(source []byte) (*gotreesitter.Language, *gotreesitter.Node, error) {
+	lang, err := GetLanguage()
+	if err != nil {
+		return nil, nil, fmt.Errorf("get language: %w", err)
+	}
+
+	parser := gotreesitter.NewParser(lang)
+	tree, err := parser.Parse(source)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse: %w", err)
+	}
+
+	root := tree.RootNode()
+	if root.HasError() {
+		return nil, nil, fmt.Errorf("parse errors in arbiter source")
+	}
+	return lang, root, nil
+}
+
+func compileSegments(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (*govern.SegmentSet, error) {
+	segments := govern.NewSegmentSet()
+
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		child := root.NamedChild(i)
+		if child.Type(lang) != "segment_declaration" {
+			continue
+		}
+
+		nameNode := child.ChildByFieldName("name", lang)
+		condNode := child.ChildByFieldName("condition", lang)
+		if nameNode == nil || condNode == nil {
+			return nil, fmt.Errorf("segment missing name or condition")
+		}
+
+		name := nodeText(nameNode, source)
+		condition := strings.TrimSpace(nodeText(condNode, source))
+		rs, err := compileSegmentRuleset(name, condition)
+		if err != nil {
+			return nil, fmt.Errorf("compile segment %s: %w", name, err)
+		}
+		segments.Add(&govern.CompiledSegment{
+			Name:    name,
+			Source:  condition,
+			Ruleset: rs,
+		})
+	}
+
+	return segments, nil
+}
+
+func compileSegmentRuleset(name, condition string) (*compiler.CompiledRuleset, error) {
+	synthetic := fmt.Sprintf("rule __seg_%s { when { %s } then Match {} }", name, condition)
+	return Compile([]byte(synthetic))
+}
+
+func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *vm.StringPool, segments *govern.SegmentSet, ctx map[string]any) ([]vm.MatchedRule, *govern.Trace, error) {
+	if rs == nil {
+		return nil, &govern.Trace{}, fmt.Errorf("nil ruleset")
+	}
+
+	trace := &govern.Trace{}
+	rc := govern.NewRequestCache(segments, ctx)
+	evaluator := vm.NewEvaluator(rs, sp)
+	var matched []vm.MatchedRule
+
+	for _, rule := range rs.Rules {
+		ruleName := evaluator.String(rule.NameIdx)
+
+		if govern.IsKillSwitched(rule.KillSwitch, trace) {
+			rc.RecordRuleResult(ruleName, false)
+			continue
+		}
+
+		if !rc.CheckPrerequisites(resolvePrereqs(rs, rule, evaluator), trace) {
+			rc.RecordRuleResult(ruleName, false)
+			continue
+		}
+
+		if rule.HasSegment {
+			segName := evaluator.String(rule.SegmentNameIdx)
+			segOK, detail := rc.EvalSegment(segName)
+			trace.Append("segment "+segName, segOK, detail)
+			if !segOK {
+				rc.RecordRuleResult(ruleName, false)
+				continue
+			}
+		}
+
+		condOK, err := evaluator.EvalRuleCondition(rule, dc)
+		if err != nil {
+			return nil, trace, fmt.Errorf("rule %s: %w", ruleName, err)
+		}
+		if !condOK {
+			rc.RecordRuleResult(ruleName, false)
+			if evaluator.HasFallback(rule) {
+				mr, err := evaluator.BuildFallback(rule, dc)
+				if err != nil {
+					return nil, trace, fmt.Errorf("rule %s fallback %s: %w", ruleName, mr.Action, err)
+				}
+				matched = append(matched, mr)
+			}
+			continue
+		}
+
+		if rule.Rollout > 0 {
+			userID := govern.RolloutUserID(rc.Context())
+			allowed := govern.RolloutAllows(rule.Rollout, rc.Context())
+			trace.Append(
+				fmt.Sprintf("rollout %d%%", rule.Rollout),
+				allowed,
+				fmt.Sprintf("bucket(%q) = %d, threshold = %d", userID, govern.Bucket(userID), rule.Rollout),
+			)
+			if !allowed {
+				rc.RecordRuleResult(ruleName, false)
+				continue
+			}
+		}
+
+		rc.RecordRuleResult(ruleName, true)
+		mr, err := evaluator.BuildMatch(rule, dc)
+		if err != nil {
+			return nil, trace, fmt.Errorf("rule %s action %s: %w", ruleName, mr.Action, err)
+		}
+		matched = append(matched, mr)
+	}
+
+	return matched, trace, nil
+}
+
+func resolvePrereqs(rs *compiler.CompiledRuleset, rule compiler.RuleHeader, evaluator *vm.Evaluator) []string {
+	if rule.PrereqLen == 0 {
+		return nil
+	}
+
+	start := int(rule.PrereqOff)
+	end := start + int(rule.PrereqLen)
+	if start < 0 || start >= len(rs.Prereqs) {
+		return nil
+	}
+	if end > len(rs.Prereqs) {
+		end = len(rs.Prereqs)
+	}
+
+	names := make([]string, 0, end-start)
+	for _, idx := range rs.Prereqs[start:end] {
+		names = append(names, evaluator.String(idx))
+	}
+	return names
+}
+
+func nodeText(n *gotreesitter.Node, source []byte) string {
+	return string(source[n.StartByte():n.EndByte()])
 }

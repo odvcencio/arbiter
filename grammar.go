@@ -90,15 +90,32 @@ func ArbiterGrammar() *Grammar {
 		Field("name", Sym("identifier")),
 		Optional(Seq(Str("priority"), Field("priority", Sym("number_literal")))),
 		Str("{"),
+		Optional(Field("kill_switch", Sym("kill_switch"))),
+		Repeat(Sym("rule_requires")),
 		Field("condition", Sym("when_block")),
 		Field("action", Sym("then_block")),
 		Optional(Field("fallback", Sym("otherwise_block"))),
+		Optional(Field("rollout", Sym("rule_rollout"))),
 		Str("}"),
+	))
+
+	g.Define("rule_requires", Seq(
+		Str("requires"),
+		Field("name", Sym("identifier")),
+	))
+
+	g.Define("rule_rollout", Seq(
+		Str("rollout"),
+		Field("value", Sym("number_literal")),
 	))
 
 	// when always requires braces: when { expr }
 	g.Define("when_block", Seq(
 		Str("when"),
+		Optional(Seq(
+			Str("segment"),
+			Field("segment", Sym("identifier")),
+		)),
 		Str("{"),
 		Field("expr", Sym("_expr")),
 		Str("}"),
@@ -191,8 +208,8 @@ func ArbiterGrammar() *Grammar {
 	g.Define("flag_rule", Seq(
 		Str("when"),
 		Field("condition", Choice(
-			Sym("identifier"),                          // segment reference
-			Seq(Str("{"), Sym("_expr"), Str("}")),      // inline condition
+			Sym("identifier"),                     // segment reference
+			Seq(Str("{"), Sym("_expr"), Str("}")), // inline condition
 		)),
 		Optional(Seq(Str("rollout"), Field("rollout", Sym("number_literal")))),
 		Str("then"),

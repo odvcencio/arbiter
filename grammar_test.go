@@ -342,6 +342,30 @@ flag dark_mode type boolean default false kill_switch {
 	}
 }
 
+func TestParseGovernedRule(t *testing.T) {
+	input := `
+rule EnhancedRiskCheck priority 1 {
+	kill_switch
+	requires BasicRiskCheck
+	when segment high_risk {
+		tx.amount > 5000
+	}
+	then Hold {}
+	rollout 20
+}
+`
+	result := parseArb(t, input)
+	if !strings.Contains(result, "kill_switch") {
+		t.Error("expected kill_switch node")
+	}
+	if !strings.Contains(result, "rule_requires") {
+		t.Error("expected rule_requires node")
+	}
+	if !strings.Contains(result, "rule_rollout") {
+		t.Error("expected rule_rollout node")
+	}
+}
+
 // =============================================================================
 // TRANSPILE TESTS
 // =============================================================================
@@ -363,6 +387,28 @@ func TestTranspileComparison(t *testing.T) {
 	lhs := cond["Lhs"].(map[string]any)
 	if lhs["VarExpr"] != "user.age" {
 		t.Errorf("expected VarExpr user.age, got %v", lhs["VarExpr"])
+	}
+}
+
+func TestTranspileRuleSegmentReference(t *testing.T) {
+	cond := getCondition(t, `
+segment high_risk {
+		model.risk_score > 0.8
+}
+
+rule EnhancedRiskCheck {
+	when segment high_risk {
+		tx.amount > 5000
+	}
+	then Hold {}
+}
+`)
+	if cond["OpLogic"] != "&&" {
+		t.Fatalf("expected segment + inline condition to transpile as &&, got %v", cond["OpLogic"])
+	}
+	conditions := cond["Conditions"].([]any)
+	if len(conditions) != 2 {
+		t.Fatalf("expected 2 conditions, got %d", len(conditions))
 	}
 }
 

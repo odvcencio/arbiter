@@ -47,3 +47,12 @@ func TestCompileJSONBatch(t *testing.T) {
 		t.Errorf("expected interning to deduplicate shared strings, got %d unique (want ~102)", strCount)
 	}
 }
+
+func TestCompileJSONMalformedNode(t *testing.T) {
+	condition := `{"OpLogic":"&&","Conditions":[1]}`
+	action := `{"ActionName":"Greeting"}`
+
+	if _, err := CompileJSONRule("test", 1, condition, action); err == nil {
+		t.Fatal("expected malformed JSON rule structure to return an error")
+	}
+}

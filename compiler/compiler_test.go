@@ -6,6 +6,7 @@ import (
 
 	arbiter "github.com/odvcencio/arbiter"
 	"github.com/odvcencio/arbiter/compiler"
+	"github.com/odvcencio/arbiter/intern"
 	gotreesitter "github.com/odvcencio/gotreesitter"
 )
 
@@ -148,6 +149,8 @@ rule Combined {
 	// Verify OpAnd and OpOr are present in the bytecode
 	hasAnd := false
 	hasOr := false
+	hasJumpIfFalse := false
+	hasJumpIfTrue := false
 	for _, op := range ops {
 		if op == compiler.OpAnd {
 			hasAnd = true
@@ -155,12 +158,24 @@ rule Combined {
 		if op == compiler.OpOr {
 			hasOr = true
 		}
+		if op == compiler.OpJumpIfFalse {
+			hasJumpIfFalse = true
+		}
+		if op == compiler.OpJumpIfTrue {
+			hasJumpIfTrue = true
+		}
 	}
 	if !hasAnd {
 		t.Error("expected OpAnd in bytecode for 'and' expression")
 	}
 	if !hasOr {
 		t.Error("expected OpOr in bytecode for 'or' expression")
+	}
+	if !hasJumpIfFalse {
+		t.Error("expected OpJumpIfFalse for DSL short-circuit AND")
+	}
+	if !hasJumpIfTrue {
+		t.Error("expected OpJumpIfTrue for DSL short-circuit OR")
 	}
 }
 
@@ -225,6 +240,86 @@ rule ConstCheck {
 	}
 	if !foundStr {
 		t.Error("expected 'admin' in string pool from NAME constant")
+	}
+}
+
+func TestCompileListUsesPairEncoding(t *testing.T) {
+	src := `
+rule HasRole {
+    when { role in ["admin", "mod"] }
+    then Allow {}
+}
+`
+	rs := compileSource(t, src)
+	rh := rs.Rules[0]
+	code := rs.Instructions[rh.ConditionOff : rh.ConditionOff+rh.ConditionLen]
+
+	foundListHead := false
+	foundListTail := false
+	for i := 0; i+compiler.InstrSize <= len(code); i += compiler.InstrSize {
+		var buf [compiler.InstrSize]byte
+		copy(buf[:], code[i:i+compiler.InstrSize])
+		op, flags, _ := compiler.DecodeInstr(buf)
+		if op == compiler.OpLoadNull && flags == intern.TypeList {
+			foundListHead = true
+		}
+		if op == compiler.OpLoadNull && flags == 0xFF {
+			foundListTail = true
+		}
+	}
+
+	if !foundListHead || !foundListTail {
+		t.Fatalf("expected list pair encoding, got head=%v tail=%v", foundListHead, foundListTail)
+	}
+}
+
+func TestCompileRuleGovernanceMetadata(t *testing.T) {
+	src := `
+rule EnhancedRiskCheck priority 1 {
+    kill_switch
+    requires BasicRiskCheck
+    requires prior_hold
+    when segment high_risk {
+        tx.amount > 5000
+    }
+    then Hold {}
+    rollout 20
+}
+`
+	rs := compileSource(t, src)
+	if len(rs.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(rs.Rules))
+	}
+
+	rh := rs.Rules[0]
+	if !rh.KillSwitch {
+		t.Fatal("expected KillSwitch to be set")
+	}
+	if !rh.HasSegment {
+		t.Fatal("expected HasSegment to be set")
+	}
+	if got := rs.Constants.GetString(rh.SegmentNameIdx); got != "high_risk" {
+		t.Fatalf("segment name = %q, want high_risk", got)
+	}
+	if rh.Rollout != 20 {
+		t.Fatalf("rollout = %d, want 20", rh.Rollout)
+	}
+	if rh.PrereqLen != 2 {
+		t.Fatalf("prereq len = %d, want 2", rh.PrereqLen)
+	}
+	if len(rs.Prereqs) != 2 {
+		t.Fatalf("prereq table len = %d, want 2", len(rs.Prereqs))
+	}
+
+	gotPrereqs := []string{
+		rs.Constants.GetString(rs.Prereqs[rh.PrereqOff]),
+		rs.Constants.GetString(rs.Prereqs[rh.PrereqOff+1]),
+	}
+	wantPrereqs := []string{"BasicRiskCheck", "prior_hold"}
+	for i, want := range wantPrereqs {
+		if gotPrereqs[i] != want {
+			t.Fatalf("prereq[%d] = %q, want %q", i, gotPrereqs[i], want)
+		}
 	}
 }
 
