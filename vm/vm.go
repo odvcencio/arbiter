@@ -171,7 +171,26 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 		case compiler.OpLoadBool:
 			vm.push(BoolVal(arg == 1))
 		case compiler.OpLoadNull:
-			vm.push(NullVal())
+			if flags == intern.TypeList {
+				// List load: this instruction carries listIdx in arg.
+				// The next instruction (OpLoadNull, flags=0xFF) carries listLen.
+				listIdx := arg
+				ip += compiler.InstrSize
+				if ip+compiler.InstrSize <= uint32(len(instrs)) {
+					var buf2 [compiler.InstrSize]byte
+					copy(buf2[:], instrs[ip:ip+compiler.InstrSize])
+					_, _, listLen := compiler.DecodeInstr(buf2)
+					vm.push(ListVal(listIdx, listLen))
+				} else {
+					vm.push(NullVal())
+				}
+			} else if flags == 0xFF {
+				// Part of a list load pair — should not be reached standalone.
+				// If reached, it's a no-op (the list case above consumed it).
+				vm.push(NullVal())
+			} else {
+				vm.push(NullVal())
+			}
 		case compiler.OpLoadVar:
 			key := vm.pool.GetString(arg)
 			if v, ok := vm.locals[key]; ok {
