@@ -360,7 +360,16 @@ func ArbiterGrammar() *Grammar {
 		Sym("bool_literal"),
 		Sym("list_literal"),
 		Sym("paren_expr"),
+		Sym("secret_ref"),
 		Sym("identifier"),
+	))
+
+	// secret("path/to/secret") — resolved at runtime, never stored in plaintext
+	g.Define("secret_ref", Seq(
+		Str("secret"),
+		Str("("),
+		Field("ref", Sym("string_literal")),
+		Str(")"),
 	))
 
 	g.Define("member_expr", PrecLeft(8, Seq(

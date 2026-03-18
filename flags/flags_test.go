@@ -894,3 +894,116 @@ flag config type multivariate default "off" {
 		t.Error("ShowPromo should be true")
 	}
 }
+
+func TestSecretRef(t *testing.T) {
+	src := `
+segment all {
+    true == true
+}
+
+flag api_config type multivariate default "legacy" {
+    owner: "platform"
+
+    variant "legacy" {
+        endpoint: "https://legacy.api.com",
+        api_key: secret("keys/legacy"),
+    }
+
+    variant "v2" {
+        endpoint: "https://v2.api.com",
+        api_key: secret("keys/v2"),
+    }
+
+    when all then "v2"
+}
+`
+	f, err := Load([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Variant() without resolver — shows secret reference
+	v := f.Variant("api_config", map[string]any{})
+	if v.Name != "v2" {
+		t.Errorf("expected v2, got %q", v.Name)
+	}
+	if v.Values["endpoint"] != "https://v2.api.com" {
+		t.Errorf("endpoint: got %v", v.Values["endpoint"])
+	}
+	// api_key should show the reference (no resolver configured)
+	apiKey := v.Values["api_key"]
+	if apiKey != `secret("keys/v2")` {
+		t.Errorf("api_key should show secret ref, got %v", apiKey)
+	}
+
+	// AllFlags() — secrets redacted
+	all := f.AllFlags(map[string]any{})
+	allKey := all["api_config"].Values["api_key"]
+	if allKey != "[REDACTED]" {
+		t.Errorf("AllFlags should redact secrets, got %v", allKey)
+	}
+
+	// Explain() — secrets redacted
+	eval := f.Explain("api_config", map[string]any{})
+	explainKey := eval.Variant.Values["api_key"]
+	if explainKey != "[REDACTED]" {
+		t.Errorf("Explain should redact secrets, got %v", explainKey)
+	}
+}
+
+func TestSchemaValidation(t *testing.T) {
+	// Type mismatch: max_items is number in one variant, string in another
+	src := `
+flag test type multivariate default "a" {
+    owner: "test"
+
+    variant "a" {
+        max_items: 50,
+    }
+
+    variant "b" {
+        max_items: "fifty",
+    }
+
+    when { true } then "b"
+}
+`
+	_, err := Load([]byte(src))
+	if err == nil {
+		t.Error("expected schema validation error for type mismatch")
+	} else {
+		t.Logf("Got expected error: %v", err)
+	}
+}
+
+func TestSchemaConsistent(t *testing.T) {
+	// Same types across variants — should pass
+	src := `
+flag test type multivariate default "a" {
+    owner: "test"
+
+    variant "a" {
+        count: 10,
+        label: "alpha",
+        enabled: true,
+    }
+
+    variant "b" {
+        count: 20,
+        label: "beta",
+        enabled: false,
+    }
+
+    when { true } then "b"
+}
+`
+	f, err := Load([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v := f.Variant("test", map[string]any{})
+	if v.Int("count", 0) != 20 {
+		t.Errorf("count: got %d, want 20", v.Int("count", 0))
+	}
+}

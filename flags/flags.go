@@ -42,6 +42,7 @@ func Load(source []byte) (*Flags, error) {
 	return f, nil
 }
 
+
 // LoadFile loads and compiles flags from a file path.
 func LoadFile(path string) (*Flags, error) {
 	source, err := os.ReadFile(path)
@@ -133,17 +134,26 @@ func (f *Flags) AllFlags(ctx map[string]any) map[string]ServedVariant {
 	result := make(map[string]ServedVariant, len(defs))
 	for key, def := range defs {
 		name := rc.evalVariantName(def, nil)
-		result[key] = f.resolveVariant(def, name)
+		result[key] = f.resolveVariantRedacted(def, name)
 	}
 	return result
 }
 
 // resolveVariant builds a ServedVariant from a variant name,
 // merging defaults with variant-specific values.
+// Secret references are preserved as SecretValue — resolution happens at the core eval layer.
+// For display (Explain, AllFlags HTTP), use resolveVariantRedacted.
 func (f *Flags) resolveVariant(def *FlagDef, name string) ServedVariant {
+	return buildServedVariant(def, name, false)
+}
+
+func (f *Flags) resolveVariantRedacted(def *FlagDef, name string) ServedVariant {
+	return buildServedVariant(def, name, true)
+}
+
+func buildServedVariant(def *FlagDef, name string, redact bool) ServedVariant {
 	sv := ServedVariant{Name: name}
 
-	// If no variant blocks declared, return name-only
 	if len(def.Variants) == 0 && len(def.DefaultValues) == 0 {
 		return sv
 	}
@@ -152,7 +162,7 @@ func (f *Flags) resolveVariant(def *FlagDef, name string) ServedVariant {
 	if len(def.DefaultValues) > 0 {
 		sv.Values = make(map[string]any, len(def.DefaultValues))
 		for k, v := range def.DefaultValues {
-			sv.Values[k] = v
+			sv.Values[k] = displayValue(v, redact)
 		}
 	}
 
@@ -162,11 +172,24 @@ func (f *Flags) resolveVariant(def *FlagDef, name string) ServedVariant {
 			sv.Values = make(map[string]any, len(vd.Values))
 		}
 		for k, v := range vd.Values {
-			sv.Values[k] = v
+			sv.Values[k] = displayValue(v, redact)
 		}
 	}
 
 	return sv
+}
+
+// displayValue handles SecretValue for display purposes.
+func displayValue(v any, redact bool) any {
+	sv, ok := v.(SecretValue)
+	if !ok {
+		return v
+	}
+	if redact {
+		return "[REDACTED]"
+	}
+	// Non-redacted: show the reference (not the resolved value — that's the core's job)
+	return fmt.Sprintf("secret(%q)", sv.Ref)
 }
 
 // Explain evaluates a flag and returns a rich trace of the evaluation.
@@ -196,7 +219,7 @@ func (f *Flags) Explain(flag string, ctx map[string]any) FlagEvaluation {
 
 	return FlagEvaluation{
 		Flag:      flag,
-		Variant:   f.resolveVariant(def, name),
+		Variant:   f.resolveVariantRedacted(def, name),
 		IsDefault: name == def.Default,
 		Reason:    reason,
 		Trace:     trace,
@@ -606,6 +629,31 @@ func parseFlag(node *gotreesitter.Node, source []byte, lang *gotreesitter.Langua
 		}
 	}
 
+	// Load-time schema inference: check type consistency across variants
+	if len(def.Variants) > 0 {
+		def.Schema = make(map[string]ValueType)
+
+		// Collect types from defaults
+		for k, v := range def.DefaultValues {
+			def.Schema[k] = inferType(v)
+		}
+
+		// Check each variant's values against schema
+		for vname, vd := range def.Variants {
+			for k, v := range vd.Values {
+				vt := inferType(v)
+				if existing, ok := def.Schema[k]; ok {
+					if existing != vt {
+						return nil, fmt.Errorf("flag %s: variant %q field %q has type %s, expected %s (from prior declaration)",
+							def.Key, vname, k, typeName(vt), typeName(existing))
+					}
+				} else {
+					def.Schema[k] = vt
+				}
+			}
+		}
+	}
+
 	// Load-time validation: every 'then "X"' must reference a declared variant
 	// (only if variants are declared — undeclared-name flags skip this check)
 	if len(def.Variants) > 0 {
@@ -661,8 +709,44 @@ func parseConstValue(node *gotreesitter.Node, source []byte, lang *gotreesitter.
 		return stripQuotes(text)
 	case "bool_literal":
 		return text == "true"
+	case "secret_ref":
+		refNode := node.ChildByFieldName("ref", lang)
+		if refNode != nil {
+			return SecretValue{Ref: stripQuotes(nodeText(refNode, source))}
+		}
+		return SecretValue{Ref: ""}
 	default:
 		return stripQuotes(text)
+	}
+}
+
+func inferType(v any) ValueType {
+	switch v.(type) {
+	case string:
+		return ValueString
+	case float64:
+		return ValueNumber
+	case bool:
+		return ValueBool
+	case SecretValue:
+		return ValueSecret
+	default:
+		return ValueUnknown
+	}
+}
+
+func typeName(vt ValueType) string {
+	switch vt {
+	case ValueString:
+		return "string"
+	case ValueNumber:
+		return "number"
+	case ValueBool:
+		return "bool"
+	case ValueSecret:
+		return "secret"
+	default:
+		return "unknown"
 	}
 }
 

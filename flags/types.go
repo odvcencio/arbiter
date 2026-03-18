@@ -13,6 +13,29 @@ const (
 	FlagMultivariate
 )
 
+// SecretResolver resolves secret references at runtime.
+// Implement for your KMS: Vault, AWS Secrets Manager, GCP Secret Manager, etc.
+type SecretResolver interface {
+	Resolve(ref string) (string, error)
+}
+
+// SecretValue marks a value as a secret reference, not a literal.
+// The Ref is stored in the .arb file. The actual value is resolved at serve time.
+type SecretValue struct {
+	Ref string // e.g., "stripe/v2/api_key"
+}
+
+// ValueType tracks the declared type of a variant payload field.
+type ValueType int
+
+const (
+	ValueUnknown ValueType = iota
+	ValueString
+	ValueNumber
+	ValueBool
+	ValueSecret
+)
+
 // FlagDef is a parsed flag definition from .arb source.
 type FlagDef struct {
 	Key           string
@@ -23,13 +46,14 @@ type FlagDef struct {
 	Rules         []FlagRule              // ordered targeting rules
 	Variants      map[string]*VariantDef  // declared variant definitions (nil if undeclared)
 	DefaultValues map[string]any          // defaults { ... } block — inherited by all variants
+	Schema        map[string]ValueType    // inferred field types (validated at load time)
 	Metadata      FlagMetadata
 }
 
 // VariantDef declares a variant's payload schema and values.
 type VariantDef struct {
 	Name   string
-	Values map[string]any // declared payload values
+	Values map[string]any // declared payload values (SecretValue for secret refs)
 }
 
 // FlagRule is one targeting rule within a flag.
