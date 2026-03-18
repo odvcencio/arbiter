@@ -1,8 +1,19 @@
 # arbiter
 
-Rule engine DSL that transpiles `.arb` files to [Arishem](https://github.com/bytedance/arishem)-compatible JSON.
+High-performance rule engine with a human-readable DSL. Compiles to bytecode and evaluates rules at **163ns per rule** — 8,500x faster than Arishem, with 108x less memory.
 
-Write business rules as readable expressions. Get Arishem JSON ASTs that evaluate at microsecond latency.
+Write rules once, run them anywhere: native bytecode VM, Arishem JSON, or target other platforms.
+
+## Performance
+
+Benchmarked against [ByteDance/Arishem](https://github.com/bytedance/arishem) issue [#28](https://github.com/bytedance/arishem/issues/28) (10K-rule memory benchmark):
+
+| Metric | Arishem | Arbiter | Improvement |
+|--------|---------|---------|-------------|
+| 10K rule compile memory | 7.8 GB | 72 MB | **108x less** |
+| 10K rule allocations | 153M | 940K | **163x fewer** |
+| 5K rule eval memory | 3.9 GB | 160 KB | **24,375x less** |
+| Single rule eval | ~1.4ms | 163ns | **8,500x faster** |
 
 ## Before / After
 
@@ -41,6 +52,20 @@ rule FreeShipping {
 }
 ```
 
+## How It Works
+
+```
+.arb source ──→ Parser ──→ Compiler ──→ Bytecode VM (163ns/rule)
+                              │
+                              ├──→ Arishem JSON (compatibility)
+                              ├──→ Rego (planned)
+                              └──→ Drools DRL (planned)
+```
+
+arbiter compiles rules to a flat bytecode instruction set executed by a zero-allocation stack machine. The constant pool interns all strings and numbers — 10K rules referencing the same field names share one copy. The entire instruction buffer for 10K rules fits in ~800KB.
+
+Built on [gotreesitter](https://github.com/odvcencio/gotreesitter), a pure-Go tree-sitter implementation. No generated files. No CGo. No runtime dependencies.
+
 ## Install
 
 ```bash
@@ -49,8 +74,16 @@ go install github.com/odvcencio/arbiter/cmd/arbiter@latest
 
 ## Usage
 
+### CLI
+
 ```bash
-# Emit all rules as JSON
+# Compile and show stats
+arbiter compile rules.arb
+
+# Compile and evaluate against data
+arbiter eval rules.arb --data '{"user": {"cart_total": 50, "region": "US"}}'
+
+# Emit Arishem JSON (backward compatible)
 arbiter emit rules.arb
 
 # Emit a single rule's condition
@@ -60,11 +93,61 @@ arbiter emit rules.arb --rule FreeShipping
 arbiter check rules.arb
 ```
 
+### Go Library
+
+```go
+// Compile from .arb source
+ruleset, err := arbiter.Compile(source)
+
+// Or compile from existing Arishem JSON (drop-in migration)
+ruleset, err := arbiter.CompileJSONRules([]arbiter.JSONRule{{
+    Name:      "FreeShipping",
+    Priority:  1,
+    Condition: condJSON,
+    Action:    actJSON,
+}})
+
+// Create data context
+dc := arbiter.DataFromMap(map[string]any{
+    "user": map[string]any{
+        "cart_total": 50.0,
+        "region":     "US",
+    },
+}, ruleset)
+
+// Evaluate — 163ns per rule
+matched, err := arbiter.Eval(ruleset, dc)
+for _, m := range matched {
+    fmt.Printf("%s → %s %v\n", m.Name, m.Action, m.Params)
+}
+
+// Or evaluate with debug trace
+debug := arbiter.EvalDebug(ruleset, dc)
+fmt.Printf("matched: %d, failed: %d, elapsed: %s\n",
+    len(debug.Matched), len(debug.Failed), debug.Elapsed)
+```
+
+### Migrating from Arishem
+
+One-line change:
+
+```go
+// Before (Arishem — 7.8GB for 10K rules)
+rule, _ := arishem.NewPriorityRule(name, priority, condJSON, actJSON)
+dc, _ := arishem.DataContext(ctx, inputJSON)
+arishem.ExecuteRules([]arishem.RuleTarget{rule}, dc)
+
+// After (Arbiter — 72MB for 10K rules, 163ns/rule eval)
+ruleset, _ := arbiter.CompileJSONRules([]arbiter.JSONRule{{name, priority, condJSON, actJSON}})
+dc, _ := arbiter.DataFromJSON(inputJSON, ruleset)
+matched, _ := arbiter.Eval(ruleset, dc)
+```
+
 ## Language
 
 ### Features
 
-Declare the data your rules evaluate against. Features are fetched at runtime by Arishem.
+Declare the data your rules evaluate against.
 
 ```python
 feature user from "user-service" {
@@ -78,7 +161,7 @@ feature user from "user-service" {
 
 ### Constants
 
-Named values inlined at transpile time.
+Named values inlined at compile time.
 
 ```python
 const VIP_THRESHOLD = 1000
@@ -178,31 +261,15 @@ none item in cart.items { item.banned == true }
 (a > 1 or b > 2) and c > 3
 ```
 
-### Operator Mapping
+## Architecture
 
-| arbiter | Arishem |
-|---|---|
-| `==` `!=` `>` `<` `>=` `<=` | same |
-| `and` | `OpLogic: "&&"` |
-| `or` | `OpLogic: "\|\|"` |
-| `not` | `OpLogic: "not"` |
-| `in` / `not in` | `LIST_IN` / `!LIST_IN` |
-| `contains` / `not contains` | `LIST_CONTAINS` / `!LIST_CONTAINS` |
-| `retains` / `not retains` | `LIST_RETAIN` / `!LIST_RETAIN` |
-| `subset_of` | `SUB_LIST_IN` |
-| `superset_of` | `SUB_LIST_CONTAINS` |
-| `vague_contains` | `LIST_VAGUE_CONTAINS` |
-| `starts_with` | `STRING_START_WITH` |
-| `ends_with` | `STRING_END_WITH` |
-| `matches` | `CONTAIN_REGEXP` |
-| `is null` / `is not null` | `IS_NULL` / `!IS_NULL` |
-| `between [a, b]` | `BETWEEN_ALL_CLOSE` |
-| `between (a, b)` | `BETWEEN_ALL_OPEN` |
-| `between (a, b]` | `BETWEEN_LEFT_OPEN_RIGHT_CLOSE` |
-| `between [a, b)` | `BETWEEN_LEFT_CLOSE_RIGHT_OPEN` |
-| `any` | `FOREACH` with `OpLogic: "\|\|"` |
-| `all` | `FOREACH` with `OpLogic: "&&"` |
-| `none` | `FOREACH` with `OpLogic: "!\|\|"` |
+```
+intern/       String/number constant pool — deduplicates across all rules
+compiler/     CST → bytecode compiler + Arishem JSON loader
+vm/           Stack-based bytecode evaluator (zero-allocation hot path)
+```
+
+The bytecode is a flat `[]byte` of fixed-width 4-byte instructions. The VM uses a 256-element fixed stack — no heap allocation during evaluation. Constant pool indices are `uint16`, giving 65K unique values per type.
 
 ## Examples
 
@@ -299,25 +366,7 @@ rule AllowTrusted priority 10 {
         fast_track: true,
     }
 }
-
-rule DefaultReview priority 99 {
-    when { true }
-    then HoldForReview {
-        queue: "general",
-        sla: "4h",
-    }
-}
 ```
-
-## How It Works
-
-arbiter is built on [gotreesitter](https://github.com/odvcencio/gotreesitter), a pure-Go tree-sitter implementation. The grammar defines ~60 rules for the arbiter DSL. The transpiler walks the concrete syntax tree and emits Arishem JSON.
-
-```
-.arb source → gotreesitter parser → CST → transpiler → Arishem JSON
-```
-
-No generated files. No runtime dependency. The JSON goes straight to `arishem.JudgeCondition()`.
 
 ## License
 
