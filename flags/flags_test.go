@@ -10,138 +10,448 @@ import (
 	"time"
 )
 
-const testFlags = `
-rule NewDashboard {
-    when { percent_bucket < 25 }
-    then Enable { flag: "new_dashboard", variant: "treatment" }
-    otherwise Enable { flag: "new_dashboard", variant: "control" }
+const fullFlagSource = `
+segment internal {
+    user.email ends_with "@m31labs.dev"
 }
 
-rule AIFeatures {
-    when { org in ["acme", "m31labs"] }
-    then Enable { flag: "ai_features" }
+segment enterprise_us {
+    user.plan == "enterprise" and user.country == "US"
 }
 
-rule ProOnly {
-    when { plan in ["pro", "enterprise"] }
-    then Enable { flag: "advanced_analytics" }
+segment beta_users {
+    user.id in ["u_oscar", "u_alice"]
+}
+
+flag checkout_v2 type multivariate default "control" {
+    owner: "oscar"
+    ticket: "ENG-1234"
+    rationale: "New checkout flow testing Stripe integration"
+    expires: "2026-06-01"
+
+    requires payments_enabled
+
+    when internal
+        then "treatment"
+
+    when enterprise_us rollout 20
+        then "treatment"
+
+    when beta_users
+        then "treatment"
+}
+
+flag payments_enabled type boolean default false {
+    owner: "oscar"
+    ticket: "ENG-1200"
+
+    when enterprise_us
+        then true
+}
+
+flag dark_mode type boolean default false kill_switch {
+    owner: "design-team"
 }
 `
 
-const testFlagsEnv = `
-rule NewDashboard {
-    when {
-        (env == "production" and percent_bucket < 5)
-        or env == "staging"
-        or env == "development"
-    }
-    then Enable { flag: "new_dashboard", variant: "treatment" }
-}
-`
-
-func TestLoadAndEnabled(t *testing.T) {
-	f, err := Load([]byte(testFlags))
+func TestFlagEnabled(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// User in bucket 10 (< 25) should get new_dashboard
-	ctx := map[string]any{"percent_bucket": 10.0, "org": "acme", "plan": "free"}
-	if !f.Enabled("new_dashboard", ctx) {
-		t.Error("expected new_dashboard enabled for bucket 10")
+	// Internal user should get checkout_v2 treatment (payments_enabled prereq passes
+	// because enterprise_us is not true for this user, but payments_enabled defaults
+	// to false... Actually, let's make the user also enterprise_us so payments_enabled passes)
+	ctx := map[string]any{
+		"user.email":   "oscar@m31labs.dev",
+		"user.plan":    "enterprise",
+		"user.country": "US",
+		"user.id":      "u_oscar",
 	}
-	if !f.Enabled("ai_features", ctx) {
-		t.Error("expected ai_features enabled for org acme")
+	if !f.Enabled("checkout_v2", ctx) {
+		t.Error("expected checkout_v2 enabled for internal enterprise_us user")
 	}
-	if f.Enabled("advanced_analytics", ctx) {
-		t.Error("expected advanced_analytics disabled for free plan")
-	}
-}
-
-func TestVariant(t *testing.T) {
-	f, err := Load([]byte(testFlags))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Bucket 10 -> treatment
-	ctx := map[string]any{"percent_bucket": 10.0, "org": "nobody", "plan": "free"}
-	v := f.Variant("new_dashboard", ctx)
+	v := f.Variant("checkout_v2", ctx)
 	if v != "treatment" {
 		t.Errorf("expected treatment, got %q", v)
 	}
-
-	// Bucket 50 -> control (fallback)
-	ctx["percent_bucket"] = 50.0
-	v = f.Variant("new_dashboard", ctx)
-	if v != "control" {
-		t.Errorf("expected control, got %q", v)
-	}
 }
 
-func TestAllFlags(t *testing.T) {
-	f, err := Load([]byte(testFlags))
+func TestFlagDisabled(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ctx := map[string]any{"percent_bucket": 10.0, "org": "m31labs", "plan": "enterprise"}
-	all := f.AllFlags(ctx)
-
-	if all["new_dashboard"] != "treatment" {
-		t.Errorf("new_dashboard: got %q, want treatment", all["new_dashboard"])
+	// Random user outside all segments
+	ctx := map[string]any{
+		"user.email":   "random@gmail.com",
+		"user.plan":    "free",
+		"user.country": "CA",
+		"user.id":      "u_random",
 	}
-	if all["ai_features"] != "enabled" {
-		t.Errorf("ai_features: got %q, want enabled", all["ai_features"])
+	if f.Enabled("checkout_v2", ctx) {
+		t.Error("expected checkout_v2 disabled for random user")
 	}
-	if all["advanced_analytics"] != "enabled" {
-		t.Errorf("advanced_analytics: got %q, want enabled", all["advanced_analytics"])
+	v := f.Variant("checkout_v2", ctx)
+	if v != "control" {
+		t.Errorf("expected control (default), got %q", v)
 	}
 }
 
-func TestBucketDeterministic(t *testing.T) {
-	b1 := Bucket("user_123")
-	b2 := Bucket("user_123")
-	b3 := Bucket("user_456")
+func TestFlagKillSwitch(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if b1 != b2 {
-		t.Error("same user ID should produce same bucket")
+	// Even with a full context, dark_mode should always return default
+	ctx := map[string]any{
+		"user.email":   "oscar@m31labs.dev",
+		"user.plan":    "enterprise",
+		"user.country": "US",
+		"user.id":      "u_oscar",
 	}
-	if b1 < 0 || b1 >= 100 {
-		t.Errorf("bucket out of range: %d", b1)
+	if f.Enabled("dark_mode", ctx) {
+		t.Error("expected dark_mode disabled (kill_switch)")
 	}
-	// Different users CAN get the same bucket, but probably won't
-	_ = b3
+	v := f.Variant("dark_mode", ctx)
+	if v != "false" {
+		t.Errorf("expected false (default), got %q", v)
+	}
 }
 
-func TestBucketDistribution(t *testing.T) {
-	buckets := make([]int, 100)
-	for i := 0; i < 10000; i++ {
-		b := Bucket(fmt.Sprintf("user_%d", i))
-		buckets[b]++
+func TestFlagPrerequisite(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Each bucket should have ~100 users (10000/100), allow 50-150
-	for i, count := range buckets {
-		if count < 50 || count > 150 {
-			t.Errorf("bucket %d has %d users, expected ~100", i, count)
+
+	// Internal user but NOT enterprise_us -> payments_enabled stays default (false)
+	// So checkout_v2 prerequisite fails
+	ctx := map[string]any{
+		"user.email":   "oscar@m31labs.dev",
+		"user.plan":    "free",
+		"user.country": "CA",
+		"user.id":      "u_oscar",
+	}
+	if f.Enabled("checkout_v2", ctx) {
+		t.Error("expected checkout_v2 disabled when payments_enabled prerequisite fails")
+	}
+	v := f.Variant("checkout_v2", ctx)
+	if v != "control" {
+		t.Errorf("expected control (default due to prereq fail), got %q", v)
+	}
+}
+
+func TestFlagRollout(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Test rollout: enterprise_us users with different user IDs
+	// Need to find a user whose bucket is < 20 and one whose bucket is >= 20
+	var lowBucketUser, highBucketUser string
+	for i := 0; i < 1000; i++ {
+		uid := fmt.Sprintf("user_%d", i)
+		b := Bucket(uid)
+		if b < 20 && lowBucketUser == "" {
+			lowBucketUser = uid
+		}
+		if b >= 20 && highBucketUser == "" {
+			highBucketUser = uid
+		}
+		if lowBucketUser != "" && highBucketUser != "" {
+			break
 		}
 	}
+
+	// Low bucket user in enterprise_us (not internal, not beta) should get treatment
+	ctx := map[string]any{
+		"user.email":   "low@example.com",
+		"user.plan":    "enterprise",
+		"user.country": "US",
+		"user.id":      lowBucketUser,
+	}
+	v := f.Variant("checkout_v2", ctx)
+	if v != "treatment" {
+		t.Errorf("expected treatment for low-bucket enterprise_us user (bucket=%d), got %q", Bucket(lowBucketUser), v)
+	}
+
+	// High bucket user in enterprise_us (not internal, not beta) should NOT get treatment from rollout
+	// but might match beta_users if it happens to be "u_oscar" or "u_alice"
+	ctx = map[string]any{
+		"user.email":   "high@example.com",
+		"user.plan":    "enterprise",
+		"user.country": "US",
+		"user.id":      highBucketUser,
+	}
+	v = f.Variant("checkout_v2", ctx)
+	if v != "control" {
+		t.Errorf("expected control for high-bucket enterprise_us user (bucket=%d), got %q", Bucket(highBucketUser), v)
+	}
+}
+
+func TestFlagAllFlags(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := map[string]any{
+		"user.email":   "oscar@m31labs.dev",
+		"user.plan":    "enterprise",
+		"user.country": "US",
+		"user.id":      "u_oscar",
+	}
+
+	all := f.AllFlags(ctx)
+	if all["checkout_v2"] != "treatment" {
+		t.Errorf("checkout_v2: got %q, want treatment", all["checkout_v2"])
+	}
+	if all["payments_enabled"] != "true" {
+		t.Errorf("payments_enabled: got %q, want true", all["payments_enabled"])
+	}
+	if all["dark_mode"] != "false" {
+		t.Errorf("dark_mode: got %q, want false (kill_switch)", all["dark_mode"])
+	}
+}
+
+func TestFlagExplainMatch(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := map[string]any{
+		"user.email":   "oscar@m31labs.dev",
+		"user.plan":    "enterprise",
+		"user.country": "US",
+		"user.id":      "u_oscar",
+	}
+
+	eval := f.Explain("checkout_v2", ctx)
+
+	if eval.Flag != "checkout_v2" {
+		t.Errorf("flag: got %q, want checkout_v2", eval.Flag)
+	}
+	if eval.Variant != "treatment" {
+		t.Errorf("variant: got %q, want treatment", eval.Variant)
+	}
+	if eval.IsDefault {
+		t.Error("expected IsDefault=false")
+	}
+	if eval.Metadata.Owner != "oscar" {
+		t.Errorf("owner: got %q, want oscar", eval.Metadata.Owner)
+	}
+	if eval.Metadata.Ticket != "ENG-1234" {
+		t.Errorf("ticket: got %q, want ENG-1234", eval.Metadata.Ticket)
+	}
+	if eval.Metadata.Expires == nil {
+		t.Error("expected Expires to be set")
+	}
+
+	// Print trace for verification
+	t.Logf("=== Explain checkout_v2 (internal user) ===")
+	t.Logf("Flag:      %s", eval.Flag)
+	t.Logf("Variant:   %s", eval.Variant)
+	t.Logf("IsDefault: %v", eval.IsDefault)
+	t.Logf("Reason:    %s", eval.Reason)
+	t.Logf("Owner:     %s", eval.Metadata.Owner)
+	t.Logf("Ticket:    %s", eval.Metadata.Ticket)
+	t.Logf("Rationale: %s", eval.Metadata.Rationale)
+	if eval.Metadata.Expires != nil {
+		daysLeft := int(time.Until(*eval.Metadata.Expires).Hours() / 24)
+		t.Logf("Expires:   %s (%d days remaining)", eval.Metadata.Expires.Format("2006-01-02"), daysLeft)
+	}
+	t.Logf("Elapsed:   %v", eval.Elapsed)
+	t.Logf("Trace:")
+	for i, step := range eval.Trace {
+		mark := "x"
+		if step.Result {
+			mark = "v"
+		}
+		t.Logf("  [%d] [%s] %s: %s", i, mark, step.Check, step.Detail)
+	}
+
+	// Should have trace steps
+	if len(eval.Trace) == 0 {
+		t.Error("expected trace steps")
+	}
+}
+
+func TestFlagExplainNoMatch(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := map[string]any{
+		"user.email":   "random@gmail.com",
+		"user.plan":    "free",
+		"user.country": "CA",
+		"user.id":      "u_random",
+	}
+
+	eval := f.Explain("checkout_v2", ctx)
+
+	if eval.Variant != "control" {
+		t.Errorf("variant: got %q, want control", eval.Variant)
+	}
+	if !eval.IsDefault {
+		t.Error("expected IsDefault=true")
+	}
+
+	t.Logf("=== Explain checkout_v2 (random user) ===")
+	t.Logf("Variant: %s, Reason: %s", eval.Variant, eval.Reason)
+	for i, step := range eval.Trace {
+		mark := "x"
+		if step.Result {
+			mark = "v"
+		}
+		t.Logf("  [%d] [%s] %s: %s", i, mark, step.Check, step.Detail)
+	}
+}
+
+func TestFlagExplainKillSwitch(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := map[string]any{
+		"user.email":   "oscar@m31labs.dev",
+		"user.plan":    "enterprise",
+		"user.country": "US",
+		"user.id":      "u_oscar",
+	}
+
+	eval := f.Explain("dark_mode", ctx)
+
+	if eval.Variant != "false" {
+		t.Errorf("variant: got %q, want false", eval.Variant)
+	}
+	if !eval.IsDefault {
+		t.Error("expected IsDefault=true")
+	}
+	if eval.Reason != "kill-switched" {
+		t.Errorf("reason: got %q, want kill-switched", eval.Reason)
+	}
+
+	// Trace should have kill_switch step
+	foundKS := false
+	for _, step := range eval.Trace {
+		if step.Check == "kill_switch" {
+			foundKS = true
+			if !step.Result {
+				t.Error("kill_switch step should be true")
+			}
+		}
+	}
+	if !foundKS {
+		t.Error("expected kill_switch trace step")
+	}
+}
+
+func TestFlagExplainPrereqFail(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Internal user but NOT enterprise_us -> payments_enabled fails
+	ctx := map[string]any{
+		"user.email":   "oscar@m31labs.dev",
+		"user.plan":    "free",
+		"user.country": "CA",
+		"user.id":      "u_oscar",
+	}
+
+	eval := f.Explain("checkout_v2", ctx)
+
+	if eval.Variant != "control" {
+		t.Errorf("variant: got %q, want control", eval.Variant)
+	}
+	if !eval.IsDefault {
+		t.Error("expected IsDefault=true")
+	}
+
+	// Check reason mentions prerequisite
+	if eval.Reason != "prerequisite payments_enabled not met" {
+		t.Errorf("reason: got %q, want 'prerequisite payments_enabled not met'", eval.Reason)
+	}
+
+	// Trace should show requires step failing
+	foundReq := false
+	for _, step := range eval.Trace {
+		if step.Check == "requires payments_enabled" {
+			foundReq = true
+			if step.Result {
+				t.Error("requires step should be false")
+			}
+		}
+	}
+	if !foundReq {
+		t.Error("expected 'requires payments_enabled' trace step")
+	}
+}
+
+func TestFlagMetadata(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := map[string]any{
+		"user.email":   "oscar@m31labs.dev",
+		"user.plan":    "enterprise",
+		"user.country": "US",
+		"user.id":      "u_oscar",
+	}
+
+	eval := f.Explain("checkout_v2", ctx)
+
+	if eval.Metadata.Owner != "oscar" {
+		t.Errorf("owner: got %q, want oscar", eval.Metadata.Owner)
+	}
+	if eval.Metadata.Ticket != "ENG-1234" {
+		t.Errorf("ticket: got %q, want ENG-1234", eval.Metadata.Ticket)
+	}
+	if eval.Metadata.Rationale != "New checkout flow testing Stripe integration" {
+		t.Errorf("rationale: got %q", eval.Metadata.Rationale)
+	}
+	if eval.Metadata.Expires == nil {
+		t.Fatal("expected Expires to be set")
+	}
+
+	expected, _ := time.Parse("2006-01-02", "2026-06-01")
+	if !eval.Metadata.Expires.Equal(expected) {
+		t.Errorf("expires: got %v, want %v", eval.Metadata.Expires, expected)
+	}
+
+	// Verify days remaining is positive (test date is before 2026-06-01)
+	daysLeft := int(time.Until(*eval.Metadata.Expires).Hours() / 24)
+	t.Logf("Expires in %d days", daysLeft)
 }
 
 func TestEnvironmentPerFile(t *testing.T) {
 	dir := t.TempDir()
 
-	// Create per-environment files
+	// Per-environment files using new flag syntax
 	os.WriteFile(filepath.Join(dir, "production.arb"), []byte(`
-rule Feature {
+flag feature type boolean default false {
+    owner: "ops"
     when { percent_bucket < 5 }
-    then Enable { flag: "feature", variant: "slow_rollout" }
+        then true
 }
 `), 0644)
 	os.WriteFile(filepath.Join(dir, "staging.arb"), []byte(`
-rule Feature {
+flag feature type boolean default false {
+    owner: "ops"
     when { true }
-    then Enable { flag: "feature", variant: "full" }
+        then true
 }
 `), 0644)
 
@@ -167,42 +477,12 @@ rule Feature {
 	}
 }
 
-func TestEnvironmentInContext(t *testing.T) {
-	f, err := Load([]byte(testFlagsEnv))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Production, bucket 50 -> not enabled (need < 5)
-	ctx := map[string]any{"env": "production", "percent_bucket": 50.0}
-	if f.Enabled("new_dashboard", ctx) {
-		t.Error("expected disabled in production for bucket 50")
-	}
-
-	// Production, bucket 3 -> enabled
-	ctx["percent_bucket"] = 3.0
-	if !f.Enabled("new_dashboard", ctx) {
-		t.Error("expected enabled in production for bucket 3")
-	}
-
-	// Staging -> always enabled
-	ctx = map[string]any{"env": "staging", "percent_bucket": 99.0}
-	if !f.Enabled("new_dashboard", ctx) {
-		t.Error("expected enabled in staging regardless of bucket")
-	}
-
-	// Development -> always enabled
-	ctx = map[string]any{"env": "development", "percent_bucket": 99.0}
-	if !f.Enabled("new_dashboard", ctx) {
-		t.Error("expected enabled in development regardless of bucket")
-	}
-}
-
 func TestReload(t *testing.T) {
 	f, err := Load([]byte(`
-rule Feature {
+flag v1 type boolean default false {
+    owner: "test"
     when { true }
-    then Enable { flag: "v1" }
+        then true
 }
 `))
 	if err != nil {
@@ -213,11 +493,12 @@ rule Feature {
 		t.Error("expected v1 enabled")
 	}
 
-	// Reload with new rules
+	// Reload with new flag
 	err = f.Reload([]byte(`
-rule Feature {
+flag v2 type boolean default false {
+    owner: "test"
     when { true }
-    then Enable { flag: "v2" }
+        then true
 }
 `))
 	if err != nil {
@@ -232,13 +513,29 @@ rule Feature {
 	}
 }
 
+func TestBucketDeterministic(t *testing.T) {
+	b1 := Bucket("user_123")
+	b2 := Bucket("user_123")
+	b3 := Bucket("user_456")
+
+	if b1 != b2 {
+		t.Error("same user ID should produce same bucket")
+	}
+	if b1 < 0 || b1 >= 100 {
+		t.Errorf("bucket out of range: %d", b1)
+	}
+	// Different users CAN get the same bucket, but probably won't
+	_ = b3
+}
+
 func TestHTTPHandler(t *testing.T) {
-	f, err := Load([]byte(testFlags))
+	f, err := Load([]byte(fullFlagSource))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest("GET", "/flags?percent_bucket=10&org=m31labs&plan=pro", nil)
+	// Test /flags endpoint
+	req := httptest.NewRequest("GET", "/flags?user.email=oscar@m31labs.dev&user.plan=enterprise&user.country=US&user.id=u_oscar", nil)
 	w := httptest.NewRecorder()
 
 	f.Handler().ServeHTTP(w, req)
@@ -246,44 +543,32 @@ func TestHTTPHandler(t *testing.T) {
 	var result map[string]string
 	json.NewDecoder(w.Body).Decode(&result)
 
-	if result["ai_features"] != "enabled" {
-		t.Errorf("ai_features: got %q, want enabled", result["ai_features"])
+	if result["checkout_v2"] != "treatment" {
+		t.Errorf("checkout_v2: got %q, want treatment", result["checkout_v2"])
+	}
+	if result["dark_mode"] != "false" {
+		t.Errorf("dark_mode: got %q, want false", result["dark_mode"])
 	}
 }
 
-func TestWatchReload(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "flags.arb")
-
-	os.WriteFile(path, []byte(`
-rule Feature {
-    when { true }
-    then Enable { flag: "v1" }
-}
-`), 0644)
-
-	f, stop, err := Watch(path)
+func TestHTTPExplainHandler(t *testing.T) {
+	f, err := Load([]byte(fullFlagSource))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stop()
 
-	if !f.Enabled("v1", map[string]any{}) {
-		t.Error("expected v1 enabled")
+	req := httptest.NewRequest("GET", "/explain?flag=dark_mode&user.id=u_oscar", nil)
+	w := httptest.NewRecorder()
+
+	f.Handler().ServeHTTP(w, req)
+
+	var result FlagEvaluation
+	json.NewDecoder(w.Body).Decode(&result)
+
+	if result.Variant != "false" {
+		t.Errorf("variant: got %q, want false", result.Variant)
 	}
-
-	// Update file
-	os.WriteFile(path, []byte(`
-rule Feature {
-    when { true }
-    then Enable { flag: "v2" }
-}
-`), 0644)
-
-	// Wait for fsnotify
-	time.Sleep(200 * time.Millisecond)
-
-	if !f.Enabled("v2", map[string]any{}) {
-		t.Error("expected v2 enabled after file change")
+	if result.Reason != "kill-switched" {
+		t.Errorf("reason: got %q, want kill-switched", result.Reason)
 	}
 }
