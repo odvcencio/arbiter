@@ -91,16 +91,28 @@ func (f *Flags) Enabled(flag string, ctx map[string]any) bool {
 		return false
 	}
 	rc := newRequestCache(f, ctx)
-	v := rc.evalVariant(def, nil)
+	v := rc.evalVariantName(def, nil)
 	if def.Type == FlagBoolean {
 		return v == "true"
 	}
 	return v != def.Default
 }
 
-// Variant returns the variant string for a flag.
-// Returns the default if no rules match, flag is kill-switched, or prerequisites fail.
-func (f *Flags) Variant(flag string, ctx map[string]any) string {
+// Variant returns the served variant with its payload for a flag.
+func (f *Flags) Variant(flag string, ctx map[string]any) ServedVariant {
+	f.mu.RLock()
+	def, ok := f.defs[flag]
+	f.mu.RUnlock()
+	if !ok {
+		return ServedVariant{}
+	}
+	rc := newRequestCache(f, ctx)
+	name := rc.evalVariantName(def, nil)
+	return f.resolveVariant(def, name)
+}
+
+// VariantName returns just the variant name string (for backward compat / simple use).
+func (f *Flags) VariantName(flag string, ctx map[string]any) string {
 	f.mu.RLock()
 	def, ok := f.defs[flag]
 	f.mu.RUnlock()
@@ -108,21 +120,53 @@ func (f *Flags) Variant(flag string, ctx map[string]any) string {
 		return ""
 	}
 	rc := newRequestCache(f, ctx)
-	return rc.evalVariant(def, nil)
+	return rc.evalVariantName(def, nil)
 }
 
 // AllFlags returns all flag variants for the given context.
-func (f *Flags) AllFlags(ctx map[string]any) map[string]string {
+func (f *Flags) AllFlags(ctx map[string]any) map[string]ServedVariant {
 	f.mu.RLock()
 	defs := f.defs
 	f.mu.RUnlock()
 
 	rc := newRequestCache(f, ctx)
-	result := make(map[string]string, len(defs))
+	result := make(map[string]ServedVariant, len(defs))
 	for key, def := range defs {
-		result[key] = rc.evalVariant(def, nil)
+		name := rc.evalVariantName(def, nil)
+		result[key] = f.resolveVariant(def, name)
 	}
 	return result
+}
+
+// resolveVariant builds a ServedVariant from a variant name,
+// merging defaults with variant-specific values.
+func (f *Flags) resolveVariant(def *FlagDef, name string) ServedVariant {
+	sv := ServedVariant{Name: name}
+
+	// If no variant blocks declared, return name-only
+	if len(def.Variants) == 0 && len(def.DefaultValues) == 0 {
+		return sv
+	}
+
+	// Start with defaults
+	if len(def.DefaultValues) > 0 {
+		sv.Values = make(map[string]any, len(def.DefaultValues))
+		for k, v := range def.DefaultValues {
+			sv.Values[k] = v
+		}
+	}
+
+	// Overlay variant-specific values
+	if vd, ok := def.Variants[name]; ok {
+		if sv.Values == nil {
+			sv.Values = make(map[string]any, len(vd.Values))
+		}
+		for k, v := range vd.Values {
+			sv.Values[k] = v
+		}
+	}
+
+	return sv
 }
 
 // Explain evaluates a flag and returns a rich trace of the evaluation.
@@ -137,7 +181,7 @@ func (f *Flags) Explain(flag string, ctx map[string]any) FlagEvaluation {
 	if !ok {
 		return FlagEvaluation{
 			Flag:      flag,
-			Variant:   "",
+			Variant:   ServedVariant{},
 			IsDefault: true,
 			Reason:    "flag not found",
 			Elapsed:   time.Since(start),
@@ -146,14 +190,14 @@ func (f *Flags) Explain(flag string, ctx map[string]any) FlagEvaluation {
 
 	var trace []TraceStep
 	rc := newRequestCache(f, ctx)
-	variant := rc.evalVariant(def, &trace)
+	name := rc.evalVariantName(def, &trace)
 
-	reason := buildReason(def, variant, trace, segs)
+	reason := buildReason(def, name, trace, segs)
 
 	return FlagEvaluation{
 		Flag:      flag,
-		Variant:   variant,
-		IsDefault: variant == def.Default,
+		Variant:   f.resolveVariant(def, name),
+		IsDefault: name == def.Default,
 		Reason:    reason,
 		Trace:     trace,
 		Metadata:  def.Metadata,
@@ -220,7 +264,7 @@ func newRequestCache(f *Flags, ctx map[string]any) *requestCache {
 }
 
 // evalVariant implements the core evaluation logic with memoization and cycle detection.
-func (rc *requestCache) evalVariant(def *FlagDef, trace *[]TraceStep) string {
+func (rc *requestCache) evalVariantName(def *FlagDef, trace *[]TraceStep) string {
 	// Cycle detection
 	if rc.evalStack[def.Key] {
 		if trace != nil {
@@ -259,7 +303,7 @@ func (rc *requestCache) evalVariant(def *FlagDef, trace *[]TraceStep) string {
 			if cached, hasCached := rc.prereqResults[prereq]; hasCached {
 				prereqPassed = cached != prereqDef.Default
 			} else {
-				prereqVariant := rc.evalVariant(prereqDef, nil)
+				prereqVariant := rc.evalVariantName(prereqDef, nil)
 				rc.prereqResults[prereq] = prereqVariant
 				prereqPassed = prereqVariant != prereqDef.Default
 			}
@@ -549,10 +593,85 @@ func parseFlag(node *gotreesitter.Node, source []byte, lang *gotreesitter.Langua
 				return nil, err
 			}
 			def.Rules = append(def.Rules, rule)
+
+		case "variant_declaration":
+			vd := parseVariantDecl(child, source, lang)
+			if def.Variants == nil {
+				def.Variants = make(map[string]*VariantDef)
+			}
+			def.Variants[vd.Name] = vd
+
+		case "defaults_block":
+			def.DefaultValues = parseParamBlock(child, source, lang)
+		}
+	}
+
+	// Load-time validation: every 'then "X"' must reference a declared variant
+	// (only if variants are declared — undeclared-name flags skip this check)
+	if len(def.Variants) > 0 {
+		for _, rule := range def.Rules {
+			if _, ok := def.Variants[rule.Variant]; !ok {
+				return nil, fmt.Errorf("flag %s: rule references undeclared variant %q (declared: %v)",
+					def.Key, rule.Variant, variantNames(def.Variants))
+			}
+		}
+		// Default must also be declared
+		if _, ok := def.Variants[def.Default]; !ok {
+			// Auto-declare an empty default variant
+			def.Variants[def.Default] = &VariantDef{Name: def.Default}
 		}
 	}
 
 	return def, nil
+}
+
+func parseVariantDecl(node *gotreesitter.Node, source []byte, lang *gotreesitter.Language) *VariantDef {
+	vd := &VariantDef{}
+	if nameNode := node.ChildByFieldName("name", lang); nameNode != nil {
+		vd.Name = stripQuotes(nodeText(nameNode, source))
+	}
+	vd.Values = parseParamBlock(node, source, lang)
+	return vd
+}
+
+func parseParamBlock(node *gotreesitter.Node, source []byte, lang *gotreesitter.Language) map[string]any {
+	values := make(map[string]any)
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		if child.Type(lang) == "param_assignment" {
+			key := ""
+			if keyNode := child.ChildByFieldName("key", lang); keyNode != nil {
+				key = nodeText(keyNode, source)
+			}
+			if valNode := child.ChildByFieldName("value", lang); valNode != nil {
+				values[key] = parseConstValue(valNode, source, lang)
+			}
+		}
+	}
+	return values
+}
+
+func parseConstValue(node *gotreesitter.Node, source []byte, lang *gotreesitter.Language) any {
+	text := nodeText(node, source)
+	switch node.Type(lang) {
+	case "number_literal":
+		n, _ := strconv.ParseFloat(text, 64)
+		return n
+	case "string_literal":
+		return stripQuotes(text)
+	case "bool_literal":
+		return text == "true"
+	default:
+		return stripQuotes(text)
+	}
+}
+
+func variantNames(variants map[string]*VariantDef) []string {
+	names := make([]string, 0, len(variants))
+	for k := range variants {
+		names = append(names, k)
+	}
+	return names
 }
 
 func parseFlagRule(node *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (FlagRule, error) {

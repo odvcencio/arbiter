@@ -73,8 +73,8 @@ func TestFlagEnabled(t *testing.T) {
 		t.Error("expected checkout_v2 enabled for internal enterprise_us user")
 	}
 	v := f.Variant("checkout_v2", ctx)
-	if v != "treatment" {
-		t.Errorf("expected treatment, got %q", v)
+	if v.Name != "treatment" {
+		t.Errorf("expected treatment, got %q", v.Name)
 	}
 }
 
@@ -95,8 +95,8 @@ func TestFlagDisabled(t *testing.T) {
 		t.Error("expected checkout_v2 disabled for random user")
 	}
 	v := f.Variant("checkout_v2", ctx)
-	if v != "control" {
-		t.Errorf("expected control (default), got %q", v)
+	if v.Name != "control" {
+		t.Errorf("expected control (default), got %q", v.Name)
 	}
 }
 
@@ -117,8 +117,8 @@ func TestFlagKillSwitch(t *testing.T) {
 		t.Error("expected dark_mode disabled (kill_switch)")
 	}
 	v := f.Variant("dark_mode", ctx)
-	if v != "false" {
-		t.Errorf("expected false (default), got %q", v)
+	if v.Name != "false" {
+		t.Errorf("expected false (default), got %q", v.Name)
 	}
 }
 
@@ -140,8 +140,8 @@ func TestFlagPrerequisite(t *testing.T) {
 		t.Error("expected checkout_v2 disabled when payments_enabled prerequisite fails")
 	}
 	v := f.Variant("checkout_v2", ctx)
-	if v != "control" {
-		t.Errorf("expected control (default due to prereq fail), got %q", v)
+	if v.Name != "control" {
+		t.Errorf("expected control (default due to prereq fail), got %q", v.Name)
 	}
 }
 
@@ -176,8 +176,8 @@ func TestFlagRollout(t *testing.T) {
 		"user.id":      lowBucketUser,
 	}
 	v := f.Variant("checkout_v2", ctx)
-	if v != "treatment" {
-		t.Errorf("expected treatment for low-bucket enterprise_us user (bucket=%d), got %q", Bucket(lowBucketUser), v)
+	if v.Name != "treatment" {
+		t.Errorf("expected treatment for low-bucket enterprise_us user (bucket=%d), got %q", Bucket(lowBucketUser), v.Name)
 	}
 
 	// High bucket user in enterprise_us (not internal, not beta) should NOT get treatment from rollout
@@ -189,8 +189,8 @@ func TestFlagRollout(t *testing.T) {
 		"user.id":      highBucketUser,
 	}
 	v = f.Variant("checkout_v2", ctx)
-	if v != "control" {
-		t.Errorf("expected control for high-bucket enterprise_us user (bucket=%d), got %q", Bucket(highBucketUser), v)
+	if v.Name != "control" {
+		t.Errorf("expected control for high-bucket enterprise_us user (bucket=%d), got %q", Bucket(highBucketUser), v.Name)
 	}
 }
 
@@ -208,14 +208,14 @@ func TestFlagAllFlags(t *testing.T) {
 	}
 
 	all := f.AllFlags(ctx)
-	if all["checkout_v2"] != "treatment" {
-		t.Errorf("checkout_v2: got %q, want treatment", all["checkout_v2"])
+	if all["checkout_v2"].Name != "treatment" {
+		t.Errorf("checkout_v2: got %q, want treatment", all["checkout_v2"].Name)
 	}
-	if all["payments_enabled"] != "true" {
-		t.Errorf("payments_enabled: got %q, want true", all["payments_enabled"])
+	if all["payments_enabled"].Name != "true" {
+		t.Errorf("payments_enabled: got %q, want true", all["payments_enabled"].Name)
 	}
-	if all["dark_mode"] != "false" {
-		t.Errorf("dark_mode: got %q, want false (kill_switch)", all["dark_mode"])
+	if all["dark_mode"].Name != "false" {
+		t.Errorf("dark_mode: got %q, want false (kill_switch)", all["dark_mode"].Name)
 	}
 }
 
@@ -237,8 +237,8 @@ func TestFlagExplainMatch(t *testing.T) {
 	if eval.Flag != "checkout_v2" {
 		t.Errorf("flag: got %q, want checkout_v2", eval.Flag)
 	}
-	if eval.Variant != "treatment" {
-		t.Errorf("variant: got %q, want treatment", eval.Variant)
+	if eval.Variant.Name != "treatment" {
+		t.Errorf("variant: got %q, want treatment", eval.Variant.Name)
 	}
 	if eval.IsDefault {
 		t.Error("expected IsDefault=false")
@@ -297,8 +297,8 @@ func TestFlagExplainNoMatch(t *testing.T) {
 
 	eval := f.Explain("checkout_v2", ctx)
 
-	if eval.Variant != "control" {
-		t.Errorf("variant: got %q, want control", eval.Variant)
+	if eval.Variant.Name != "control" {
+		t.Errorf("variant: got %q, want control", eval.Variant.Name)
 	}
 	if !eval.IsDefault {
 		t.Error("expected IsDefault=true")
@@ -330,8 +330,8 @@ func TestFlagExplainKillSwitch(t *testing.T) {
 
 	eval := f.Explain("dark_mode", ctx)
 
-	if eval.Variant != "false" {
-		t.Errorf("variant: got %q, want false", eval.Variant)
+	if eval.Variant.Name != "false" {
+		t.Errorf("variant: got %q, want false", eval.Variant.Name)
 	}
 	if !eval.IsDefault {
 		t.Error("expected IsDefault=true")
@@ -371,8 +371,8 @@ func TestFlagExplainPrereqFail(t *testing.T) {
 
 	eval := f.Explain("checkout_v2", ctx)
 
-	if eval.Variant != "control" {
-		t.Errorf("variant: got %q, want control", eval.Variant)
+	if eval.Variant.Name != "control" {
+		t.Errorf("variant: got %q, want control", eval.Variant.Name)
 	}
 	if !eval.IsDefault {
 		t.Error("expected IsDefault=true")
@@ -540,14 +540,14 @@ func TestHTTPHandler(t *testing.T) {
 
 	f.Handler().ServeHTTP(w, req)
 
-	var result map[string]string
+	var result map[string]ServedVariant
 	json.NewDecoder(w.Body).Decode(&result)
 
-	if result["checkout_v2"] != "treatment" {
-		t.Errorf("checkout_v2: got %q, want treatment", result["checkout_v2"])
+	if result["checkout_v2"].Name != "treatment" {
+		t.Errorf("checkout_v2: got %q, want treatment", result["checkout_v2"].Name)
 	}
-	if result["dark_mode"] != "false" {
-		t.Errorf("dark_mode: got %q, want false", result["dark_mode"])
+	if result["dark_mode"].Name != "false" {
+		t.Errorf("dark_mode: got %q, want false", result["dark_mode"].Name)
 	}
 }
 
@@ -565,8 +565,8 @@ func TestHTTPExplainHandler(t *testing.T) {
 	var result FlagEvaluation
 	json.NewDecoder(w.Body).Decode(&result)
 
-	if result.Variant != "false" {
-		t.Errorf("variant: got %q, want false", result.Variant)
+	if result.Variant.Name != "false" {
+		t.Errorf("variant: got %q, want false", result.Variant.Name)
 	}
 	if result.Reason != "kill-switched" {
 		t.Errorf("reason: got %q, want kill-switched", result.Reason)
@@ -597,8 +597,8 @@ flag flag_b type boolean default false {
 
 	// Should not hang or panic — returns default due to cycle
 	v := f.Variant("flag_a", map[string]any{})
-	if v != "false" {
-		t.Errorf("expected default (false) due to cycle, got %q", v)
+	if v.Name != "false" {
+		t.Errorf("expected default (false) due to cycle, got %q", v.Name)
 	}
 
 	// Explain should mention cycle
@@ -609,5 +609,169 @@ flag flag_b type boolean default false {
 	t.Logf("Trace:")
 	for i, step := range eval.Trace {
 		t.Logf("  [%d] %s: %s", i, step.Check, step.Detail)
+	}
+}
+
+func TestVariantPayloads(t *testing.T) {
+	src := `
+segment internal {
+    user.email ends_with "@m31labs.dev"
+}
+
+flag checkout_v2 type multivariate default "control" {
+    owner: "oscar"
+
+    variant "control" {
+        provider: "legacy",
+    }
+
+    variant "treatment" {
+        provider: "stripe",
+        button_color: "#D4AF37",
+        max_items: 50,
+        show_promo: true,
+    }
+
+    when internal
+        then "treatment"
+}
+`
+	f, err := Load([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Internal user gets treatment with payload
+	ctx := map[string]any{"user.email": "oscar@m31labs.dev"}
+	v := f.Variant("checkout_v2", ctx)
+	if v.Name != "treatment" {
+		t.Errorf("expected treatment, got %q", v.Name)
+	}
+	if v.Values["provider"] != "stripe" {
+		t.Errorf("provider: got %v, want stripe", v.Values["provider"])
+	}
+	if v.Values["button_color"] != "#D4AF37" {
+		t.Errorf("button_color: got %v, want #D4AF37", v.Values["button_color"])
+	}
+	if v.Values["max_items"] != 50.0 {
+		t.Errorf("max_items: got %v, want 50", v.Values["max_items"])
+	}
+	if v.Values["show_promo"] != true {
+		t.Errorf("show_promo: got %v, want true", v.Values["show_promo"])
+	}
+
+	// Non-internal user gets control with payload
+	ctx = map[string]any{"user.email": "random@gmail.com"}
+	v = f.Variant("checkout_v2", ctx)
+	if v.Name != "control" {
+		t.Errorf("expected control, got %q", v.Name)
+	}
+	if v.Values["provider"] != "legacy" {
+		t.Errorf("provider: got %v, want legacy", v.Values["provider"])
+	}
+}
+
+func TestVariantDefaults(t *testing.T) {
+	src := `
+segment internal {
+    user.email ends_with "@m31labs.dev"
+}
+
+flag checkout_v2 type multivariate default "control" {
+    owner: "oscar"
+
+    defaults {
+        provider: "stripe",
+    }
+
+    variant "control" {
+        button_color: "gray",
+    }
+
+    variant "treatment_a" {
+        button_color: "blue",
+    }
+
+    variant "treatment_b" {
+        button_color: "gold",
+    }
+
+    when internal
+        then "treatment_b"
+}
+`
+	f, err := Load([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Internal user gets treatment_b: inherits provider from defaults
+	ctx := map[string]any{"user.email": "oscar@m31labs.dev"}
+	v := f.Variant("checkout_v2", ctx)
+	if v.Name != "treatment_b" {
+		t.Errorf("expected treatment_b, got %q", v.Name)
+	}
+	if v.Values["provider"] != "stripe" {
+		t.Errorf("provider (inherited): got %v, want stripe", v.Values["provider"])
+	}
+	if v.Values["button_color"] != "gold" {
+		t.Errorf("button_color (variant-specific): got %v, want gold", v.Values["button_color"])
+	}
+
+	// Non-internal gets control: inherits provider, has own color
+	ctx = map[string]any{"user.email": "random@gmail.com"}
+	v = f.Variant("checkout_v2", ctx)
+	if v.Name != "control" {
+		t.Errorf("expected control, got %q", v.Name)
+	}
+	if v.Values["provider"] != "stripe" {
+		t.Errorf("provider (inherited): got %v, want stripe", v.Values["provider"])
+	}
+	if v.Values["button_color"] != "gray" {
+		t.Errorf("button_color: got %v, want gray", v.Values["button_color"])
+	}
+}
+
+func TestVariantValidation(t *testing.T) {
+	// Rule references undeclared variant — should fail at load time
+	src := `
+flag test type multivariate default "control" {
+    owner: "test"
+
+    variant "control" {}
+    variant "treatment" {}
+
+    when { true }
+        then "nonexistent"
+}
+`
+	_, err := Load([]byte(src))
+	if err == nil {
+		t.Error("expected load-time validation error for undeclared variant reference")
+	}
+}
+
+func TestBooleanFlagNoPayload(t *testing.T) {
+	src := `
+flag simple type boolean default false {
+    owner: "test"
+    when { true }
+        then true
+}
+`
+	f, err := Load([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !f.Enabled("simple", map[string]any{}) {
+		t.Error("expected enabled")
+	}
+	v := f.Variant("simple", map[string]any{})
+	if v.Name != "true" {
+		t.Errorf("expected true, got %q", v.Name)
+	}
+	if v.Values != nil {
+		t.Errorf("boolean flag should have nil Values, got %v", v.Values)
 	}
 }

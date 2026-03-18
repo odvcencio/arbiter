@@ -152,6 +152,25 @@ func ArbiterGrammar() *Grammar {
 		Sym("flag_metadata"),
 		Sym("flag_requires"),
 		Sym("flag_rule"),
+		Sym("variant_declaration"),
+		Sym("defaults_block"),
+	))
+
+	// variant "treatment" { key: value, ... }
+	g.Define("variant_declaration", Seq(
+		Str("variant"),
+		Field("name", Sym("string_literal")),
+		Str("{"),
+		Repeat(Sym("param_assignment")),
+		Str("}"),
+	))
+
+	// defaults { key: value, ... } — inherited by all variants
+	g.Define("defaults_block", Seq(
+		Str("defaults"),
+		Str("{"),
+		Repeat(Sym("param_assignment")),
+		Str("}"),
 	))
 
 	// owner: "oscar", ticket: "ENG-1234", etc.
