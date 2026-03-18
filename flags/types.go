@@ -1,6 +1,9 @@
 package flags
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // FlagType represents boolean or multivariate flags.
 type FlagType int
@@ -58,6 +61,78 @@ type Segment struct {
 type ServedVariant struct {
 	Name   string         `json:"name"`            // variant name ("treatment", "true", etc.)
 	Values map[string]any `json:"values,omitempty"` // payload (nil if no variant block declared)
+}
+
+// Bool returns the variant name as a boolean. Useful for boolean flags.
+func (v ServedVariant) Bool() bool {
+	return v.Name == "true"
+}
+
+// String returns a string value from the payload, or fallback if not found.
+func (v ServedVariant) String(key, fallback string) string {
+	if v.Values == nil {
+		return fallback
+	}
+	if s, ok := v.Values[key].(string); ok {
+		return s
+	}
+	return fallback
+}
+
+// Number returns a numeric value from the payload, or fallback if not found.
+func (v ServedVariant) Number(key string, fallback float64) float64 {
+	if v.Values == nil {
+		return fallback
+	}
+	if n, ok := v.Values[key].(float64); ok {
+		return n
+	}
+	return fallback
+}
+
+// Int returns a numeric value as int from the payload, or fallback if not found.
+func (v ServedVariant) Int(key string, fallback int) int {
+	if v.Values == nil {
+		return fallback
+	}
+	if n, ok := v.Values[key].(float64); ok {
+		return int(n)
+	}
+	return fallback
+}
+
+// Flag returns a boolean value from the payload, or fallback if not found.
+func (v ServedVariant) Flag(key string, fallback bool) bool {
+	if v.Values == nil {
+		return fallback
+	}
+	if b, ok := v.Values[key].(bool); ok {
+		return b
+	}
+	return fallback
+}
+
+// Decode unmarshals the variant payload into a typed struct.
+// The struct fields should be tagged with `json:"key"`.
+//
+//	type CheckoutConfig struct {
+//	    Provider    string `json:"provider"`
+//	    ButtonColor string `json:"button_color"`
+//	    MaxItems    int    `json:"max_items"`
+//	    ShowPromo   bool   `json:"show_promo"`
+//	}
+//	var cfg CheckoutConfig
+//	v.Decode(&cfg)
+func (v ServedVariant) Decode(dst any) error {
+	if v.Values == nil {
+		return nil
+	}
+	// Round-trip through JSON for struct tag support
+	b, err := json.Marshal(v.Values)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, dst)
 }
 
 // FlagEvaluation is the rich result of evaluating a flag with full trace.

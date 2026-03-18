@@ -774,4 +774,123 @@ flag simple type boolean default false {
 	if v.Values != nil {
 		t.Errorf("boolean flag should have nil Values, got %v", v.Values)
 	}
+	// Bool() helper
+	if !v.Bool() {
+		t.Error("Bool() should return true")
+	}
+}
+
+func TestTypedAccessors(t *testing.T) {
+	src := `
+segment all {
+    true == true
+}
+
+flag config type multivariate default "off" {
+    owner: "test"
+
+    variant "off" {
+        enabled: false,
+        label: "disabled",
+    }
+
+    variant "on" {
+        enabled: true,
+        label: "active",
+        max_count: 100,
+        rate: 0.75,
+    }
+
+    when all then "on"
+}
+`
+	f, err := Load([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v := f.Variant("config", map[string]any{})
+
+	// String accessor
+	if v.String("label", "") != "active" {
+		t.Errorf("String(label): got %q, want active", v.String("label", ""))
+	}
+	if v.String("missing", "default") != "default" {
+		t.Error("String(missing) should return fallback")
+	}
+
+	// Number accessor
+	if v.Number("rate", 0) != 0.75 {
+		t.Errorf("Number(rate): got %f, want 0.75", v.Number("rate", 0))
+	}
+	if v.Number("missing", 42) != 42 {
+		t.Error("Number(missing) should return fallback")
+	}
+
+	// Int accessor
+	if v.Int("max_count", 0) != 100 {
+		t.Errorf("Int(max_count): got %d, want 100", v.Int("max_count", 0))
+	}
+
+	// Flag (bool) accessor
+	if !v.Flag("enabled", false) {
+		t.Error("Flag(enabled) should be true")
+	}
+	if v.Flag("missing", false) != false {
+		t.Error("Flag(missing) should return fallback")
+	}
+}
+
+func TestDecodeStruct(t *testing.T) {
+	src := `
+segment all {
+    true == true
+}
+
+flag config type multivariate default "off" {
+    owner: "test"
+
+    variant "off" {}
+
+    variant "on" {
+        provider: "stripe",
+        button_color: "#D4AF37",
+        max_items: 50,
+        show_promo: true,
+    }
+
+    when all then "on"
+}
+`
+	f, err := Load([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v := f.Variant("config", map[string]any{})
+
+	type Config struct {
+		Provider    string  `json:"provider"`
+		ButtonColor string  `json:"button_color"`
+		MaxItems    float64 `json:"max_items"`
+		ShowPromo   bool    `json:"show_promo"`
+	}
+
+	var cfg Config
+	if err := v.Decode(&cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Provider != "stripe" {
+		t.Errorf("Provider: got %q, want stripe", cfg.Provider)
+	}
+	if cfg.ButtonColor != "#D4AF37" {
+		t.Errorf("ButtonColor: got %q, want #D4AF37", cfg.ButtonColor)
+	}
+	if cfg.MaxItems != 50 {
+		t.Errorf("MaxItems: got %f, want 50", cfg.MaxItems)
+	}
+	if !cfg.ShowPromo {
+		t.Error("ShowPromo should be true")
+	}
 }
