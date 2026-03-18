@@ -259,13 +259,13 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 
 		// Control flow
 		case compiler.OpJumpIfFalse:
-			top := vm.pop()
+			top := vm.peek()
 			if !top.AsBool() {
 				ip += uint32(arg) // skip forward
 				continue
 			}
 		case compiler.OpJumpIfTrue:
-			top := vm.pop()
+			top := vm.peek()
 			if top.AsBool() {
 				ip += uint32(arg)
 				continue
