@@ -2,10 +2,10 @@
 
 A compact language for governed outcomes.
 
-Every decision your software makes — approve this transaction, show this variant, block this request, apply this discount — is a governed outcome. Arbiter gives those decisions a language, compiles them to bytecode, and evaluates them in **204 nanoseconds**.
+Every decision your software makes — approve this transaction, show this variant, block this request, compute this tax bracket — is a governed outcome. Arbiter gives those decisions a language, compiles them to bytecode, and evaluates them in **223 nanoseconds**.
 
 ```
-.arb source ──→ Parser ──→ Compiler ──→ Bytecode VM (~204ns/eval)
+.arb source ──→ Parser ──→ Compiler ──→ Bytecode VM (~223ns/eval)
                               │
                               ├──→ Arishem JSON (compatibility)
                               ├──→ CEL
@@ -13,24 +13,34 @@ Every decision your software makes — approve this transaction, show this varia
                               └──→ Drools DRL
 ```
 
-The toolchain: a [tree-sitter grammar](https://github.com/odvcencio/gotreesitter), a bytecode compiler with constant interning, a stack-based VM, and code generators for five targets. Pure Go. No CGo. No runtime dependencies. Write governance once, run it anywhere.
+Two runtimes, one language. **Stateless evaluation** for request-path decisions. **Expert inference** for forward-chaining reasoning until quiescence. Same compiler, same VM, same governance.
+
+The parser is built on [gotreesitter](https://github.com/odvcencio/gotreesitter), a pure-Go reimplementation of the tree-sitter runtime — no CGo, no C toolchain, no generated files. Cross-compiles to any `GOOS`/`GOARCH` target Go supports, including WASM.
 
 ## Performance
 
-Arbiter's numbers come from this repo's benchmarks. Arishem figures are from [ByteDance/Arishem](https://github.com/bytedance/arishem) issue [#28](https://github.com/bytedance/arishem/issues/28).
+Arbiter's numbers come from this repo's benchmarks. Cross-engine runtime comparisons against CEL and OPA are in [`benchmarks/runtime`](benchmarks/runtime).
 
-| Metric | Arishem | Arbiter | Improvement |
-|--------|---------|---------|-------------|
+| Metric | Arishem | Arbiter | Factor |
+|--------|---------|---------|--------|
 | 10K rule compile memory | 7.8 GB | 72 MB | **108x less** |
 | 10K rule allocations | 153M | 940K | **163x fewer** |
 | 5K rule eval memory | 3.9 GB | 160 KB | **24,375x less** |
-| Single rule eval | ~1.4ms | ~204ns | **~6,900x faster** |
+| Single rule eval | ~1.4ms | ~223ns | **~6,300x faster** |
 
-Fixed 256-element stack. Zero heap allocation during evaluation. The constant pool interns all strings and numbers — 10K rules referencing the same field names share one copy. The entire instruction buffer for 10K rules fits in ~800KB.
+| Engine | ns/op | B/op | allocs/op |
+|--------|-------|------|-----------|
+| **Arbiter** | 223 | 96 | 3 |
+| CEL | 82 | 24 | 2 |
+| OPA/Rego | 5,680 | 6,444 | 114 |
+
+CEL is ~2.7x faster on a bare boolean predicate — it's a lean expression evaluator. Arbiter carries rule-engine machinery (governance gates, action resolution, constant pool) and is still in the same class. OPA is 25x slower with 67x more allocations.
+
+Fixed 256-element stack. Zero heap allocation during evaluation. The constant pool interns all strings and numbers — 10K rules referencing the same field names share one copy.
 
 ## Governance
 
-Segments, rollouts, kill switches, prerequisites, explainability — these are governance primitives. They apply to any outcome, whether it's a rule deciding an action or a flag serving a variant.
+Segments, rollouts, kill switches, prerequisites, explainability — governance primitives that apply to any outcome. Rules, flags, and expert inferences all share them.
 
 ### Rules
 
@@ -47,40 +57,32 @@ rule FreeShipping {
 }
 ```
 
+Rules support governance keywords directly:
+
+```python
+rule EnhancedRiskCheck priority 1 {
+    kill_switch
+    requires BasicRiskCheck
+    when segment high_risk {
+        tx.amount > 5000
+    }
+    then Flag { level: "hold" }
+    rollout 20
+}
+```
+
 ### Segments
 
-Reusable conditions. Define once, reference anywhere.
+Reusable conditions. Define once, reference from any rule or flag.
 
 ```python
 segment beta_users {
-    when { user.cohort matches "^beta_" }
+    user.cohort matches "^beta_"
 }
 
 segment high_value {
-    when { user.lifetime_spend > 10000 }
+    user.lifetime_spend > 10000
 }
-```
-
-### Kill Switches
-
-Instant global off-switch on any governed outcome.
-
-```python
-flag payments {
-    default: enabled
-    variant disabled { reason: "maintenance" }
-
-    kill_switch
-    when { region in ["EU"] } serve disabled
-}
-```
-
-### Rollouts
-
-Gradual exposure. Works on any targeting rule.
-
-```python
-when { user.id % 100 < 20 } serve treatment rollout 50
 ```
 
 ### Feature Flags
@@ -104,54 +106,92 @@ flag checkout_v2 {
 
 Schema validation, secret references, request-level caching, hot reload, HTTP serving, explainability traces — all come along.
 
-### Explainability
+### Expert Inference
 
-Every evaluation produces a full decision trace.
-
-```go
-eval := flags.Explain("checkout_v2", ctx)
-// eval.Variant: "treatment"
-// eval.Reason: "segment:beta_users"
-// eval.Segments: ["beta_users": true]
-// eval.Chain: [prerequisite → segment → rollout → variant]
-```
-
-## Before / After
-
-**Before** — 30 lines of Arishem JSON:
-
-```json
-{
-  "OpLogic": "&&",
-  "Conditions": [
-    {
-      "Operator": ">=",
-      "Lhs": {"VarExpr": "user.cart_total"},
-      "Rhs": {"Const": {"NumConst": 35}}
-    },
-    {
-      "Operator": "!=",
-      "Lhs": {"VarExpr": "user.region"},
-      "Rhs": {"Const": {"StrConst": "XX"}}
-    }
-  ]
-}
-```
-
-**After** — arbiter:
+Forward-chaining rules that reason until quiescence. Facts build on facts. Rules fire, assert new facts into working memory, and the engine loops until nothing changes.
 
 ```python
-rule FreeShipping {
+expert rule ComputeAGI priority 15 {
+    requires ComputeGrossIncome
     when {
-        user.cart_total >= 35
-        and user.region != "XX"
+        any gi in facts.GrossIncome { true }
     }
-    then ApplyShipping {
-        cost: 0,
-        method: "standard",
+    then assert AGI {
+        key: "total",
+        amount: income.wages + income.interest - deductions.hsa,
+    }
+}
+
+expert rule EmitDetermination priority 90 {
+    requires ComputeTaxableIncome
+    when { true }
+    then emit Determination {
+        status: "complete",
     }
 }
 ```
+
+Two action kinds: `assert` mutates working memory (triggers more rule firings), `emit` produces a final outcome (does not trigger re-firing). The session runs with guardrails — configurable max rounds and max mutations, context cancellation. Every firing is recorded in the activation trace.
+
+### Explainability
+
+Every evaluation produces a full decision trace — stateless rules, flags, and expert sessions alike.
+
+```go
+// Stateless rules
+matched, trace, _ := arbiter.EvalGoverned(ruleset, dc, segments, ctx)
+
+// Flags
+eval := flags.Explain("checkout_v2", ctx)
+
+// Expert inference
+result, _ := session.Run(ctx)
+result.Activations // every firing, every round, what changed
+```
+
+### Runtime Overrides
+
+Kill switches and rollout percentages can be changed at runtime without recompiling. The override store layers on top of compiled governance fields.
+
+```go
+store.SetRule("bundle_id", "RiskyRule", overrides.RuleOverride{
+    KillSwitch: ptr(true),
+})
+
+store.SetFlag("bundle_id", "new_feature", overrides.FlagOverride{
+    KillSwitch: ptr(true),
+})
+```
+
+## Serving
+
+### gRPC API
+
+Arbiter ships a gRPC server that bundles compilation, evaluation, flag resolution, expert sessions, runtime overrides, and audit logging into a single service.
+
+```protobuf
+service ArbiterService {
+    rpc PublishBundle(...)       // compile and register .arb source
+    rpc EvaluateRules(...)      // stateless rule evaluation
+    rpc ResolveFlag(...)        // flag resolution with explainability
+    rpc SetRuleOverride(...)    // runtime kill switch / rollout changes
+    rpc SetFlagOverride(...)    // runtime flag kill switch
+    rpc SetFlagRuleOverride(...)// runtime flag rule rollout changes
+}
+```
+
+Bundles are published once and evaluated many times. Each bundle compiles rules, expert rules, flags, and segments from a single `.arb` source.
+
+### Audit
+
+Every governance decision is written to a durable audit sink. The default `JSONLSink` appends one JSON object per line to a file. Implement the `audit.Sink` interface for your backend (database, event stream, object store).
+
+```go
+sink, _ := audit.NewJSONLSink("/var/log/arbiter/decisions.jsonl")
+server := grpcserver.NewServer(registry, overrides, sink)
+```
+
+Each audit event captures the full context: matched rules, flag resolutions, expert session outcomes, governance trace steps, timestamps, request IDs, and bundle IDs.
 
 ## Install
 
@@ -164,77 +204,51 @@ go install github.com/odvcencio/arbiter/cmd/arbiter@latest
 ### CLI
 
 ```bash
-# Compile and show stats
-arbiter compile rules.arb
-
-# Compile and evaluate against data
-arbiter eval rules.arb --data '{"user": {"cart_total": 50, "region": "US"}}'
-
-# Emit Arishem JSON (backward compatible)
-arbiter emit rules.arb
-
-# Emit a single rule's condition
-arbiter emit rules.arb --rule FreeShipping
-
-# Validate without emitting
-arbiter check rules.arb
+arbiter compile rules.arb          # compile and show stats
+arbiter eval rules.arb --data '{...}'  # evaluate against data
+arbiter emit rules.arb             # emit Arishem JSON
+arbiter emit rules.arb --rule Name # emit single rule
+arbiter check rules.arb            # validate without emitting
 ```
 
-### Go Library — Rules
+### Go Library — Stateless Rules
 
 ```go
-// Compile from .arb source
-ruleset, err := arbiter.Compile(source)
+ruleset, _ := arbiter.Compile(source)
+dc := arbiter.DataFromMap(data, ruleset)
 
-// Or compile from existing Arishem JSON (drop-in migration)
-ruleset, err := arbiter.CompileJSONRules([]arbiter.JSONRule{{
-    Name:      "FreeShipping",
-    Priority:  1,
-    Condition: condJSON,
-    Action:    actJSON,
-}})
+// Fast path — no governance
+matched, _ := arbiter.Eval(ruleset, dc)
 
-// Create data context
-dc := arbiter.DataFromMap(map[string]any{
-    "user": map[string]any{
-        "cart_total": 50.0,
-        "region":     "US",
-    },
-}, ruleset)
-
-// Evaluate — ~204ns per rule
-matched, err := arbiter.Eval(ruleset, dc)
-for _, m := range matched {
-    fmt.Printf("%s → %s %v\n", m.Name, m.Action, m.Params)
-}
-
-// Or evaluate with debug trace
-debug := arbiter.EvalDebug(ruleset, dc)
-fmt.Printf("matched: %d, failed: %d, elapsed: %s\n",
-    len(debug.Matched), len(debug.Failed), debug.Elapsed)
+// Governed path — segments, kill switches, rollouts, prerequisites, trace
+result, _ := arbiter.CompileFull(source)
+matched, trace, _ := arbiter.EvalGoverned(result.Ruleset, dc, result.Segments, ctx)
 ```
 
 ### Go Library — Flags
 
 ```go
-f, err := flags.Load(source)
-
-// Simple evaluation
+f, _ := flags.Load(source)
 variant := f.Variant("checkout_v2", ctx)
-fmt.Println(variant.Name) // "treatment"
-
-// Decode typed payload
-var config CheckoutConfig
-variant.Decode(&config)
-
-// Full explainability
 eval := f.Explain("checkout_v2", ctx)
+f, _ = flags.Watch("flags.arb")          // hot reload
+http.Handle("/flags", f.Handler())        // serve over HTTP
+```
 
-// Hot reload from file
-f, _ = flags.Watch("flags.arb")
+### Go Library — Expert Inference
 
-// Serve over HTTP
-http.Handle("/flags", f.Handler())
+```go
+program, _ := expert.Compile(source)
+session := expert.NewSession(program, envelope, initialFacts, expert.Options{
+    MaxRounds:    32,
+    MaxMutations: 1024,
+})
+result, _ := session.Run(ctx)
+
+for _, outcome := range result.Outcomes {
+    fmt.Printf("%s → %s %v\n", outcome.Rule, outcome.Name, outcome.Params)
+}
+fmt.Printf("quiesced in %d rounds, %d mutations\n", result.Rounds, result.Mutations)
 ```
 
 ### Migrating from Arishem
@@ -245,7 +259,7 @@ rule, _ := arishem.NewPriorityRule(name, priority, condJSON, actJSON)
 dc, _ := arishem.DataContext(ctx, inputJSON)
 arishem.ExecuteRules([]arishem.RuleTarget{rule}, dc)
 
-// After (Arbiter — 72MB for 10K rules, ~204ns/rule eval)
+// After (Arbiter — 72MB for 10K rules, ~223ns/rule eval)
 ruleset, _ := arbiter.CompileJSONRules([]arbiter.JSONRule{{name, priority, condJSON, actJSON}})
 dc, _ := arbiter.DataFromJSON(inputJSON, ruleset)
 matched, _ := arbiter.Eval(ruleset, dc)
@@ -280,19 +294,42 @@ const PREMIUM_TIERS = ["gold", "platinum"]
 
 ```python
 rule RuleName priority 1 {
-    when {
-        # condition expression
+    kill_switch                    # optional: instant disable
+    requires OtherRule             # optional: prerequisite
+    when segment high_value {      # optional: segment gate
+        condition expression
     }
     then ActionName {
         key: value,
     }
-    otherwise FallbackAction {
+    otherwise FallbackAction {     # optional: when condition is false
         key: value,
     }
+    rollout 50                     # optional: percentage gate
 }
 ```
 
-`priority` is optional. `otherwise` is optional.
+### Expert Rules
+
+```python
+expert rule RuleName priority 1 {
+    kill_switch
+    requires OtherRule
+    when { condition }
+    then assert FactType {         # assert: mutate working memory
+        key: identifier,
+        field: value,
+    }
+    rollout 50
+}
+
+expert rule EmitResult priority 99 {
+    when { condition }
+    then emit OutcomeName {        # emit: produce final outcome
+        field: value,
+    }
+}
+```
 
 ### Operators
 
@@ -375,25 +412,23 @@ none item in cart.items { item.banned == true }
 intern/       Constant pool — deduplicates strings and numbers across all rules
 compiler/     CST → bytecode compiler + Arishem JSON loader
 vm/           Stack-based bytecode VM (fixed 256-element stack, zero-alloc eval)
-flags/        Feature flags, segments, rollouts, kill switches
+govern/       Governance primitives: segments, rollouts, kill switches, prerequisites, trace
+flags/        Feature flags: variants, schema validation, secret references, hot reload
+expert/       Forward-chaining inference: working memory, assert/emit, quiescence detection
+audit/        Durable decision logging (Sink interface, JSONL default)
+overrides/    Runtime governance overrides (kill switches, rollout percentages)
+grpcserver/   gRPC service: bundle registry, evaluation, flag resolution, expert sessions
 emit/         Code generators: Rego, CEL, Drools DRL
 decompile/    Bytecode → Arishem JSON
 ```
 
-Flat `[]byte` of fixed-width 4-byte instructions: `[opcode(1B), flags(1B), arg(2B)]`. Constant pool indices are `uint16`, giving 65K unique values per type. The tree-sitter grammar gives any supporting editor syntax highlighting, folding, and structural navigation for `.arb` files.
+Flat `[]byte` of fixed-width 4-byte instructions: `[opcode(1B), flags(1B), arg(2B)]`. Constant pool indices are `uint16`, giving 65K unique values per type. The parser uses [gotreesitter](https://github.com/odvcencio/gotreesitter), so any editor with tree-sitter support gets syntax highlighting, folding, and structural navigation for `.arb` files.
 
 ## Examples
 
 ### E-commerce Pricing
 
 ```python
-feature user from "user-service" {
-    tier: string
-    cart_total: number
-    purchase_count: number
-    is_first_order: bool
-}
-
 const PREMIUM_TIERS = ["gold", "platinum"]
 
 rule VIPDiscount priority 2 {
@@ -413,22 +448,8 @@ rule VIPDiscount priority 2 {
 ### Fraud Detection
 
 ```python
-feature tx from "transaction-service" {
-    amount: number
-    ip_country: string
-}
-
-feature account from "account-service" {
-    country: string
-    has_2fa: bool
-    flagged: bool
-}
-
-feature model from "fraud-model" {
-    risk_score: number
-}
-
 rule InstantBlock priority 0 {
+    kill_switch
     when {
         account.flagged == true
         or model.risk_score > 0.95
@@ -440,41 +461,46 @@ rule InstantBlock priority 0 {
 }
 
 rule GeoMismatch priority 3 {
-    when {
-        tx.ip_country != account.country
-        and tx.amount > 100
+    requires InstantBlock
+    when segment untrusted_region {
+        tx.amount > 100
         and account.has_2fa == false
     }
     then Challenge {
         type: "sms_otp",
         timeout: "5m",
     }
+    rollout 50
 }
 ```
 
-### Content Moderation
+### Tax Computation (Expert)
 
 ```python
-feature model from "ml-scorer" {
-    toxicity: number
-    spam_score: number
-}
-
-feature user from "user-service" {
-    trust_score: number
-    violations: number
-}
-
-const TRUSTED_THRESHOLD = 85
-
-rule AllowTrusted priority 10 {
-    when {
-        user.trust_score >= TRUSTED_THRESHOLD
-        and user.violations == 0
-        and model.toxicity < 0.3
+expert rule ComputeGrossIncome priority 5 {
+    when { income.wages > 0 or income.interest > 0 }
+    then assert GrossIncome {
+        key: "total",
+        amount: income.wages + income.interest
+            + income.dividends + income.capital_gains,
     }
-    then Approve {
-        fast_track: true,
+}
+
+expert rule ComputeAGI priority 15 {
+    requires ComputeGrossIncome
+    when { any gi in facts.GrossIncome { true } }
+    then assert AGI {
+        key: "total",
+        amount: income.wages + income.interest
+            - deductions.student_loan - deductions.hsa,
+    }
+}
+
+expert rule EmitDetermination priority 90 {
+    requires ComputeAGI
+    when { any agi in facts.AGI { agi.amount > 0 } }
+    then emit TaxReturn {
+        status: "complete",
     }
 }
 ```
