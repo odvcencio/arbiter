@@ -1,0 +1,54 @@
+# E-commerce pricing rules
+
+feature user from "user-service" {
+    age: number
+    tier: string
+    region: string
+    cart_total: number
+    purchase_count: number
+    is_first_order: bool
+}
+
+const VIP_THRESHOLD = 1000
+const PREMIUM_TIERS = ["gold", "platinum"]
+const FREE_SHIP_MIN = 35
+
+rule FreeShipping priority 1 {
+    when {
+        user.cart_total >= FREE_SHIP_MIN
+        and user.region != "XX"
+    }
+    then ApplyShipping {
+        cost: 0,
+        method: "standard",
+    }
+    otherwise ApplyShipping {
+        cost: 5.99,
+        method: "standard",
+    }
+}
+
+rule VIPDiscount priority 2 {
+    when {
+        user.tier in PREMIUM_TIERS
+        and user.purchase_count > 10
+        and user.cart_total >= VIP_THRESHOLD
+    }
+    then ApplyDiscount {
+        type: "percentage",
+        amount: 15,
+        reason: "VIP loyalty discount",
+    }
+}
+
+rule WelcomeOffer priority 3 {
+    when {
+        user.is_first_order == true
+        and user.cart_total >= 25
+    }
+    then ApplyDiscount {
+        type: "fixed",
+        amount: 10,
+        reason: "Welcome discount",
+    }
+}

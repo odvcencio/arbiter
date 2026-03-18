@@ -1,0 +1,85 @@
+# Content moderation rules
+
+feature user from "user-service" {
+    age: number
+    account_age_days: number
+    verified: bool
+    trust_score: number
+    region: string
+    violations: number
+}
+
+feature content from "content-service" {
+    type: string
+    text: string
+    media_count: number
+    mentions_count: number
+    language: string
+}
+
+feature model from "ml-scorer" {
+    toxicity: number
+    spam_score: number
+    nsfw_score: number
+}
+
+const TRUSTED_THRESHOLD = 85
+const SPAM_THRESHOLD = 0.7
+const TOXIC_THRESHOLD = 0.8
+
+rule AutoBlock priority 0 {
+    when {
+        model.toxicity > TOXIC_THRESHOLD
+        or model.nsfw_score > 0.9
+    }
+    then Reject {
+        action: "remove",
+        queue: "abuse-review",
+        reason: "auto-flagged by content model",
+    }
+}
+
+rule SpamFilter priority 1 {
+    when {
+        model.spam_score > SPAM_THRESHOLD
+        and user.trust_score < 50
+        and user.account_age_days < 30
+    }
+    then Reject {
+        action: "shadow_ban",
+        reason: "spam: new low-trust account",
+        duration: "24h",
+    }
+}
+
+rule RateLimitNewUsers priority 2 {
+    when {
+        user.account_age_days < 7
+        and content.mentions_count > 5
+        and user.verified == false
+    }
+    then HoldForReview {
+        queue: "new-user-review",
+        reason: "new account mass-mentioning",
+        sla: "1h",
+    }
+}
+
+rule AllowTrusted priority 10 {
+    when {
+        user.trust_score >= TRUSTED_THRESHOLD
+        and user.violations == 0
+        and model.toxicity < 0.3
+    }
+    then Approve {
+        fast_track: true,
+    }
+}
+
+rule DefaultReview priority 99 {
+    when { true }
+    then HoldForReview {
+        queue: "general",
+        sla: "4h",
+    }
+}

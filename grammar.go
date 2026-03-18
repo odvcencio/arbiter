@@ -1,0 +1,337 @@
+package arbiter
+
+import (
+	"github.com/odvcencio/gotreesitter/grammargen"
+)
+
+var (
+	Str         = grammargen.Str
+	Pat         = grammargen.Pat
+	Sym         = grammargen.Sym
+	Seq         = grammargen.Seq
+	Choice      = grammargen.Choice
+	Repeat      = grammargen.Repeat
+	Repeat1     = grammargen.Repeat1
+	Optional    = grammargen.Optional
+	Token       = grammargen.Token
+	ImmToken    = grammargen.ImmToken
+	Field       = grammargen.Field
+	Prec        = grammargen.Prec
+	PrecLeft    = grammargen.PrecLeft
+	PrecRight   = grammargen.PrecRight
+	PrecDynamic = grammargen.PrecDynamic
+	Alias       = grammargen.Alias
+	Blank       = grammargen.Blank
+	CommaSep    = grammargen.CommaSep
+	CommaSep1   = grammargen.CommaSep1
+
+	NewGrammar       = grammargen.NewGrammar
+	GenerateLanguage = grammargen.GenerateLanguage
+)
+
+type Grammar = grammargen.Grammar
+type Rule = grammargen.Rule
+
+// ArbiterGrammar defines the arbiter rule engine DSL.
+func ArbiterGrammar() *Grammar {
+	g := NewGrammar("arbiter")
+
+	// --- Source file ---
+	g.Define("source_file", Repeat(
+		Sym("_declaration"),
+	))
+
+	g.Define("_declaration", Choice(
+		Sym("feature_declaration"),
+		Sym("const_declaration"),
+		Sym("rule_declaration"),
+	))
+
+	// --- Comments (extras — auto-skipped) ---
+	g.Define("comment", Token(Pat(`#[^\n]*`)))
+
+	// --- Feature declaration ---
+	g.Define("feature_declaration", Seq(
+		Str("feature"),
+		Field("name", Sym("identifier")),
+		Str("from"),
+		Field("source", Sym("string_literal")),
+		Str("{"),
+		Repeat(Sym("field_declaration")),
+		Str("}"),
+	))
+
+	g.Define("field_declaration", Seq(
+		Field("name", Sym("identifier")),
+		Str(":"),
+		Field("type", Sym("type_name")),
+	))
+
+	g.Define("type_name", Choice(
+		Str("number"),
+		Str("string"),
+		Str("bool"),
+		Seq(Str("list"), Str("<"), Sym("type_name"), Str(">")),
+	))
+
+	// --- Const declaration ---
+	g.Define("const_declaration", Seq(
+		Str("const"),
+		Field("name", Sym("identifier")),
+		Str("="),
+		Field("value", Sym("_expr")),
+	))
+
+	// --- Rule declaration ---
+	g.Define("rule_declaration", Seq(
+		Str("rule"),
+		Field("name", Sym("identifier")),
+		Optional(Seq(Str("priority"), Field("priority", Sym("number_literal")))),
+		Str("{"),
+		Field("condition", Sym("when_block")),
+		Field("action", Sym("then_block")),
+		Optional(Field("fallback", Sym("otherwise_block"))),
+		Str("}"),
+	))
+
+	// when always requires braces: when { expr }
+	g.Define("when_block", Seq(
+		Str("when"),
+		Str("{"),
+		Field("expr", Sym("_expr")),
+		Str("}"),
+	))
+
+	g.Define("then_block", Seq(
+		Str("then"),
+		Field("action_name", Sym("identifier")),
+		Str("{"),
+		Repeat(Sym("param_assignment")),
+		Str("}"),
+	))
+
+	g.Define("otherwise_block", Seq(
+		Str("otherwise"),
+		Field("action_name", Sym("identifier")),
+		Str("{"),
+		Repeat(Sym("param_assignment")),
+		Str("}"),
+	))
+
+	g.Define("param_assignment", Seq(
+		Field("key", Sym("identifier")),
+		Str(":"),
+		Field("value", Sym("_expr")),
+		Optional(Str(",")),
+	))
+
+	// --- Expression hierarchy ---
+	// Two levels: _expr includes logical operators, _value_expr does not.
+	// Comparisons only accept _value_expr on left/right so that
+	// `a >= 18 and b == true` parses as `(a >= 18) and (b == true)`.
+
+	g.Define("_expr", Choice(
+		Sym("or_expr"),
+		Sym("and_expr"),
+		Sym("not_expr"),
+		Sym("_cond_expr"),
+	))
+
+	// _cond_expr: comparisons and operators (no logical)
+	g.Define("_cond_expr", Choice(
+		Sym("comparison_expr"),
+		Sym("in_expr"),
+		Sym("not_in_expr"),
+		Sym("contains_expr"),
+		Sym("not_contains_expr"),
+		Sym("retains_expr"),
+		Sym("not_retains_expr"),
+		Sym("subset_of_expr"),
+		Sym("superset_of_expr"),
+		Sym("vague_contains_expr"),
+		Sym("starts_with_expr"),
+		Sym("ends_with_expr"),
+		Sym("matches_expr"),
+		Sym("between_expr"),
+		Sym("is_null_expr"),
+		Sym("is_not_null_expr"),
+		Sym("quantifier_expr"),
+		Sym("_value_expr"),
+	))
+
+	// _value_expr: math and primaries only
+	g.Define("_value_expr", Choice(
+		Sym("math_expr"),
+		Sym("_primary"),
+	))
+
+	// Logical — operate on _expr (full expressions)
+	g.Define("or_expr", PrecLeft(1, Seq(
+		Field("left", Sym("_expr")),
+		Str("or"),
+		Field("right", Sym("_expr")),
+	)))
+
+	g.Define("and_expr", PrecLeft(2, Seq(
+		Field("left", Sym("_expr")),
+		Str("and"),
+		Field("right", Sym("_expr")),
+	)))
+
+	g.Define("not_expr", PrecRight(3, Seq(
+		Str("not"),
+		Field("operand", Sym("_expr")),
+	)))
+
+	// Comparison — left/right are _value_expr (no logical operators)
+	g.Define("_ge_op", Token(Seq(Str(">"), Str("="))))
+	g.Define("_le_op", Token(Seq(Str("<"), Str("="))))
+	g.Define("_ne_op", Token(Seq(Str("!"), Str("="))))
+
+	g.Define("comparison_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")),
+		Field("op", Choice(
+			Str("=="), Sym("_ne_op"),
+			Sym("_ge_op"), Sym("_le_op"),
+			Str(">"), Str("<"),
+		)),
+		Field("right", Sym("_value_expr")),
+	)))
+
+	// Collection operators — operands are _value_expr
+	g.Define("in_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("in"), Field("right", Sym("_value_expr")),
+	)))
+	g.Define("not_in_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("not"), Str("in"), Field("right", Sym("_value_expr")),
+	)))
+	g.Define("contains_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("contains"), Field("right", Sym("_value_expr")),
+	)))
+	g.Define("not_contains_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("not"), Str("contains"), Field("right", Sym("_value_expr")),
+	)))
+	g.Define("retains_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("retains"), Field("right", Sym("_value_expr")),
+	)))
+	g.Define("not_retains_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("not"), Str("retains"), Field("right", Sym("_value_expr")),
+	)))
+	g.Define("subset_of_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("subset_of"), Field("right", Sym("_value_expr")),
+	)))
+	g.Define("superset_of_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("superset_of"), Field("right", Sym("_value_expr")),
+	)))
+	g.Define("vague_contains_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("vague_contains"), Field("right", Sym("_value_expr")),
+	)))
+
+	// String operators — operands are _value_expr
+	g.Define("starts_with_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("starts_with"), Field("right", Sym("_value_expr")),
+	)))
+	g.Define("ends_with_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("ends_with"), Field("right", Sym("_value_expr")),
+	)))
+	g.Define("matches_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("matches"), Field("right", Sym("_value_expr")),
+	)))
+
+	// Range: x between [1, 10]
+	g.Define("between_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")),
+		Str("between"),
+		Field("open", Choice(Str("["), Str("("))),
+		Field("low", Sym("_value_expr")),
+		Str(","),
+		Field("high", Sym("_value_expr")),
+		Field("close", Choice(Str("]"), Str(")"))),
+	)))
+
+	// Null checks — left is _value_expr
+	g.Define("is_null_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("is"), Str("null"),
+	)))
+	g.Define("is_not_null_expr", PrecLeft(4, Seq(
+		Field("left", Sym("_value_expr")), Str("is"), Str("not"), Str("null"),
+	)))
+
+	// Math — operands are _value_expr (binds tighter than comparisons)
+	g.Define("math_expr", PrecLeft(5, Seq(
+		Field("left", Sym("_value_expr")),
+		Field("op", Choice(Str("+"), Str("-"), Str("*"), Str("/"), Str("%"))),
+		Field("right", Sym("_value_expr")),
+	)))
+
+	// Quantifiers: any/all/none x in collection { body }
+	g.Define("quantifier_expr", Seq(
+		Field("quantifier", Choice(Str("any"), Str("all"), Str("none"))),
+		Field("var", Sym("identifier")),
+		Str("in"),
+		Field("collection", Sym("_expr")),
+		Str("{"),
+		Field("body", Sym("_expr")),
+		Str("}"),
+	))
+
+	// --- Primaries ---
+	g.Define("_primary", Choice(
+		Sym("member_expr"),
+		Sym("number_literal"),
+		Sym("string_literal"),
+		Sym("bool_literal"),
+		Sym("list_literal"),
+		Sym("paren_expr"),
+		Sym("identifier"),
+	))
+
+	g.Define("member_expr", PrecLeft(8, Seq(
+		Field("object", Choice(Sym("member_expr"), Sym("identifier"))),
+		Str("."),
+		Field("field", Sym("identifier")),
+	)))
+
+	g.Define("paren_expr", Seq(
+		Str("("), Field("expr", Sym("_expr")), Str(")"),
+	))
+
+	g.Define("list_literal", Seq(
+		Str("["), CommaSep1(Sym("_expr")), Optional(Str(",")), Str("]"),
+	))
+
+	// --- Terminals ---
+	g.Define("identifier", Pat(`[a-zA-Z_][a-zA-Z0-9_]*`))
+	g.Define("number_literal", Pat(`-?[0-9]+(\.[0-9]+)?`))
+	g.Define("string_literal", Pat(`"[^"]*"`))
+	g.Define("bool_literal", Choice(Str("true"), Str("false")))
+
+	// Extras: whitespace and comments
+	g.SetExtras(Pat(`[ \t\r\n]+`), Sym("comment"))
+
+	g.SetWord("identifier")
+
+	// --- Conflicts ---
+	g.SetConflicts(
+		// Logical level
+		[]string{"_expr", "or_expr"},
+		[]string{"_expr", "and_expr"},
+		[]string{"_expr", "not_expr"},
+		[]string{"_expr", "_cond_expr"},
+		// Condition level
+		[]string{"_cond_expr", "_value_expr"},
+		// Value level
+		[]string{"_value_expr", "math_expr"},
+		// not ambiguity: not_expr vs not_in/not_contains/not_retains
+		[]string{"not_expr", "not_in_expr"},
+		[]string{"not_expr", "not_contains_expr"},
+		[]string{"not_expr", "not_retains_expr"},
+		[]string{"not_expr", "is_not_null_expr"},
+		// between brackets vs list
+		[]string{"between_expr", "list_literal"},
+	)
+
+	g.EnableLRSplitting = true
+
+	return g
+}

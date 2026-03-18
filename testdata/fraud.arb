@@ -1,0 +1,105 @@
+# Fraud detection rules
+
+feature tx from "transaction-service" {
+    amount: number
+    currency: string
+    merchant_category: string
+    merchant_country: string
+    ip_country: string
+}
+
+feature account from "account-service" {
+    age_days: number
+    avg_transaction: number
+    tx_count_24h: number
+    tx_count_1h: number
+    distinct_merchants_24h: number
+    has_2fa: bool
+    flagged: bool
+    country: string
+}
+
+feature model from "fraud-model" {
+    risk_score: number
+    anomaly_score: number
+}
+
+const HIGH_RISK_CATEGORIES = ["gambling", "crypto", "wire_transfer"]
+const VELOCITY_LIMIT_1H = 5
+const VELOCITY_LIMIT_24H = 20
+const AMOUNT_SPIKE = 5
+
+rule InstantBlock priority 0 {
+    when {
+        account.flagged == true
+        or model.risk_score > 0.95
+    }
+    then Block {
+        reason: "flagged account or extreme risk",
+        escalate: "fraud-ops",
+    }
+}
+
+rule VelocityCheck priority 1 {
+    when {
+        account.tx_count_1h >= VELOCITY_LIMIT_1H
+        or account.tx_count_24h >= VELOCITY_LIMIT_24H
+        or account.distinct_merchants_24h > 10
+    }
+    then Block {
+        reason: "velocity limit exceeded",
+        escalate: "auto-review",
+    }
+}
+
+rule AmountAnomaly priority 2 {
+    when {
+        tx.amount > account.avg_transaction * AMOUNT_SPIKE
+        and account.age_days < 90
+        and account.has_2fa == false
+    }
+    then Challenge {
+        type: "sms_otp",
+        reason: "unusual amount for account age",
+        timeout: "5m",
+    }
+}
+
+rule GeoMismatch priority 3 {
+    when {
+        tx.ip_country != account.country
+        and tx.merchant_country != account.country
+        and tx.amount > 100
+    }
+    then Challenge {
+        type: "push_notification",
+        reason: "transaction from unfamiliar location",
+        timeout: "10m",
+    }
+}
+
+rule HighRiskMerchant priority 4 {
+    when {
+        tx.merchant_category in HIGH_RISK_CATEGORIES
+        and (
+            account.age_days < 30
+            or model.anomaly_score > 0.7
+        )
+    }
+    then Review {
+        queue: "high-risk",
+        sla: "30m",
+        hold_funds: true,
+    }
+}
+
+rule LowRiskPass priority 99 {
+    when {
+        model.risk_score < 0.2
+        and tx.ip_country == account.country
+        and account.has_2fa == true
+    }
+    then Approve {
+        fast_track: true,
+    }
+}
