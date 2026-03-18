@@ -165,7 +165,12 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 
 		switch op {
 		case compiler.OpLoadStr:
-			vm.push(StrVal(arg))
+			if flags != 0 {
+				// CST compiler encodes lists as OpLoadStr with flags=listLen, arg=listIdx
+				vm.push(ListVal(arg, uint16(flags)))
+			} else {
+				vm.push(StrVal(arg))
+			}
 		case compiler.OpLoadNum:
 			vm.push(NumVal(vm.pool.GetNumber(arg)))
 		case compiler.OpLoadBool:
