@@ -409,7 +409,7 @@ rule RuleName priority 1 {
     kill_switch                    # optional: instant disable
     requires OtherRule             # optional: prerequisite
     when segment high_value {      # optional: segment gate
-        condition expression
+        condition
     }
     then ActionName {
         key: value,
@@ -484,7 +484,7 @@ expert rule RouteManualReview {
 
 **Comparison**
 
-```arb
+```text
 x == 1          x != 1
 x > 1           x < 1
 x >= 1          x <= 1
@@ -492,13 +492,13 @@ x >= 1          x <= 1
 
 **Logical**
 
-```arb
+```text
 a and b         a or b          not a
 ```
 
 **Collection**
 
-```arb
+```text
 role in ["admin", "mod"]
 role not in ["banned"]
 tags contains "vip"
@@ -512,7 +512,7 @@ a vague_contains b              # fuzzy substring match in list
 
 **String**
 
-```arb
+```text
 name starts_with "Dr"
 email ends_with ".edu"
 code matches "^[A-Z]{3}$"
@@ -520,14 +520,14 @@ code matches "^[A-Z]{3}$"
 
 **Null**
 
-```arb
+```text
 value is null
 value is not null
 ```
 
 **Range**
 
-```arb
+```text
 age between [18, 65]            # inclusive both ends
 score between (0, 100)          # exclusive both ends
 temp between [0, 100)           # inclusive left, exclusive right
@@ -536,14 +536,14 @@ temp between (0, 100]           # exclusive left, inclusive right
 
 **Math**
 
-```arb
+```text
 price * quantity > 1000
 score + bonus >= threshold
 ```
 
 **Quantifiers**
 
-```arb
+```text
 any item in cart.items { item.price > 100 }
 all item in cart.items { item.in_stock == true }
 none item in cart.items { item.banned == true }
@@ -551,7 +551,7 @@ none item in cart.items { item.banned == true }
 
 **Grouping**
 
-```arb
+```text
 (a > 1 or b > 2) and c > 3
 ```
 
