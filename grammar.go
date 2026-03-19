@@ -126,7 +126,7 @@ func ArbiterGrammar() *Grammar {
 		Optional(Field("no_loop", Sym("no_loop"))),
 		Repeat(Sym("rule_requires")),
 		Optional(Field("activation_group", Sym("expert_activation_group"))),
-		Field("condition", Sym("when_block")),
+		Field("condition", Sym("expert_when_block")),
 		Field("action", Sym("expert_then_block")),
 		Optional(Field("rollout", Sym("rule_rollout"))),
 		Str("}"),
@@ -139,6 +139,37 @@ func ArbiterGrammar() *Grammar {
 			Str("segment"),
 			Field("segment", Sym("identifier")),
 		)),
+		Str("{"),
+		Field("expr", Sym("_expr")),
+		Str("}"),
+	))
+
+	g.Define("expert_when_block", Seq(
+		Str("when"),
+		Optional(Seq(
+			Str("segment"),
+			Field("segment", Sym("identifier")),
+		)),
+		Choice(
+			Seq(Str("{"), Field("expr", Sym("_expr")), Str("}")),
+			Seq(Str("{"), Field("bindings", Sym("expert_binding_clause")), Str("}")),
+		),
+	))
+
+	g.Define("expert_binding_clause", Seq(
+		Repeat1(Sym("expert_binding")),
+		Field("where", Sym("expert_where_block")),
+	))
+
+	g.Define("expert_binding", Seq(
+		Str("bind"),
+		Field("name", Sym("identifier")),
+		Str("in"),
+		Field("source", Sym("_value_expr")),
+	))
+
+	g.Define("expert_where_block", Seq(
+		Str("where"),
 		Str("{"),
 		Field("expr", Sym("_expr")),
 		Str("}"),

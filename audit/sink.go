@@ -30,9 +30,10 @@ type FlagDecision struct {
 
 // ExpertFact captures one expert working-memory fact.
 type ExpertFact struct {
-	Type   string         `json:"type"`
-	Key    string         `json:"key"`
-	Fields map[string]any `json:"fields,omitempty"`
+	Type      string         `json:"type"`
+	Key       string         `json:"key"`
+	Fields    map[string]any `json:"fields,omitempty"`
+	DerivedBy []string       `json:"derived_by,omitempty"`
 }
 
 // ExpertOutcome captures one emitted expert outcome.
@@ -64,6 +65,15 @@ type ExpertDecision struct {
 	Mutations   int                `json:"mutations,omitempty"`
 }
 
+// OverrideChange captures one runtime override mutation.
+type OverrideChange struct {
+	Scope      string `json:"scope"`
+	Target     string `json:"target"`
+	RuleIndex  *int   `json:"rule_index,omitempty"`
+	KillSwitch *bool  `json:"kill_switch,omitempty"`
+	Rollout    *uint8 `json:"rollout,omitempty"`
+}
+
 // DecisionEvent is the durable audit record for one governance request.
 type DecisionEvent struct {
 	Timestamp time.Time          `json:"timestamp"`
@@ -74,6 +84,7 @@ type DecisionEvent struct {
 	Rules     []RuleMatch        `json:"rules,omitempty"`
 	Flag      *FlagDecision      `json:"flag,omitempty"`
 	Expert    *ExpertDecision    `json:"expert,omitempty"`
+	Override  *OverrideChange    `json:"override,omitempty"`
 	Trace     []govern.TraceStep `json:"trace,omitempty"`
 }
 

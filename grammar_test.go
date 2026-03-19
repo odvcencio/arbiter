@@ -106,6 +106,19 @@ func TestParseExpertModifyRule(t *testing.T) {
 	}
 }
 
+func TestParseExpertBindingClause(t *testing.T) {
+	sexp := parseArb(t, `expert rule JoinFacts { when { bind risk in facts.RiskFlag bind txn in facts.Transaction where { risk.account_id == txn.account_id and risk.level == "high" } } then emit ManualReview {} }`)
+	if !strings.Contains(sexp, "expert_binding_clause") {
+		t.Error("expected expert_binding_clause")
+	}
+	if strings.Count(sexp, "expert_binding (") != 2 {
+		t.Errorf("expected 2 expert_binding nodes, got: %s", sexp)
+	}
+	if !strings.Contains(sexp, "expert_where_block") {
+		t.Error("expected expert_where_block")
+	}
+}
+
 func TestParseExpertRuleControls(t *testing.T) {
 	sexp := parseArb(t, `expert rule ResolveRisk { no_loop activation_group risk when { true } then emit Approved {} }`)
 	if !strings.Contains(sexp, "no_loop") {

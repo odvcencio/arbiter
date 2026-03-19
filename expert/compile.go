@@ -46,16 +46,32 @@ type Program struct {
 
 // Compile parses .arb source and extracts only expert rules into an expert program.
 func Compile(source []byte) (*Program, error) {
-	base, err := arbiter.CompileFull(source)
+	parsed, err := arbiter.ParseSource(source)
 	if err != nil {
 		return nil, err
 	}
-
-	lang, root, err := parseSource(source)
+	base, err := arbiter.CompileFullParsed(parsed)
 	if err != nil {
 		return nil, err
 	}
+	return CompileParsed(parsed, base)
+}
 
+// CompileParsed extracts expert rules from a previously parsed source.
+func CompileParsed(parsed *arbiter.ParsedSource, base *arbiter.CompileResult) (*Program, error) {
+	if parsed == nil {
+		return nil, fmt.Errorf("nil parsed source")
+	}
+	if base == nil {
+		var err error
+		base, err = arbiter.CompileFullParsed(parsed)
+		if err != nil {
+			return nil, err
+		}
+	}
+	source := parsed.Source
+	lang := parsed.Lang
+	root := parsed.Root
 	var synthetic strings.Builder
 	rules := make([]Rule, 0)
 	byName := make(map[string]Rule)
@@ -139,25 +155,6 @@ func (p *Program) lookupRule(name string) (Rule, bool) {
 	return rule, ok
 }
 
-func parseSource(source []byte) (*gotreesitter.Language, *gotreesitter.Node, error) {
-	lang, err := arbiter.GetLanguage()
-	if err != nil {
-		return nil, nil, fmt.Errorf("get language: %w", err)
-	}
-
-	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.Parse(source)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parse: %w", err)
-	}
-
-	root := tree.RootNode()
-	if root.HasError() {
-		return nil, nil, fmt.Errorf("parse errors in arbiter source")
-	}
-	return lang, root, nil
-}
-
 func parseExpertRule(n *gotreesitter.Node, source []byte, lang *gotreesitter.Language, segmentDeps map[string][]string) (Rule, string, error) {
 	nameNode := n.ChildByFieldName("name", lang)
 	whenNode := n.ChildByFieldName("condition", lang)
@@ -201,9 +198,11 @@ func parseExpertRule(n *gotreesitter.Node, source []byte, lang *gotreesitter.Lan
 	if segNode := whenNode.ChildByFieldName("segment", lang); segNode != nil {
 		deps = append(deps, segmentDeps[nodeText(segNode, source)]...)
 	}
-	if exprNode := whenNode.ChildByFieldName("expr", lang); exprNode != nil {
-		deps = append(deps, collectFactDeps(exprNode, source, lang)...)
+	whenSource, whenDeps, err := expertConditionSource(whenNode, source, lang)
+	if err != nil {
+		return Rule{}, "", fmt.Errorf("expert rule %s: %w", rule.Name, err)
 	}
+	deps = append(deps, whenDeps...)
 	for i := 0; i < int(actionNode.NamedChildCount()); i++ {
 		child := actionNode.NamedChild(i)
 		switch child.Type(lang) {
@@ -302,7 +301,7 @@ func parseExpertRule(n *gotreesitter.Node, source []byte, lang *gotreesitter.Lan
 		synthetic.WriteString(nodeText(child, source))
 		synthetic.WriteString("\n")
 	}
-	synthetic.WriteString(nodeText(whenNode, source))
+	synthetic.WriteString(whenSource)
 	synthetic.WriteString("\n")
 	synthetic.WriteString("then ")
 	synthetic.WriteString(rule.Target)
@@ -340,6 +339,72 @@ func parseExpertRule(n *gotreesitter.Node, source []byte, lang *gotreesitter.Lan
 	synthetic.WriteString("}\n")
 
 	return rule, synthetic.String(), nil
+}
+
+type bindingRef struct {
+	Name   string
+	Source string
+}
+
+func expertConditionSource(whenNode *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (string, []string, error) {
+	if whenNode == nil {
+		return "", nil, fmt.Errorf("missing expert when block")
+	}
+	if exprNode := whenNode.ChildByFieldName("expr", lang); exprNode != nil {
+		return nodeText(whenNode, source), collectFactDeps(exprNode, source, lang), nil
+	}
+
+	bindingsNode := whenNode.ChildByFieldName("bindings", lang)
+	if bindingsNode == nil {
+		return "", nil, fmt.Errorf("expert binding clause is missing")
+	}
+	whereNode := bindingsNode.ChildByFieldName("where", lang)
+	if whereNode == nil {
+		return "", nil, fmt.Errorf("expert binding clause is missing where block")
+	}
+	bodyExpr := whereNode.ChildByFieldName("expr", lang)
+	if bodyExpr == nil {
+		return "", nil, fmt.Errorf("expert binding clause is missing where expression")
+	}
+
+	bindings := make([]bindingRef, 0)
+	deps := collectFactDeps(bodyExpr, source, lang)
+	for i := 0; i < int(bindingsNode.NamedChildCount()); i++ {
+		child := bindingsNode.NamedChild(i)
+		if child.Type(lang) != "expert_binding" {
+			continue
+		}
+		nameNode := child.ChildByFieldName("name", lang)
+		sourceNode := child.ChildByFieldName("source", lang)
+		if nameNode == nil || sourceNode == nil {
+			return "", nil, fmt.Errorf("expert binding is missing name or source")
+		}
+		bindings = append(bindings, bindingRef{
+			Name:   nodeText(nameNode, source),
+			Source: nodeText(sourceNode, source),
+		})
+		deps = append(deps, collectFactDeps(sourceNode, source, lang)...)
+	}
+	if len(bindings) == 0 {
+		return "", nil, fmt.Errorf("expert binding clause requires at least one bind")
+	}
+
+	expr := nodeText(bodyExpr, source)
+	for i := len(bindings) - 1; i >= 0; i-- {
+		expr = fmt.Sprintf("any %s in %s { %s }", bindings[i].Name, bindings[i].Source, expr)
+	}
+
+	var out strings.Builder
+	out.WriteString("when ")
+	if segNode := whenNode.ChildByFieldName("segment", lang); segNode != nil {
+		out.WriteString("segment ")
+		out.WriteString(nodeText(segNode, source))
+		out.WriteByte(' ')
+	}
+	out.WriteString("{ ")
+	out.WriteString(expr)
+	out.WriteString(" }")
+	return out.String(), deps, nil
 }
 
 func nodeText(n *gotreesitter.Node, source []byte) string {

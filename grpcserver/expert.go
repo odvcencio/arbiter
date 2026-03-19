@@ -45,11 +45,15 @@ func (s *Server) RunSession(ctx context.Context, req *arbiterv1.RunSessionReques
 	if err != nil {
 		return nil, err
 	}
-	result, err := handle.Session.Run(ctx)
-	if err != nil {
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
+
+	mark := handle.Session.Checkpoint()
+	if _, err := handle.Session.Run(ctx); err != nil {
 		return nil, status.Errorf(codes.Internal, "run session: %v", err)
 	}
-	resp, err := protoSessionResult(result)
+	delta := handle.Session.DeltaSince(mark)
+	resp, err := protoSessionResult(delta)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "marshal session result: %v", err)
 	}
@@ -60,7 +64,7 @@ func (s *Server) RunSession(ctx context.Context, req *arbiterv1.RunSessionReques
 		BundleID:  handle.BundleID,
 		Kind:      "expert",
 		Context:   handle.Envelope,
-		Expert:    auditExpertDecision(handle.ID, result),
+		Expert:    auditExpertDecision(handle.ID, delta),
 	})
 
 	return resp, nil
@@ -72,6 +76,8 @@ func (s *Server) AssertFacts(_ context.Context, req *arbiterv1.AssertFactsReques
 	if err != nil {
 		return nil, err
 	}
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
 	facts, err := expertFactsFromProto(req.GetFacts())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid facts: %v", err)
@@ -90,6 +96,8 @@ func (s *Server) RetractFacts(_ context.Context, req *arbiterv1.RetractFactsRequ
 	if err != nil {
 		return nil, err
 	}
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
 	for _, ref := range req.GetFacts() {
 		if err := handle.Session.Retract(ref.GetType(), ref.GetKey()); err != nil {
 			return nil, status.Errorf(codes.InvalidArgument, "retract fact: %v", err)
@@ -104,6 +112,8 @@ func (s *Server) GetSessionTrace(_ context.Context, req *arbiterv1.GetSessionTra
 	if err != nil {
 		return nil, err
 	}
+	handle.mu.Lock()
+	defer handle.mu.Unlock()
 	resp, err := protoTraceSnapshot(handle.Session.Snapshot())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "marshal session trace: %v", err)
@@ -261,9 +271,10 @@ func auditExpertDecision(sessionID string, result expert.Result) *audit.ExpertDe
 	}
 	for _, fact := range result.Facts {
 		decision.Facts = append(decision.Facts, audit.ExpertFact{
-			Type:   fact.Type,
-			Key:    fact.Key,
-			Fields: fact.Fields,
+			Type:      fact.Type,
+			Key:       fact.Key,
+			Fields:    fact.Fields,
+			DerivedBy: append([]string(nil), fact.DerivedBy...),
 		})
 	}
 	for _, activation := range result.Activations {

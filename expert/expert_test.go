@@ -250,6 +250,187 @@ expert rule RouteManualReview {
 	}
 }
 
+func TestSessionRetractsDerivedFactWhenSupportDisappears(t *testing.T) {
+	src := []byte(`
+expert rule SeedHighRisk {
+	when {
+		any marker in facts.Marker { marker.kind == "high" }
+	}
+	then assert RiskFlag {
+		key: "high_risk",
+		level: "high",
+	}
+}
+
+expert rule RouteManualReview {
+	when {
+		any risk in facts.RiskFlag { risk.level == "high" }
+	}
+	then emit ManualReview {
+		queue: "risk",
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, []expert.Fact{{
+		Type: "Marker",
+		Key:  "marker_1",
+		Fields: map[string]any{
+			"kind": "high",
+		},
+	}}, expert.Options{})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+	risk := requireFact(t, first.Facts, "RiskFlag", "high_risk")
+	if len(risk.DerivedBy) != 1 || risk.DerivedBy[0] != "SeedHighRisk" {
+		t.Fatalf("expected support provenance, got %+v", risk)
+	}
+
+	if err := session.Retract("Marker", "marker_1"); err != nil {
+		t.Fatalf("Retract: %v", err)
+	}
+
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	if len(second.Facts) != 0 {
+		t.Fatalf("expected derived fact to retract when support disappears, got %+v", second.Facts)
+	}
+}
+
+func TestSessionUsesHighestPrioritySupportForSharedDerivedFact(t *testing.T) {
+	src := []byte(`
+expert rule PrimarySupport priority 20 {
+	when {
+		any marker in facts.MarkerA { marker.kind == "high" }
+	}
+	then assert RiskFlag {
+		key: "shared_risk",
+		level: "high",
+	}
+}
+
+expert rule SecondarySupport priority 10 {
+	when {
+		any marker in facts.MarkerB { marker.kind == "high" }
+	}
+	then assert RiskFlag {
+		key: "shared_risk",
+		level: "review",
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, []expert.Fact{
+		{
+			Type: "MarkerA",
+			Key:  "a1",
+			Fields: map[string]any{
+				"kind": "high",
+			},
+		},
+		{
+			Type: "MarkerB",
+			Key:  "b1",
+			Fields: map[string]any{
+				"kind": "high",
+			},
+		},
+	}, expert.Options{})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+	shared := requireFact(t, first.Facts, "RiskFlag", "shared_risk")
+	if shared.Fields["level"] != "high" {
+		t.Fatalf("expected higher-priority support to win, got %+v", shared)
+	}
+	if len(shared.DerivedBy) != 2 || shared.DerivedBy[0] != "PrimarySupport" || shared.DerivedBy[1] != "SecondarySupport" {
+		t.Fatalf("unexpected support provenance: %+v", shared)
+	}
+
+	if err := session.Retract("MarkerA", "a1"); err != nil {
+		t.Fatalf("Retract: %v", err)
+	}
+
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	shared = requireFact(t, second.Facts, "RiskFlag", "shared_risk")
+	if shared.Fields["level"] != "review" {
+		t.Fatalf("expected remaining support to win after primary retract, got %+v", shared)
+	}
+	if len(shared.DerivedBy) != 1 || shared.DerivedBy[0] != "SecondarySupport" {
+		t.Fatalf("unexpected support provenance after retract: %+v", shared)
+	}
+}
+
+func TestSessionExpertBindingsJoinFacts(t *testing.T) {
+	src := []byte(`
+expert rule RouteManualReview {
+	when {
+		bind risk in facts.RiskFlag
+		bind txn in facts.Transaction
+		where {
+			risk.account_id == txn.account_id
+			and risk.level == "high"
+		}
+	}
+	then emit ManualReview {
+		queue: "risk",
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, []expert.Fact{
+		{
+			Type: "RiskFlag",
+			Key:  "risk_1",
+			Fields: map[string]any{
+				"account_id": "acct_1",
+				"level":      "high",
+			},
+		},
+		{
+			Type: "Transaction",
+			Key:  "txn_1",
+			Fields: map[string]any{
+				"account_id": "acct_1",
+				"amount":     250.0,
+			},
+		},
+	}, expert.Options{})
+
+	result, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.Outcomes) != 1 || result.Outcomes[0].Name != "ManualReview" {
+		t.Fatalf("expected joined bindings to emit ManualReview, got %+v", result.Outcomes)
+	}
+}
+
 func TestSessionStopsAtMaxMutations(t *testing.T) {
 	src := []byte(`
 expert rule SeedHighRisk {
@@ -544,4 +725,15 @@ func writeExpertTestFile(t *testing.T, dir, name, contents string) string {
 		t.Fatalf("write %s: %v", path, err)
 	}
 	return path
+}
+
+func requireFact(t *testing.T, facts []expert.Fact, factType, key string) expert.Fact {
+	t.Helper()
+	for _, fact := range facts {
+		if fact.Type == factType && fact.Key == key {
+			return fact
+		}
+	}
+	t.Fatalf("missing fact %s/%s in %+v", factType, key, facts)
+	return expert.Fact{}
 }

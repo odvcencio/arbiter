@@ -15,9 +15,10 @@ import (
 
 // Fact is one working-memory fact.
 type Fact struct {
-	Type   string         `json:"type"`
-	Key    string         `json:"key"`
-	Fields map[string]any `json:"fields,omitempty"`
+	Type      string         `json:"type"`
+	Key       string         `json:"key"`
+	Fields    map[string]any `json:"fields,omitempty"`
+	DerivedBy []string       `json:"derived_by,omitempty"`
 }
 
 // Outcome is one emitted expert outcome.
@@ -66,21 +67,41 @@ type Result struct {
 	StopReason  StopReason   `json:"stop_reason"`
 }
 
+// Checkpoint marks a session position so callers can request a later delta.
+type Checkpoint struct {
+	outcomeCount    int
+	activationCount int
+}
+
+type supportRecord struct {
+	Rule     string
+	Priority int
+	Fact     Fact
+}
+
 // Session runs an expert program against an envelope and working memory.
 type Session struct {
-	program      *Program
-	envelope     map[string]any
-	facts        map[string]map[string]Fact
-	outcomes     []Outcome
-	activations  []Activation
-	emitted      map[string]struct{}
-	opts         Options
-	mutations    int
-	rounds       int
-	stopReason   StopReason
-	ruleResults  map[string]bool
-	dirtyFacts   map[string]struct{}
-	dirtySources map[string]map[string]struct{}
+	program        *Program
+	envelope       map[string]any
+	facts          map[string]map[string]Fact
+	externalFacts  map[string]map[string]Fact
+	outcomes       []Outcome
+	activations    []Activation
+	emitted        map[string]struct{}
+	opts           Options
+	mutations      int
+	rounds         int
+	stopReason     StopReason
+	ruleResults    map[string]bool
+	dirtyFacts     map[string]struct{}
+	dirtySources   map[string]map[string]struct{}
+	supportsByRule map[string]supportRecord
+	factSupports   map[string]map[string]map[string]supportRecord
+	evalCtx        map[string]any
+	factsView      map[string]any
+	pool           *vm.StringPool
+	dc             vm.DataContext
+	evaluator      *vm.Evaluator
 }
 
 // NewSession creates a new in-memory expert session.
@@ -93,17 +114,21 @@ func NewSession(p *Program, envelope map[string]any, facts []Fact, opts Options)
 	}
 
 	s := &Session{
-		program:      p,
-		envelope:     cloneMap(envelope),
-		facts:        make(map[string]map[string]Fact),
-		emitted:      make(map[string]struct{}),
-		opts:         opts,
-		ruleResults:  make(map[string]bool),
-		dirtyFacts:   make(map[string]struct{}),
-		dirtySources: make(map[string]map[string]struct{}),
+		program:        p,
+		envelope:       cloneMap(envelope),
+		facts:          make(map[string]map[string]Fact),
+		externalFacts:  make(map[string]map[string]Fact),
+		emitted:        make(map[string]struct{}),
+		opts:           opts,
+		ruleResults:    make(map[string]bool),
+		dirtyFacts:     make(map[string]struct{}),
+		dirtySources:   make(map[string]map[string]struct{}),
+		supportsByRule: make(map[string]supportRecord),
+		factSupports:   make(map[string]map[string]map[string]supportRecord),
 	}
+	s.initEvalState()
 	for _, fact := range facts {
-		_, _ = s.upsertFactWithSource(fact, "")
+		_, _ = s.upsertExternalFact(fact)
 	}
 	return s
 }
@@ -119,7 +144,7 @@ func (s *Session) Assert(f Fact) error {
 	if f.Key == "" {
 		return fmt.Errorf("fact key is required")
 	}
-	_, err := s.upsertFactWithSource(f, "")
+	_, err := s.upsertExternalFact(f)
 	return err
 }
 
@@ -134,15 +159,15 @@ func (s *Session) Retract(factType, factKey string) error {
 	if factKey == "" {
 		return fmt.Errorf("fact key is required")
 	}
-	byKey, ok := s.facts[factType]
+	byKey, ok := s.externalFacts[factType]
 	if !ok {
 		return nil
 	}
 	delete(byKey, factKey)
 	if len(byKey) == 0 {
-		delete(s.facts, factType)
+		delete(s.externalFacts, factType)
 	}
-	s.markDirtySource(factType, "")
+	s.recomputeFact(factType, factKey, "")
 	return nil
 }
 
@@ -174,6 +199,33 @@ func (s *Session) Trace() []Activation {
 	return out
 }
 
+// Checkpoint returns a mark that can later be used with DeltaSince.
+func (s *Session) Checkpoint() Checkpoint {
+	if s == nil {
+		return Checkpoint{}
+	}
+	return Checkpoint{
+		outcomeCount:    len(s.outcomes),
+		activationCount: len(s.activations),
+	}
+}
+
+// DeltaSince returns the incremental outcomes and activations since a checkpoint,
+// along with the current facts and guardrail metadata.
+func (s *Session) DeltaSince(mark Checkpoint) Result {
+	if s == nil {
+		return Result{}
+	}
+	return Result{
+		Outcomes:    cloneOutcomes(s.outcomes, mark.outcomeCount),
+		Facts:       s.sortedFacts(),
+		Activations: cloneActivations(s.activations, mark.activationCount),
+		Rounds:      s.rounds,
+		Mutations:   s.mutations,
+		StopReason:  s.stopReason,
+	}
+}
+
 // Run evaluates the expert program until it reaches a fixed point or a guardrail.
 func (s *Session) Run(ctx context.Context) (Result, error) {
 	if s == nil || s.program == nil {
@@ -199,11 +251,12 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 		dirtyFacts := s.copyDirtyFacts()
 		dirtySources := s.copyDirtySources()
 		s.clearDirtyFacts()
-		matched, ruleChanges, err := s.runRound(firstPass, dirtyFacts, dirtySources)
+		matched, ruleChanges, evaluated, err := s.runRound(firstPass, dirtyFacts, dirtySources)
 		if err != nil {
 			return Result{}, err
 		}
 		mutated := false
+		activeAssertRules := make(map[string]struct{})
 		for _, match := range matched {
 			if err := ctx.Err(); err != nil {
 				s.stopReason = StopContextCancelled
@@ -226,6 +279,7 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 				if err != nil {
 					return Result{}, err
 				}
+				activeAssertRules[rule.Name] = struct{}{}
 				mutated = mutated || changed
 			case ActionEmit:
 				_, err := s.applyEmit(round, rule, match)
@@ -254,6 +308,18 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 			if s.mutations >= s.opts.MaxMutations {
 				s.stopReason = StopMaxMutations
 				return s.snapshot(), nil
+			}
+		}
+		for ruleName := range evaluated {
+			rule, ok := s.program.lookupRule(ruleName)
+			if !ok || rule.Kind != ActionAssert {
+				continue
+			}
+			if _, ok := activeAssertRules[ruleName]; ok {
+				continue
+			}
+			if s.clearDerivedSupport(ruleName) {
+				mutated = true
 			}
 		}
 
@@ -290,12 +356,12 @@ func (s *Session) applyAssert(round int, rule Rule, match vm.MatchedRule) (bool,
 		Key:    key,
 		Fields: cloneMap(match.Params),
 	}
-	changed, err := s.upsertFactWithSource(fact, rule.Name)
-	if err != nil {
-		return false, "", err
-	}
+	changed := s.setDerivedSupport(rule, fact)
 
 	detail := fmt.Sprintf("assert %s/%s", rule.Target, key)
+	if supporters := s.supporterNames(rule.Target, key); len(supporters) > 0 {
+		detail += " supports=" + strings.Join(supporters, ",")
+	}
 	if changed {
 		detail += " changed"
 		s.mutations++
@@ -392,7 +458,7 @@ func (s *Session) applyModify(round int, rule Rule, match vm.MatchedRule) (bool,
 	return changed, detail, nil
 }
 
-func (s *Session) upsertFactWithSource(f Fact, source string) (bool, error) {
+func (s *Session) upsertExternalFact(f Fact) (bool, error) {
 	if f.Type == "" {
 		return false, fmt.Errorf("fact type is required")
 	}
@@ -403,10 +469,10 @@ func (s *Session) upsertFactWithSource(f Fact, source string) (bool, error) {
 		f.Fields = make(map[string]any)
 	}
 
-	byKey, ok := s.facts[f.Type]
+	byKey, ok := s.externalFacts[f.Type]
 	if !ok {
 		byKey = make(map[string]Fact)
-		s.facts[f.Type] = byKey
+		s.externalFacts[f.Type] = byKey
 	}
 
 	next := Fact{
@@ -419,8 +485,165 @@ func (s *Session) upsertFactWithSource(f Fact, source string) (bool, error) {
 	}
 
 	byKey[f.Key] = next
-	s.markDirtySource(f.Type, source)
-	return true, nil
+	return s.recomputeFact(f.Type, f.Key, ""), nil
+}
+
+func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
+	next := supportRecord{
+		Rule:     rule.Name,
+		Priority: rule.Priority,
+		Fact: Fact{
+			Type:   fact.Type,
+			Key:    fact.Key,
+			Fields: cloneMap(fact.Fields),
+		},
+	}
+
+	prev, hadPrev := s.supportsByRule[rule.Name]
+	changed := false
+	sameFact := hadPrev && prev.Fact.Type == next.Fact.Type && prev.Fact.Key == next.Fact.Key
+	if hadPrev {
+		s.removeSupportRecord(prev)
+		if !sameFact {
+			changed = s.recomputeFact(prev.Fact.Type, prev.Fact.Key, rule.Name) || changed
+		}
+	}
+
+	byKey, ok := s.factSupports[next.Fact.Type]
+	if !ok {
+		byKey = make(map[string]map[string]supportRecord)
+		s.factSupports[next.Fact.Type] = byKey
+	}
+	supporters, ok := byKey[next.Fact.Key]
+	if !ok {
+		supporters = make(map[string]supportRecord)
+		byKey[next.Fact.Key] = supporters
+	}
+	supporters[rule.Name] = next
+	s.supportsByRule[rule.Name] = next
+	return s.recomputeFact(next.Fact.Type, next.Fact.Key, rule.Name) || changed
+}
+
+func (s *Session) clearDerivedSupport(ruleName string) bool {
+	prev, ok := s.supportsByRule[ruleName]
+	if !ok {
+		return false
+	}
+	s.removeSupportRecord(prev)
+	return s.recomputeFact(prev.Fact.Type, prev.Fact.Key, ruleName)
+}
+
+func (s *Session) removeSupportRecord(record supportRecord) {
+	delete(s.supportsByRule, record.Rule)
+	byKey, ok := s.factSupports[record.Fact.Type]
+	if !ok {
+		return
+	}
+	supporters, ok := byKey[record.Fact.Key]
+	if !ok {
+		return
+	}
+	delete(supporters, record.Rule)
+	if len(supporters) == 0 {
+		delete(byKey, record.Fact.Key)
+	}
+	if len(byKey) == 0 {
+		delete(s.factSupports, record.Fact.Type)
+	}
+}
+
+func (s *Session) recomputeFact(factType, factKey, source string) bool {
+	next, ok := s.desiredFact(factType, factKey)
+	current, currentOK := s.currentFact(factType, factKey)
+	if !ok {
+		if !currentOK {
+			return false
+		}
+		byKey := s.facts[factType]
+		delete(byKey, factKey)
+		if len(byKey) == 0 {
+			delete(s.facts, factType)
+		}
+		s.markDirtySource(factType, source)
+		return true
+	}
+
+	if currentOK && stableKey(current.Fields) == stableKey(next.Fields) {
+		if !sameStrings(current.DerivedBy, next.DerivedBy) {
+			byKey := s.facts[factType]
+			byKey[factKey] = next
+		}
+		return false
+	}
+
+	byKey, ok := s.facts[factType]
+	if !ok {
+		byKey = make(map[string]Fact)
+		s.facts[factType] = byKey
+	}
+	byKey[factKey] = next
+	s.markDirtySource(factType, source)
+	return true
+}
+
+func (s *Session) desiredFact(factType, factKey string) (Fact, bool) {
+	if record, ok := s.winningSupport(factType, factKey); ok {
+		fact := cloneFact(record.Fact)
+		fact.DerivedBy = s.supporterNames(factType, factKey)
+		return fact, true
+	}
+	if byKey, ok := s.externalFacts[factType]; ok {
+		if fact, ok := byKey[factKey]; ok {
+			return cloneFact(fact), true
+		}
+	}
+	return Fact{}, false
+}
+
+func (s *Session) currentFact(factType, factKey string) (Fact, bool) {
+	byKey, ok := s.facts[factType]
+	if !ok {
+		return Fact{}, false
+	}
+	fact, ok := byKey[factKey]
+	return fact, ok
+}
+
+func (s *Session) winningSupport(factType, factKey string) (supportRecord, bool) {
+	byKey, ok := s.factSupports[factType]
+	if !ok {
+		return supportRecord{}, false
+	}
+	supporters, ok := byKey[factKey]
+	if !ok || len(supporters) == 0 {
+		return supportRecord{}, false
+	}
+	var winner supportRecord
+	set := false
+	for _, record := range supporters {
+		if !set || record.Priority > winner.Priority || (record.Priority == winner.Priority && record.Rule < winner.Rule) {
+			winner = record
+			set = true
+		}
+	}
+	return winner, set
+}
+
+func (s *Session) supporterNames(factType, factKey string) []string {
+	byKey, ok := s.factSupports[factType]
+	if !ok {
+		return nil
+	}
+	supporters, ok := byKey[factKey]
+	if !ok || len(supporters) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(supporters))
+	for ruleName := range supporters {
+		out = append(out, ruleName)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *Session) deleteFact(factType, factKey, source string) bool {
@@ -450,9 +673,10 @@ func (s *Session) modifyFact(factType, factKey string, setFields map[string]any,
 	}
 
 	next := Fact{
-		Type:   current.Type,
-		Key:    current.Key,
-		Fields: cloneMap(current.Fields),
+		Type:      current.Type,
+		Key:       current.Key,
+		Fields:    cloneMap(current.Fields),
+		DerivedBy: append([]string(nil), current.DerivedBy...),
 	}
 	if next.Fields == nil {
 		next.Fields = make(map[string]any)
@@ -471,22 +695,20 @@ func (s *Session) modifyFact(factType, factKey string, setFields map[string]any,
 	return true
 }
 
-func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}) ([]vm.MatchedRule, map[string]struct{}, error) {
-	evalCtx := s.contextView()
-	rc := govern.NewRequestCache(s.program.segments, evalCtx)
+func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}) ([]vm.MatchedRule, map[string]struct{}, map[string]struct{}, error) {
+	s.refreshContextView(firstPass, dirtyFacts)
+	rc := govern.NewRequestCache(s.program.segments, s.evalCtx)
 	for name, matched := range s.ruleResults {
 		rc.RecordRuleResult(name, matched)
 	}
 
-	sp := vm.NewStringPool(s.program.ruleset.Constants.Strings())
-	dc := vm.DataFromMap(evalCtx, sp)
-	evaluator := vm.NewEvaluator(s.program.ruleset, sp)
 	current := make(map[string]bool, len(s.ruleResults)+len(s.program.rules))
 	for name, matched := range s.ruleResults {
 		current[name] = matched
 	}
 	ruleChanges := make(map[string]struct{})
 	matched := make([]vm.MatchedRule, 0)
+	evaluated := make(map[string]struct{})
 
 	for i, header := range s.program.ruleset.Rules {
 		rule := s.program.rules[i]
@@ -494,10 +716,11 @@ func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirty
 		if !shouldEval {
 			continue
 		}
+		evaluated[rule.Name] = struct{}{}
 
-		result, mr, err := s.evalRule(rule, header, evaluator, dc, rc)
+		result, mr, err := s.evalRule(rule, header, s.evaluator, s.dc, rc)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		prev := current[rule.Name]
 		current[rule.Name] = result
@@ -511,7 +734,7 @@ func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirty
 	}
 
 	s.ruleResults = current
-	return matched, ruleChanges, nil
+	return matched, ruleChanges, evaluated, nil
 }
 
 func (s *Session) evalRule(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext, rc *govern.RequestCache) (bool, vm.MatchedRule, error) {
@@ -699,33 +922,46 @@ func changedOnlyByRule(sources map[string]struct{}, ruleName string) bool {
 	return true
 }
 
-func (s *Session) contextView() map[string]any {
-	view := cloneMap(s.envelope)
-	factsView := make(map[string]any, len(s.facts))
-
-	typeNames := make([]string, 0, len(s.facts))
-	for typeName := range s.facts {
-		typeNames = append(typeNames, typeName)
+func (s *Session) initEvalState() {
+	if s == nil {
+		return
 	}
-	sort.Strings(typeNames)
-
-	for _, typeName := range typeNames {
-		byKey := s.facts[typeName]
-		keys := make([]string, 0, len(byKey))
-		for key := range byKey {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-
-		items := make([]any, 0, len(keys))
-		for _, key := range keys {
-			items = append(items, cloneMap(byKey[key].Fields))
-		}
-		factsView[typeName] = items
+	s.evalCtx = cloneMap(s.envelope)
+	if s.evalCtx == nil {
+		s.evalCtx = make(map[string]any)
 	}
+	s.factsView = make(map[string]any)
+	s.evalCtx["facts"] = s.factsView
+	if s.program == nil || s.program.ruleset == nil {
+		return
+	}
+	s.pool = vm.NewStringPool(s.program.ruleset.Constants.Strings())
+	s.dc = vm.DataFromMap(s.evalCtx, s.pool)
+	s.evaluator = vm.NewEvaluator(s.program.ruleset, s.pool)
+}
 
-	view["facts"] = factsView
-	return view
+func (s *Session) refreshContextView(firstPass bool, dirtyFacts map[string]struct{}) {
+	if s.evalCtx == nil || s.factsView == nil || s.dc == nil || s.evaluator == nil {
+		s.initEvalState()
+	}
+	if firstPass {
+		dirtyFacts = make(map[string]struct{}, len(s.facts))
+		for factType := range s.facts {
+			dirtyFacts[factType] = struct{}{}
+		}
+	}
+	for factType := range dirtyFacts {
+		byKey, ok := s.facts[factType]
+		if !ok || len(byKey) == 0 {
+			delete(s.factsView, factType)
+			continue
+		}
+		items := make([]any, 0, len(byKey))
+		for _, fact := range byKey {
+			items = append(items, fact.Fields)
+		}
+		s.factsView[factType] = items
+	}
 }
 
 func (s *Session) sortedFacts() []Fact {
@@ -746,9 +982,10 @@ func (s *Session) sortedFacts() []Fact {
 		for _, key := range keys {
 			fact := byKey[key]
 			out = append(out, Fact{
-				Type:   fact.Type,
-				Key:    fact.Key,
-				Fields: cloneMap(fact.Fields),
+				Type:      fact.Type,
+				Key:       fact.Key,
+				Fields:    cloneMap(fact.Fields),
+				DerivedBy: append([]string(nil), fact.DerivedBy...),
 			})
 		}
 	}
@@ -756,21 +993,62 @@ func (s *Session) sortedFacts() []Fact {
 }
 
 func (s *Session) snapshot() Result {
-	outcomes := make([]Outcome, len(s.outcomes))
-	for i, outcome := range s.outcomes {
-		outcomes[i] = Outcome{
+	return Result{
+		Outcomes:    cloneOutcomes(s.outcomes, 0),
+		Facts:       s.sortedFacts(),
+		Activations: cloneActivations(s.activations, 0),
+		Rounds:      s.rounds,
+		Mutations:   s.mutations,
+		StopReason:  s.stopReason,
+	}
+}
+
+func cloneOutcomes(src []Outcome, start int) []Outcome {
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(src) {
+		return nil
+	}
+	out := make([]Outcome, len(src)-start)
+	for i, outcome := range src[start:] {
+		out[i] = Outcome{
 			Rule:   outcome.Rule,
 			Name:   outcome.Name,
 			Params: cloneMap(outcome.Params),
 		}
 	}
-	return Result{
-		Outcomes:    outcomes,
-		Facts:       s.sortedFacts(),
-		Activations: s.Trace(),
-		Rounds:      s.rounds,
-		Mutations:   s.mutations,
-		StopReason:  s.stopReason,
+	return out
+}
+
+func cloneActivations(src []Activation, start int) []Activation {
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(src) {
+		return nil
+	}
+	out := make([]Activation, len(src)-start)
+	for i, activation := range src[start:] {
+		out[i] = Activation{
+			Round:   activation.Round,
+			Rule:    activation.Rule,
+			Kind:    activation.Kind,
+			Target:  activation.Target,
+			Params:  cloneMap(activation.Params),
+			Changed: activation.Changed,
+			Detail:  activation.Detail,
+		}
+	}
+	return out
+}
+
+func cloneFact(src Fact) Fact {
+	return Fact{
+		Type:      src.Type,
+		Key:       src.Key,
+		Fields:    cloneMap(src.Fields),
+		DerivedBy: append([]string(nil), src.DerivedBy...),
 	}
 }
 
@@ -783,6 +1061,18 @@ func cloneMap(src map[string]any) map[string]any {
 		dst[key] = value
 	}
 	return dst
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func factKeyString(v any) string {
