@@ -10,22 +10,32 @@
 //	arbiter check <file.arb>                  — validate without emitting
 //	arbiter compile <file.arb>                — compile to bytecode, print stats
 //	arbiter eval <file.arb> --data '{...}'    — compile and eval against JSON
+//	arbiter expert <file.arb> --envelope '{...}' [--facts '[...]'] — run one expert session
 //	arbiter import <file.json> [-o output.arb] — decompile Arishem JSON to .arb
+//	arbiter serve [--grpc :8081] [--audit-file decisions.jsonl] — start gRPC API
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 
 	"github.com/odvcencio/arbiter"
+	arbiterv1 "github.com/odvcencio/arbiter/api/arbiter/v1"
+	"github.com/odvcencio/arbiter/audit"
 	"github.com/odvcencio/arbiter/decompile"
 	"github.com/odvcencio/arbiter/emit"
+	"github.com/odvcencio/arbiter/expert"
+	"github.com/odvcencio/arbiter/grpcserver"
+	"github.com/odvcencio/arbiter/overrides"
+	"google.golang.org/grpc"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: arbiter <command> <file>\nCommands: emit, check, compile, eval, import\n")
+		fmt.Fprintf(os.Stderr, "Usage: arbiter <command> <file>\nCommands: emit, check, compile, eval, expert, import, serve\n")
 		os.Exit(1)
 	}
 
@@ -89,6 +99,31 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
+	case "expert":
+		if len(os.Args) < 3 {
+			fmt.Fprintf(os.Stderr, "Usage: arbiter expert <file.arb> --envelope '{...}' [--facts '[...]']\n")
+			os.Exit(1)
+		}
+		envelopeJSON := ""
+		factsJSON := ""
+		for i := 3; i < len(os.Args); i++ {
+			if os.Args[i] == "--envelope" && i+1 < len(os.Args) {
+				envelopeJSON = os.Args[i+1]
+				i++
+			}
+			if os.Args[i] == "--facts" && i+1 < len(os.Args) {
+				factsJSON = os.Args[i+1]
+				i++
+			}
+		}
+		if envelopeJSON == "" {
+			fmt.Fprintf(os.Stderr, "error: --envelope flag is required\n")
+			os.Exit(1)
+		}
+		if err := expertCmd(os.Args[2], envelopeJSON, factsJSON); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 	case "import":
 		if len(os.Args) < 3 {
 			fmt.Fprintf(os.Stderr, "Usage: arbiter import <file.json> [-o output.arb]\n")
@@ -105,16 +140,33 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
+	case "serve":
+		grpcAddr := ":8081"
+		auditFile := ""
+		for i := 2; i < len(os.Args); i++ {
+			if os.Args[i] == "--grpc" && i+1 < len(os.Args) {
+				grpcAddr = os.Args[i+1]
+				i++
+			}
+			if os.Args[i] == "--audit-file" && i+1 < len(os.Args) {
+				auditFile = os.Args[i+1]
+				i++
+			}
+		}
+		if err := serveCmd(grpcAddr, auditFile); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\nCommands: emit, check, compile, eval, import\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\nCommands: emit, check, compile, eval, expert, import, serve\n", os.Args[1])
 		os.Exit(1)
 	}
 }
 
 func emitCmd(path, ruleName, format string) error {
-	source, err := os.ReadFile(path)
+	source, err := arbiter.LoadFileSource(path)
 	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
+		return err
 	}
 
 	// If a specific format is requested, use the emit package
@@ -147,7 +199,7 @@ func emitCmd(path, ruleName, format string) error {
 	}
 
 	if ruleName != "" {
-		json, err := arbiter.TranspileRule(source, ruleName)
+		json, err := arbiter.TranspileRuleFile(path, ruleName)
 		if err != nil {
 			return fmt.Errorf("transpile rule %s: %w", ruleName, err)
 		}
@@ -155,7 +207,7 @@ func emitCmd(path, ruleName, format string) error {
 		return nil
 	}
 
-	json, err := arbiter.Transpile(source)
+	json, err := arbiter.TranspileFile(path)
 	if err != nil {
 		return fmt.Errorf("transpile %s: %w", path, err)
 	}
@@ -164,12 +216,7 @@ func emitCmd(path, ruleName, format string) error {
 }
 
 func check(path string) error {
-	source, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-
-	_, err = arbiter.Transpile(source)
+	_, err := arbiter.TranspileFile(path)
 	if err != nil {
 		return fmt.Errorf("check %s: %w", path, err)
 	}
@@ -179,12 +226,7 @@ func check(path string) error {
 }
 
 func compileCmd(path string) error {
-	source, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-
-	rs, err := arbiter.Compile(source)
+	rs, err := arbiter.CompileFile(path)
 	if err != nil {
 		return fmt.Errorf("compile %s: %w", path, err)
 	}
@@ -199,12 +241,7 @@ func compileCmd(path string) error {
 }
 
 func evalCmd(path, dataJSON string) error {
-	source, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
-
-	rs, err := arbiter.Compile(source)
+	rs, err := arbiter.CompileFile(path)
 	if err != nil {
 		return fmt.Errorf("compile %s: %w", path, err)
 	}
@@ -238,6 +275,54 @@ func evalCmd(path, dataJSON string) error {
 	}
 
 	return nil
+}
+
+func expertCmd(path, envelopeJSON, factsJSON string) error {
+	program, err := expert.CompileFile(path)
+	if err != nil {
+		return fmt.Errorf("compile expert rules: %w", err)
+	}
+
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(envelopeJSON), &envelope); err != nil {
+		return fmt.Errorf("parse envelope: %w", err)
+	}
+
+	facts, err := parseFactsJSON(factsJSON)
+	if err != nil {
+		return err
+	}
+
+	result, err := expert.NewSession(program, envelope, facts, expert.Options{}).Run(context.Background())
+	if err != nil {
+		return fmt.Errorf("run expert session: %w", err)
+	}
+
+	out := map[string]any{
+		"outcomes":    result.Outcomes,
+		"facts":       result.Facts,
+		"activations": result.Activations,
+		"rounds":      result.Rounds,
+		"mutations":   result.Mutations,
+		"stop_reason": result.StopReason,
+	}
+	blob, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal session result: %w", err)
+	}
+	fmt.Println(string(blob))
+	return nil
+}
+
+func parseFactsJSON(factsJSON string) ([]expert.Fact, error) {
+	if factsJSON == "" {
+		return nil, nil
+	}
+	var facts []expert.Fact
+	if err := json.Unmarshal([]byte(factsJSON), &facts); err != nil {
+		return nil, fmt.Errorf("parse facts: %w", err)
+	}
+	return facts, nil
 }
 
 // importRuleJSON is the expected JSON structure for each rule in the input file.
@@ -276,6 +361,33 @@ func importCmd(path, outPath string) error {
 	}
 
 	return fmt.Errorf("cannot parse %s: expected Arishem JSON with rules array, rule array, or single rule", path)
+}
+
+func serveCmd(grpcAddr, auditFile string) error {
+	lis, err := net.Listen("tcp", grpcAddr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", grpcAddr, err)
+	}
+
+	var sink audit.Sink = audit.NopSink{}
+	var closer interface{ Close() error }
+	if auditFile != "" {
+		fileSink, err := audit.NewJSONLSink(auditFile)
+		if err != nil {
+			return fmt.Errorf("open audit sink: %w", err)
+		}
+		sink = fileSink
+		closer = fileSink
+	}
+	if closer != nil {
+		defer closer.Close()
+	}
+
+	grpcSrv := grpc.NewServer()
+	arbiterv1.RegisterArbiterServiceServer(grpcSrv, grpcserver.NewServer(grpcserver.NewRegistry(), overrides.NewStore(), sink))
+
+	fmt.Fprintf(os.Stderr, "arbiter gRPC listening on %s\n", grpcAddr)
+	return grpcSrv.Serve(lis)
 }
 
 func importRules(rules []importRuleJSON, outPath string) error {

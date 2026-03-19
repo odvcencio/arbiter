@@ -8,6 +8,7 @@ import (
 
 	"github.com/odvcencio/arbiter/compiler"
 	"github.com/odvcencio/arbiter/govern"
+	"github.com/odvcencio/arbiter/overrides"
 	"github.com/odvcencio/arbiter/vm"
 )
 
@@ -93,13 +94,18 @@ func EvalDebug(rs *compiler.CompiledRuleset, dc vm.DataContext) vm.DebugResult {
 
 // EvalGoverned evaluates a compiled ruleset with rule governance enabled.
 func EvalGoverned(rs *compiler.CompiledRuleset, dc vm.DataContext, segments *govern.SegmentSet, ctx map[string]any) ([]vm.MatchedRule, *govern.Trace, error) {
+	return EvalGovernedWithOverrides(rs, dc, segments, ctx, "", nil)
+}
+
+// EvalGovernedWithOverrides evaluates a ruleset while applying runtime overrides.
+func EvalGovernedWithOverrides(rs *compiler.CompiledRuleset, dc vm.DataContext, segments *govern.SegmentSet, ctx map[string]any, bundleID string, view overrides.View) ([]vm.MatchedRule, *govern.Trace, error) {
 	if rs == nil {
 		return nil, &govern.Trace{}, fmt.Errorf("nil ruleset")
 	}
 	if ec, ok := dc.(*evalContextWrapper); ok {
-		return evalGovernedWithPool(rs, ec.inner, ec.pool, segments, ctx)
+		return evalGovernedWithPool(rs, ec.inner, ec.pool, segments, ctx, bundleID, view)
 	}
-	return evalGovernedWithPool(rs, dc, vm.NewStringPool(rs.Constants.Strings()), segments, ctx)
+	return evalGovernedWithPool(rs, dc, vm.NewStringPool(rs.Constants.Strings()), segments, ctx, bundleID, view)
 }
 
 // evalContextWrapper wraps a DataContext with its StringPool.
@@ -131,20 +137,12 @@ func DataFromJSON(jsonStr string, rs *compiler.CompiledRuleset) (vm.DataContext,
 }
 
 func parseSource(source []byte) (*gotreesitter.Language, *gotreesitter.Node, error) {
-	lang, err := GetLanguage()
+	lang, root, err := parseTree(source)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get language: %w", err)
+		return nil, nil, err
 	}
-
-	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.Parse(source)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parse: %w", err)
-	}
-
-	root := tree.RootNode()
-	if root.HasError() {
-		return nil, nil, fmt.Errorf("parse errors in arbiter source")
+	if err := rejectIncludeDeclarations(root, source, lang); err != nil {
+		return nil, nil, err
 	}
 	return lang, root, nil
 }
@@ -185,7 +183,7 @@ func compileSegmentRuleset(name, condition string) (*compiler.CompiledRuleset, e
 	return Compile([]byte(synthetic))
 }
 
-func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *vm.StringPool, segments *govern.SegmentSet, ctx map[string]any) ([]vm.MatchedRule, *govern.Trace, error) {
+func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *vm.StringPool, segments *govern.SegmentSet, ctx map[string]any, bundleID string, view overrides.View) ([]vm.MatchedRule, *govern.Trace, error) {
 	if rs == nil {
 		return nil, &govern.Trace{}, fmt.Errorf("nil ruleset")
 	}
@@ -197,8 +195,20 @@ func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *v
 
 	for _, rule := range rs.Rules {
 		ruleName := evaluator.String(rule.NameIdx)
+		killSwitch := rule.KillSwitch
+		rollout := rule.Rollout
+		if view != nil {
+			if ov, ok := view.Rule(bundleID, ruleName); ok {
+				if ov.KillSwitch != nil {
+					killSwitch = *ov.KillSwitch
+				}
+				if ov.Rollout != nil {
+					rollout = *ov.Rollout
+				}
+			}
+		}
 
-		if govern.IsKillSwitched(rule.KillSwitch, trace) {
+		if govern.IsKillSwitched(killSwitch, trace) {
 			rc.RecordRuleResult(ruleName, false)
 			continue
 		}
@@ -234,13 +244,13 @@ func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *v
 			continue
 		}
 
-		if rule.Rollout > 0 {
+		if rollout > 0 {
 			userID := govern.RolloutUserID(rc.Context())
-			allowed := govern.RolloutAllows(rule.Rollout, rc.Context())
+			allowed := govern.RolloutAllows(rollout, rc.Context())
 			trace.Append(
-				fmt.Sprintf("rollout %d%%", rule.Rollout),
+				fmt.Sprintf("rollout %d%%", rollout),
 				allowed,
-				fmt.Sprintf("bucket(%q) = %d, threshold = %d", userID, govern.Bucket(userID), rule.Rollout),
+				fmt.Sprintf("bucket(%q) = %d, threshold = %d", userID, govern.Bucket(userID), rollout),
 			)
 			if !allowed {
 				rc.RecordRuleResult(ruleName, false)

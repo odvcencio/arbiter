@@ -66,6 +66,63 @@ func TestParseMinimal(t *testing.T) {
 	}
 }
 
+func TestParseExpertRule(t *testing.T) {
+	sexp := parseArb(t, `expert rule SeedHighRisk { when { applicant.score < 600 } then assert RiskFlag { key: "high_risk" } }`)
+	if !strings.Contains(sexp, "expert_rule_declaration") {
+		t.Error("expected expert_rule_declaration")
+	}
+	if !strings.Contains(sexp, "expert_then_block") {
+		t.Error("expected expert_then_block")
+	}
+}
+
+func TestParseExpertEmitRule(t *testing.T) {
+	sexp := parseArb(t, `expert rule RouteManualReview { when { true } then emit ManualReview { queue: "risk" } }`)
+	if !strings.Contains(sexp, "expert_rule_declaration") {
+		t.Error("expected expert_rule_declaration")
+	}
+	if strings.Count(sexp, "param_assignment") != 1 {
+		t.Errorf("expected 1 param_assignment, got: %s", sexp)
+	}
+}
+
+func TestParseExpertRetractRule(t *testing.T) {
+	sexp := parseArb(t, `expert rule ClearHighRisk { when { true } then retract RiskFlag { key: "high_risk" } }`)
+	if !strings.Contains(sexp, "expert_rule_declaration") {
+		t.Error("expected expert_rule_declaration")
+	}
+	if strings.Count(sexp, "param_assignment") != 1 {
+		t.Errorf("expected 1 param_assignment, got: %s", sexp)
+	}
+}
+
+func TestParseExpertModifyRule(t *testing.T) {
+	sexp := parseArb(t, `expert rule LowerRisk { when { true } then modify RiskFlag { key: "high_risk" set { level: "low" } } }`)
+	if !strings.Contains(sexp, "expert_rule_declaration") {
+		t.Error("expected expert_rule_declaration")
+	}
+	if !strings.Contains(sexp, "expert_set_block") {
+		t.Error("expected expert_set_block")
+	}
+}
+
+func TestParseExpertRuleControls(t *testing.T) {
+	sexp := parseArb(t, `expert rule ResolveRisk { no_loop activation_group risk when { true } then emit Approved {} }`)
+	if !strings.Contains(sexp, "no_loop") {
+		t.Error("expected no_loop node")
+	}
+	if !strings.Contains(sexp, "expert_activation_group") {
+		t.Error("expected expert_activation_group node")
+	}
+}
+
+func TestParseInclude(t *testing.T) {
+	sexp := parseArb(t, `include "constants.arb"`)
+	if !strings.Contains(sexp, "include_declaration") {
+		t.Error("expected include_declaration")
+	}
+}
+
 func TestParseConst(t *testing.T) {
 	sexp := parseArb(t, `const LIMIT = 100`)
 	if !strings.Contains(sexp, "const_declaration") {

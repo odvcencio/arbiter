@@ -46,20 +46,12 @@ type RuleOutput struct {
 
 // Transpile converts .arb source to Arishem-compatible JSON.
 func Transpile(source []byte) (string, error) {
-	lang, err := getArbiterLanguage()
+	lang, root, err := parseTree(source)
 	if err != nil {
-		return "", fmt.Errorf("generate arbiter language: %w", err)
+		return "", err
 	}
-
-	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.Parse(source)
-	if err != nil {
-		return "", fmt.Errorf("parse: %w", err)
-	}
-
-	root := tree.RootNode()
-	if root.HasError() {
-		return "", fmt.Errorf("parse errors in arbiter source")
+	if err := rejectIncludeDeclarations(root, source, lang); err != nil {
+		return "", err
 	}
 
 	t := &arbTranspiler{
@@ -78,22 +70,23 @@ func Transpile(source []byte) (string, error) {
 	return string(out), nil
 }
 
+// TranspileFile resolves includes and transpiles a file-backed .arb program.
+func TranspileFile(path string) (string, error) {
+	source, err := LoadFileSource(path)
+	if err != nil {
+		return "", err
+	}
+	return Transpile(source)
+}
+
 // TranspileRule converts a single rule's condition to Arishem JSON (no wrapper).
 func TranspileRule(source []byte, ruleName string) (string, error) {
-	lang, err := getArbiterLanguage()
+	lang, root, err := parseTree(source)
 	if err != nil {
-		return "", fmt.Errorf("generate arbiter language: %w", err)
+		return "", err
 	}
-
-	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.Parse(source)
-	if err != nil {
-		return "", fmt.Errorf("parse: %w", err)
-	}
-
-	root := tree.RootNode()
-	if root.HasError() {
-		return "", fmt.Errorf("parse errors in arbiter source")
+	if err := rejectIncludeDeclarations(root, source, lang); err != nil {
+		return "", err
 	}
 
 	t := &arbTranspiler{
@@ -123,6 +116,16 @@ func TranspileRule(source []byte, ruleName string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("rule %q not found", ruleName)
+}
+
+// TranspileRuleFile resolves includes and transpiles one rule from a file-backed
+// .arb program.
+func TranspileRuleFile(path, ruleName string) (string, error) {
+	source, err := LoadFileSource(path)
+	if err != nil {
+		return "", err
+	}
+	return TranspileRule(source, ruleName)
 }
 
 type arbTranspiler struct {

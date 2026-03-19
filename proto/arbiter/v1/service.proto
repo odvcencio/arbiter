@@ -1,0 +1,182 @@
+syntax = "proto3";
+
+package arbiter.v1;
+
+option go_package = "github.com/odvcencio/arbiter/api/arbiter/v1;arbiterv1";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+
+service ArbiterService {
+  rpc PublishBundle(PublishBundleRequest) returns (PublishBundleResponse);
+  rpc EvaluateRules(EvaluateRulesRequest) returns (EvaluateRulesResponse);
+  rpc ResolveFlag(ResolveFlagRequest) returns (ResolveFlagResponse);
+  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+  rpc RunSession(RunSessionRequest) returns (RunSessionResponse);
+  rpc AssertFacts(AssertFactsRequest) returns (AssertFactsResponse);
+  rpc RetractFacts(RetractFactsRequest) returns (RetractFactsResponse);
+  rpc GetSessionTrace(GetSessionTraceRequest) returns (GetSessionTraceResponse);
+  rpc SetRuleOverride(SetRuleOverrideRequest) returns (SetRuleOverrideResponse);
+  rpc SetFlagOverride(SetFlagOverrideRequest) returns (SetFlagOverrideResponse);
+  rpc SetFlagRuleOverride(SetFlagRuleOverrideRequest) returns (SetFlagRuleOverrideResponse);
+}
+
+message PublishBundleRequest {
+  string name = 1;
+  bytes source = 2;
+}
+
+message PublishBundleResponse {
+  string bundle_id = 1;
+  string checksum = 2;
+  uint32 rule_count = 3;
+  uint32 flag_count = 4;
+  google.protobuf.Timestamp published_at = 5;
+  uint32 expert_rule_count = 6;
+}
+
+message TraceStep {
+  string check = 1;
+  bool result = 2;
+  string detail = 3;
+}
+
+message RuleMatch {
+  string name = 1;
+  int32 priority = 2;
+  string action = 3;
+  google.protobuf.Struct params = 4;
+  bool fallback = 5;
+}
+
+message EvaluateRulesRequest {
+  string bundle_id = 1;
+  google.protobuf.Struct context = 2;
+  string request_id = 3;
+}
+
+message EvaluateRulesResponse {
+  repeated RuleMatch matched = 1;
+  repeated TraceStep trace = 2;
+}
+
+message ResolveFlagRequest {
+  string bundle_id = 1;
+  string flag_key = 2;
+  google.protobuf.Struct context = 3;
+  string request_id = 4;
+}
+
+message ResolveFlagResponse {
+  string variant = 1;
+  google.protobuf.Struct values = 2;
+  bool is_default = 3;
+  string reason = 4;
+  repeated TraceStep trace = 5;
+}
+
+message ExpertFact {
+  string type = 1;
+  string key = 2;
+  google.protobuf.Struct fields = 3;
+}
+
+message ExpertOutcome {
+  string rule = 1;
+  string name = 2;
+  google.protobuf.Struct params = 3;
+}
+
+message ExpertActivation {
+  uint32 round = 1;
+  string rule = 2;
+  string kind = 3;
+  string target = 4;
+  google.protobuf.Struct params = 5;
+  bool changed = 6;
+  string detail = 7;
+}
+
+message StartSessionRequest {
+  string bundle_id = 1;
+  google.protobuf.Struct envelope = 2;
+  repeated ExpertFact facts = 3;
+}
+
+message StartSessionResponse {
+  string session_id = 1;
+  uint32 expert_rule_count = 2;
+}
+
+message RunSessionRequest {
+  string session_id = 1;
+  string request_id = 2;
+}
+
+message RunSessionResponse {
+  repeated ExpertOutcome outcomes = 1;
+  repeated ExpertFact facts = 2;
+  repeated ExpertActivation activations = 3;
+  string stop_reason = 4;
+  uint32 rounds = 5;
+  uint32 mutations = 6;
+}
+
+message AssertFactsRequest {
+  string session_id = 1;
+  repeated ExpertFact facts = 2;
+}
+
+message AssertFactsResponse {}
+
+message FactRef {
+  string type = 1;
+  string key = 2;
+}
+
+message RetractFactsRequest {
+  string session_id = 1;
+  repeated FactRef facts = 2;
+}
+
+message RetractFactsResponse {}
+
+message GetSessionTraceRequest {
+  string session_id = 1;
+}
+
+message GetSessionTraceResponse {
+  repeated ExpertOutcome outcomes = 1;
+  repeated ExpertFact facts = 2;
+  repeated ExpertActivation activations = 3;
+  string stop_reason = 4;
+  uint32 rounds = 5;
+  uint32 mutations = 6;
+}
+
+message SetRuleOverrideRequest {
+  string bundle_id = 1;
+  string rule_name = 2;
+  google.protobuf.BoolValue kill_switch = 3;
+  google.protobuf.UInt32Value rollout = 4;
+}
+
+message SetRuleOverrideResponse {}
+
+message SetFlagOverrideRequest {
+  string bundle_id = 1;
+  string flag_key = 2;
+  google.protobuf.BoolValue kill_switch = 3;
+}
+
+message SetFlagOverrideResponse {}
+
+message SetFlagRuleOverrideRequest {
+  string bundle_id = 1;
+  string flag_key = 2;
+  uint32 rule_index = 3;
+  google.protobuf.UInt32Value rollout = 4;
+}
+
+message SetFlagRuleOverrideResponse {}

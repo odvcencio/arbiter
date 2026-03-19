@@ -42,15 +42,22 @@ func ArbiterGrammar() *Grammar {
 	))
 
 	g.Define("_declaration", Choice(
+		Sym("include_declaration"),
 		Sym("feature_declaration"),
 		Sym("const_declaration"),
 		Sym("rule_declaration"),
+		Sym("expert_rule_declaration"),
 		Sym("segment_declaration"),
 		Sym("flag_declaration"),
 	))
 
 	// --- Comments (extras — auto-skipped) ---
 	g.Define("comment", Token(Pat(`#[^\n]*`)))
+
+	g.Define("include_declaration", Seq(
+		Str("include"),
+		Field("path", Sym("string_literal")),
+	))
 
 	// --- Feature declaration ---
 	g.Define("feature_declaration", Seq(
@@ -109,6 +116,22 @@ func ArbiterGrammar() *Grammar {
 		Field("value", Sym("number_literal")),
 	))
 
+	g.Define("expert_rule_declaration", Seq(
+		Str("expert"),
+		Str("rule"),
+		Field("name", Sym("identifier")),
+		Optional(Seq(Str("priority"), Field("priority", Sym("number_literal")))),
+		Str("{"),
+		Optional(Field("kill_switch", Sym("kill_switch"))),
+		Optional(Field("no_loop", Sym("no_loop"))),
+		Repeat(Sym("rule_requires")),
+		Optional(Field("activation_group", Sym("expert_activation_group"))),
+		Field("condition", Sym("when_block")),
+		Field("action", Sym("expert_then_block")),
+		Optional(Field("rollout", Sym("rule_rollout"))),
+		Str("}"),
+	))
+
 	// when always requires braces: when { expr }
 	g.Define("when_block", Seq(
 		Str("when"),
@@ -135,6 +158,30 @@ func ArbiterGrammar() *Grammar {
 		Str("{"),
 		Repeat(Sym("param_assignment")),
 		Str("}"),
+	))
+
+	g.Define("expert_then_block", Seq(
+		Str("then"),
+		Field("kind", Choice(Str("assert"), Str("emit"), Str("retract"), Str("modify"))),
+		Field("action_name", Sym("identifier")),
+		Str("{"),
+		Repeat(Sym("param_assignment")),
+		Optional(Field("set_block", Sym("expert_set_block"))),
+		Str("}"),
+	))
+
+	g.Define("expert_set_block", Seq(
+		Str("set"),
+		Str("{"),
+		Repeat(Sym("param_assignment")),
+		Str("}"),
+	))
+
+	g.Define("no_loop", Str("no_loop"))
+
+	g.Define("expert_activation_group", Seq(
+		Str("activation_group"),
+		Field("name", Sym("identifier")),
 	))
 
 	g.Define("param_assignment", Seq(

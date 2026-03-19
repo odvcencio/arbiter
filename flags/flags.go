@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +14,7 @@ import (
 	"github.com/odvcencio/arbiter"
 	"github.com/odvcencio/arbiter/govern"
 	"github.com/odvcencio/arbiter/internal/parseutil"
+	"github.com/odvcencio/arbiter/overrides"
 )
 
 // Flags is a compiled flag ruleset with first-class flag concepts and rich explainability.
@@ -36,11 +36,11 @@ func Load(source []byte) (*Flags, error) {
 
 // LoadFile loads and compiles flags from a file path.
 func LoadFile(path string) (*Flags, error) {
-	source, err := os.ReadFile(path)
+	unit, err := arbiter.LoadFileUnit(path)
 	if err != nil {
-		return nil, fmt.Errorf("read flags file: %w", err)
+		return nil, err
 	}
-	return Load(source)
+	return Load(unit.Source)
 }
 
 // LoadEnv loads flags for a specific environment.
@@ -66,11 +66,11 @@ func (f *Flags) Reload(source []byte) error {
 
 // ReloadFile atomically reloads from a file path.
 func (f *Flags) ReloadFile(path string) error {
-	source, err := os.ReadFile(path)
+	unit, err := arbiter.LoadFileUnit(path)
 	if err != nil {
-		return fmt.Errorf("read flags file: %w", err)
+		return err
 	}
-	return f.Reload(source)
+	return f.Reload(unit.Source)
 }
 
 // Enabled returns true if the flag is on for boolean flags,
@@ -83,7 +83,7 @@ func (f *Flags) Enabled(flag string, ctx map[string]any) bool {
 		return false
 	}
 	rc := govern.NewRequestCache(f.segments, ctx)
-	v := f.evalVariantName(def, rc, nil)
+	v := f.evalVariantName(def, rc, nil, "", nil)
 	if def.Type == FlagBoolean {
 		return v == "true"
 	}
@@ -99,7 +99,7 @@ func (f *Flags) Variant(flag string, ctx map[string]any) ServedVariant {
 		return ServedVariant{}
 	}
 	rc := govern.NewRequestCache(f.segments, ctx)
-	name := f.evalVariantName(def, rc, nil)
+	name := f.evalVariantName(def, rc, nil, "", nil)
 	return f.resolveVariant(def, name)
 }
 
@@ -112,7 +112,7 @@ func (f *Flags) VariantName(flag string, ctx map[string]any) string {
 		return ""
 	}
 	rc := govern.NewRequestCache(f.segments, ctx)
-	return f.evalVariantName(def, rc, nil)
+	return f.evalVariantName(def, rc, nil, "", nil)
 }
 
 // AllFlags returns all flag variants for the given context.
@@ -124,10 +124,36 @@ func (f *Flags) AllFlags(ctx map[string]any) map[string]ServedVariant {
 	rc := govern.NewRequestCache(f.segments, ctx)
 	result := make(map[string]ServedVariant, len(defs))
 	for key, def := range defs {
-		name := f.evalVariantName(def, rc, nil)
+		name := f.evalVariantName(def, rc, nil, "", nil)
 		result[key] = f.resolveVariantRedacted(def, name)
 	}
 	return result
+}
+
+// Count returns the number of loaded flags.
+func (f *Flags) Count() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return len(f.defs)
+}
+
+// Has reports whether a flag key exists.
+func (f *Flags) Has(flag string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	_, ok := f.defs[flag]
+	return ok
+}
+
+// RuleCount returns the number of targeting rules for a flag.
+func (f *Flags) RuleCount(flag string) int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	def, ok := f.defs[flag]
+	if !ok {
+		return 0
+	}
+	return len(def.Rules)
 }
 
 // resolveVariant builds a ServedVariant from a variant name,
@@ -203,7 +229,7 @@ func (f *Flags) Explain(flag string, ctx map[string]any) FlagEvaluation {
 
 	trace := &govern.Trace{}
 	rc := govern.NewRequestCache(f.segments, ctx)
-	name := f.evalVariantName(def, rc, trace)
+	name := f.evalVariantName(def, rc, trace, "", nil)
 
 	reason := buildReason(def, name, trace.Steps)
 
@@ -212,6 +238,51 @@ func (f *Flags) Explain(flag string, ctx map[string]any) FlagEvaluation {
 		Variant:   f.resolveVariantRedacted(def, name),
 		IsDefault: name == def.Default,
 		Reason:    reason,
+		Trace:     trace.Steps,
+		Metadata:  def.Metadata,
+		Elapsed:   time.Since(start),
+	}
+}
+
+// VariantWithOverrides resolves a flag while applying runtime overrides.
+func (f *Flags) VariantWithOverrides(bundleID, flag string, ctx map[string]any, view overrides.View) ServedVariant {
+	f.mu.RLock()
+	def, ok := f.defs[flag]
+	f.mu.RUnlock()
+	if !ok {
+		return ServedVariant{}
+	}
+	rc := govern.NewRequestCache(f.segments, ctx)
+	name := f.evalVariantName(def, rc, nil, bundleID, view)
+	return f.resolveVariant(def, name)
+}
+
+// ExplainWithOverrides resolves a flag with explainability and runtime overrides.
+func (f *Flags) ExplainWithOverrides(bundleID, flag string, ctx map[string]any, view overrides.View) FlagEvaluation {
+	start := time.Now()
+
+	f.mu.RLock()
+	def, ok := f.defs[flag]
+	f.mu.RUnlock()
+	if !ok {
+		return FlagEvaluation{
+			Flag:      flag,
+			Variant:   ServedVariant{},
+			IsDefault: true,
+			Reason:    "flag not found",
+			Elapsed:   time.Since(start),
+		}
+	}
+
+	trace := &govern.Trace{}
+	rc := govern.NewRequestCache(f.segments, ctx)
+	name := f.evalVariantName(def, rc, trace, bundleID, view)
+
+	return FlagEvaluation{
+		Flag:      flag,
+		Variant:   f.resolveVariantRedacted(def, name),
+		IsDefault: name == def.Default,
+		Reason:    buildReason(def, name, trace.Steps),
 		Trace:     trace.Steps,
 		Metadata:  def.Metadata,
 		Elapsed:   time.Since(start),
@@ -250,7 +321,7 @@ func (f *Flags) Handler() http.Handler {
 	return mux
 }
 
-func (f *Flags) evalVariantName(def *FlagDef, rc *govern.RequestCache, trace *govern.Trace) string {
+func (f *Flags) evalVariantName(def *FlagDef, rc *govern.RequestCache, trace *govern.Trace, bundleID string, view overrides.View) string {
 	if cached, ok := rc.FlagVariant(def.Key); ok {
 		return cached
 	}
@@ -269,19 +340,19 @@ func (f *Flags) evalVariantName(def *FlagDef, rc *govern.RequestCache, trace *go
 	rc.Enter(def.Key)
 	defer rc.Leave(def.Key)
 
-	if govern.IsKillSwitched(def.KillSwitch, trace) {
+	if govern.IsKillSwitched(f.effectiveFlagKillSwitch(def, bundleID, view), trace) {
 		return result
 	}
 
-	if !f.prerequisitesMet(def, rc, trace) {
+	if !f.prerequisitesMet(def, rc, trace, bundleID, view) {
 		return result
 	}
 
-	for _, rule := range def.Rules {
-		if !f.ruleMatches(rule, rc, trace) {
+	for i, rule := range def.Rules {
+		if !f.ruleMatches(def.Key, i, rule, rc, trace, bundleID, view) {
 			continue
 		}
-		if !f.rolloutAllows(rule, rc, trace) {
+		if !f.rolloutAllows(def.Key, i, rule, rc, trace, bundleID, view) {
 			continue
 		}
 		result = rule.Variant
@@ -291,9 +362,9 @@ func (f *Flags) evalVariantName(def *FlagDef, rc *govern.RequestCache, trace *go
 	return result
 }
 
-func (f *Flags) prerequisitesMet(def *FlagDef, rc *govern.RequestCache, trace *govern.Trace) bool {
+func (f *Flags) prerequisitesMet(def *FlagDef, rc *govern.RequestCache, trace *govern.Trace, bundleID string, view overrides.View) bool {
 	for _, prereq := range def.Prerequisites {
-		passed := f.prerequisitePassed(prereq, rc)
+		passed := f.prerequisitePassed(prereq, rc, bundleID, view)
 		trace.Append("requires "+prereq, passed, fmt.Sprintf("%s -> %v", prereq, passed))
 		if !passed {
 			return false
@@ -302,7 +373,7 @@ func (f *Flags) prerequisitesMet(def *FlagDef, rc *govern.RequestCache, trace *g
 	return true
 }
 
-func (f *Flags) prerequisitePassed(name string, rc *govern.RequestCache) bool {
+func (f *Flags) prerequisitePassed(name string, rc *govern.RequestCache, bundleID string, view overrides.View) bool {
 	f.mu.RLock()
 	prereqDef, ok := f.defs[name]
 	f.mu.RUnlock()
@@ -314,18 +385,19 @@ func (f *Flags) prerequisitePassed(name string, rc *govern.RequestCache) bool {
 		return cached != prereqDef.Default
 	}
 
-	prereqVariant := f.evalVariantName(prereqDef, rc, nil)
+	prereqVariant := f.evalVariantName(prereqDef, rc, nil, bundleID, view)
 	return prereqVariant != prereqDef.Default
 }
 
-func (f *Flags) ruleMatches(rule FlagRule, rc *govern.RequestCache, trace *govern.Trace) bool {
+func (f *Flags) ruleMatches(flagKey string, ruleIndex int, rule FlagRule, rc *govern.RequestCache, trace *govern.Trace, bundleID string, view overrides.View) bool {
 	matched, detail := f.ruleMatchDetail(rule, rc)
 	checkName := "segment " + rule.SegmentName
 	if rule.SegmentName == "" {
 		checkName = "inline condition"
 	}
-	if rule.Rollout > 0 {
-		checkName += fmt.Sprintf(" rollout %d%%", rule.Rollout)
+	rollout := f.effectiveRuleRollout(flagKey, ruleIndex, rule, bundleID, view)
+	if rollout > 0 {
+		checkName += fmt.Sprintf(" rollout %d%%", rollout)
 	}
 	trace.Append(checkName, matched, detail)
 	return matched
@@ -342,19 +414,40 @@ func (f *Flags) ruleMatchDetail(rule FlagRule, rc *govern.RequestCache) (bool, s
 	return false, "no segment or inline condition"
 }
 
-func (f *Flags) rolloutAllows(rule FlagRule, rc *govern.RequestCache, trace *govern.Trace) bool {
-	if rule.Rollout <= 0 {
+func (f *Flags) rolloutAllows(flagKey string, ruleIndex int, rule FlagRule, rc *govern.RequestCache, trace *govern.Trace, bundleID string, view overrides.View) bool {
+	rollout := f.effectiveRuleRollout(flagKey, ruleIndex, rule, bundleID, view)
+	if rollout <= 0 {
 		return true
 	}
 	userID := govern.RolloutUserID(rc.Context())
 	bucket := govern.Bucket(userID)
-	allowed := bucket < rule.Rollout
+	allowed := bucket < rollout
 	trace.Append(
-		fmt.Sprintf("rollout %d%%", rule.Rollout),
+		fmt.Sprintf("rollout %d%%", rollout),
 		allowed,
-		fmt.Sprintf("bucket(%q) = %d, threshold = %d", userID, bucket, rule.Rollout),
+		fmt.Sprintf("bucket(%q) = %d, threshold = %d", userID, bucket, rollout),
 	)
 	return allowed
+}
+
+func (f *Flags) effectiveFlagKillSwitch(def *FlagDef, bundleID string, view overrides.View) bool {
+	if view == nil {
+		return def.KillSwitch
+	}
+	if ov, ok := view.Flag(bundleID, def.Key); ok && ov.KillSwitch != nil {
+		return *ov.KillSwitch
+	}
+	return def.KillSwitch
+}
+
+func (f *Flags) effectiveRuleRollout(flagKey string, ruleIndex int, rule FlagRule, bundleID string, view overrides.View) int {
+	if view == nil {
+		return rule.Rollout
+	}
+	if ov, ok := view.FlagRule(bundleID, flagKey, ruleIndex); ok && ov.Rollout != nil {
+		return int(*ov.Rollout)
+	}
+	return rule.Rollout
 }
 
 func compileInlineSegment(conditionSource string) (*govern.CompiledSegment, error) {

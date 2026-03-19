@@ -6,12 +6,17 @@ import (
 	"path/filepath"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/odvcencio/arbiter"
 )
 
 // Watch loads flags from a file and watches for changes, hot-reloading on write.
 // Returns the Flags instance and a stop function.
 func Watch(path string) (*Flags, func(), error) {
-	f, err := LoadFile(path)
+	unit, err := arbiter.LoadFileUnit(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := Load(unit.Source)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -27,13 +32,11 @@ func Watch(path string) (*Flags, func(), error) {
 		return nil, nil, fmt.Errorf("resolve path: %w", err)
 	}
 
-	// Watch the directory (fsnotify works better with dirs than individual files)
-	dir := filepath.Dir(absPath)
-	base := filepath.Base(absPath)
-
-	if err := watcher.Add(dir); err != nil {
+	watchedDirs := make(map[string]struct{})
+	trackedFiles := fileSet(unit.Files)
+	if err := syncWatchedDirs(watcher, watchedDirs, unit.Files); err != nil {
 		watcher.Close()
-		return nil, nil, fmt.Errorf("watch directory: %w", err)
+		return nil, nil, err
 	}
 
 	done := make(chan struct{})
@@ -45,12 +48,22 @@ func Watch(path string) (*Flags, func(), error) {
 				if !ok {
 					return
 				}
-				if filepath.Base(event.Name) == base && (event.Op&fsnotify.Write != 0 || event.Op&fsnotify.Create != 0) {
-					if err := f.ReloadFile(absPath); err != nil {
+				eventPath := filepath.Clean(event.Name)
+				if _, ok := trackedFiles[eventPath]; ok && (event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0) {
+					nextUnit, err := arbiter.LoadFileUnit(absPath)
+					if err != nil {
 						log.Printf("flags: reload error: %v", err)
-					} else {
-						log.Printf("flags: reloaded %s", base)
+						continue
 					}
+					if err := f.Reload(nextUnit.Source); err != nil {
+						log.Printf("flags: reload error: %v", err)
+						continue
+					}
+					if err := syncWatchedDirs(watcher, watchedDirs, nextUnit.Files); err != nil {
+						log.Printf("flags: watcher sync error: %v", err)
+					}
+					trackedFiles = fileSet(nextUnit.Files)
+					log.Printf("flags: reloaded %s", filepath.Base(absPath))
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
@@ -69,4 +82,41 @@ func Watch(path string) (*Flags, func(), error) {
 	}
 
 	return f, stop, nil
+}
+
+func fileSet(files []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		out[filepath.Clean(file)] = struct{}{}
+	}
+	return out
+}
+
+func syncWatchedDirs(watcher *fsnotify.Watcher, current map[string]struct{}, files []string) error {
+	next := make(map[string]struct{})
+	for _, file := range files {
+		next[filepath.Dir(file)] = struct{}{}
+	}
+
+	for dir := range current {
+		if _, ok := next[dir]; ok {
+			continue
+		}
+		if err := watcher.Remove(dir); err != nil {
+			return fmt.Errorf("unwatch directory %s: %w", dir, err)
+		}
+		delete(current, dir)
+	}
+
+	for dir := range next {
+		if _, ok := current[dir]; ok {
+			continue
+		}
+		if err := watcher.Add(dir); err != nil {
+			return fmt.Errorf("watch directory %s: %w", dir, err)
+		}
+		current[dir] = struct{}{}
+	}
+
+	return nil
 }
