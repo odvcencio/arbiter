@@ -29,24 +29,27 @@
 (rule_declaration "rule" @keyword)
 (rule_declaration name: (identifier) @function)
 (rule_declaration "priority" @keyword)
-(rule_declaration "requires" @keyword)
-(rule_declaration "rollout" @keyword)
-(rule_declaration "kill_switch" @keyword)
 
 (expert_rule_declaration "expert" @keyword)
 (expert_rule_declaration "rule" @keyword)
 (expert_rule_declaration name: (identifier) @function)
 (expert_rule_declaration "priority" @keyword)
-(expert_rule_declaration "requires" @keyword)
-(expert_rule_declaration "rollout" @keyword)
-(expert_rule_declaration "no_loop" @keyword)
-(expert_rule_declaration "activation_group" @keyword)
+
+;; Governance nodes (named child nodes, not anonymous strings)
+(kill_switch) @keyword
+(no_loop) @keyword
+(rule_requires "requires" @keyword)
+(rule_requires name: (identifier) @function)
+(rule_rollout "rollout" @keyword)
+(expert_activation_group "activation_group" @keyword)
+(expert_activation_group name: (identifier) @type)
 
 (flag_declaration "flag" @keyword)
 (flag_declaration name: (identifier) @type.definition)
 (flag_declaration "type" @keyword)
+(flag_declaration "boolean" @type.builtin)
+(flag_declaration "multivariate" @type.builtin)
 (flag_declaration "default" @keyword)
-(flag_declaration "kill_switch" @keyword)
 
 (variant_declaration "variant" @keyword)
 (variant_declaration name: (string_literal) @string)
@@ -66,7 +69,10 @@
 (otherwise_block action_name: (identifier) @function)
 
 (expert_then_block "then" @keyword)
-(expert_then_block kind: (identifier) @keyword)
+(expert_then_block "assert" @keyword)
+(expert_then_block "emit" @keyword)
+(expert_then_block "retract" @keyword)
+(expert_then_block "modify" @keyword)
 (expert_then_block action_name: (identifier) @function)
 (expert_set_block "set" @keyword)
 
