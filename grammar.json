@@ -170,7 +170,7 @@
             },
             {
               "type": "STRING",
-              "value": "<"
+              "value": "\u003c"
             },
             {
               "name": "type_name",
@@ -178,7 +178,7 @@
             },
             {
               "type": "STRING",
-              "value": ">"
+              "value": "\u003e"
             }
           ],
           "type": "SEQ"
@@ -1473,7 +1473,7 @@
         "members": [
           {
             "type": "STRING",
-            "value": ">"
+            "value": "\u003e"
           },
           {
             "type": "STRING",
@@ -1489,7 +1489,7 @@
         "members": [
           {
             "type": "STRING",
-            "value": "<"
+            "value": "\u003c"
           },
           {
             "type": "STRING",
@@ -1548,11 +1548,11 @@
                 },
                 {
                   "type": "STRING",
-                  "value": ">"
+                  "value": "\u003e"
                 },
                 {
                   "type": "STRING",
-                  "value": "<"
+                  "value": "\u003c"
                 }
               ],
               "type": "CHOICE"
@@ -2434,8 +2434,5 @@
   ],
   "externals": [],
   "inline": [],
-  "supertypes": [],
-  "file_extensions": [
-    ".arb"
-  ]
+  "supertypes": []
 }
