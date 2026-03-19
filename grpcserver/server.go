@@ -154,7 +154,7 @@ func (s *Server) ResolveFlag(ctx context.Context, req *arbiterv1.ResolveFlagRequ
 }
 
 // SetRuleOverride updates runtime rule overrides for a bundle.
-func (s *Server) SetRuleOverride(_ context.Context, req *arbiterv1.SetRuleOverrideRequest) (*arbiterv1.SetRuleOverrideResponse, error) {
+func (s *Server) SetRuleOverride(ctx context.Context, req *arbiterv1.SetRuleOverrideRequest) (*arbiterv1.SetRuleOverrideResponse, error) {
 	if _, err := s.bundle(req.GetBundleId()); err != nil {
 		return nil, err
 	}
@@ -171,11 +171,22 @@ func (s *Server) SetRuleOverride(_ context.Context, req *arbiterv1.SetRuleOverri
 		ov.Rollout = &v
 	}
 	s.overrides.SetRule(req.GetBundleId(), req.GetRuleName(), ov)
+	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
+		Timestamp: time.Now().UTC(),
+		BundleID:  req.GetBundleId(),
+		Kind:      "override",
+		Override: &audit.OverrideChange{
+			Scope:      "rule",
+			Target:     req.GetRuleName(),
+			KillSwitch: ov.KillSwitch,
+			Rollout:    ov.Rollout,
+		},
+	})
 	return &arbiterv1.SetRuleOverrideResponse{}, nil
 }
 
 // SetFlagOverride updates runtime flag overrides for a bundle.
-func (s *Server) SetFlagOverride(_ context.Context, req *arbiterv1.SetFlagOverrideRequest) (*arbiterv1.SetFlagOverrideResponse, error) {
+func (s *Server) SetFlagOverride(ctx context.Context, req *arbiterv1.SetFlagOverrideRequest) (*arbiterv1.SetFlagOverrideResponse, error) {
 	bundle, err := s.bundle(req.GetBundleId())
 	if err != nil {
 		return nil, err
@@ -189,11 +200,21 @@ func (s *Server) SetFlagOverride(_ context.Context, req *arbiterv1.SetFlagOverri
 		ov.KillSwitch = &v
 	}
 	s.overrides.SetFlag(req.GetBundleId(), req.GetFlagKey(), ov)
+	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
+		Timestamp: time.Now().UTC(),
+		BundleID:  req.GetBundleId(),
+		Kind:      "override",
+		Override: &audit.OverrideChange{
+			Scope:      "flag",
+			Target:     req.GetFlagKey(),
+			KillSwitch: ov.KillSwitch,
+		},
+	})
 	return &arbiterv1.SetFlagOverrideResponse{}, nil
 }
 
 // SetFlagRuleOverride updates runtime rollout overrides for a flag rule.
-func (s *Server) SetFlagRuleOverride(_ context.Context, req *arbiterv1.SetFlagRuleOverrideRequest) (*arbiterv1.SetFlagRuleOverrideResponse, error) {
+func (s *Server) SetFlagRuleOverride(ctx context.Context, req *arbiterv1.SetFlagRuleOverrideRequest) (*arbiterv1.SetFlagRuleOverrideResponse, error) {
 	bundle, err := s.bundle(req.GetBundleId())
 	if err != nil {
 		return nil, err
@@ -213,6 +234,18 @@ func (s *Server) SetFlagRuleOverride(_ context.Context, req *arbiterv1.SetFlagRu
 		ov.Rollout = &v
 	}
 	s.overrides.SetFlagRule(req.GetBundleId(), req.GetFlagKey(), int(req.GetRuleIndex()), ov)
+	ruleIndex := int(req.GetRuleIndex())
+	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
+		Timestamp: time.Now().UTC(),
+		BundleID:  req.GetBundleId(),
+		Kind:      "override",
+		Override: &audit.OverrideChange{
+			Scope:     "flag_rule",
+			Target:    req.GetFlagKey(),
+			RuleIndex: &ruleIndex,
+			Rollout:   ov.Rollout,
+		},
+	})
 	return &arbiterv1.SetFlagRuleOverrideResponse{}, nil
 }
 

@@ -1,6 +1,10 @@
 package overrides
 
-import "sync"
+import (
+	"encoding/json"
+	"os"
+	"sync"
+)
 
 // RuleOverride overlays rule-level governance fields at runtime.
 type RuleOverride struct {
@@ -31,6 +35,13 @@ type Store struct {
 	rules     map[string]map[string]RuleOverride
 	flags     map[string]map[string]FlagOverride
 	flagRules map[string]map[string]map[int]FlagRuleOverride
+}
+
+// Snapshot is a serializable copy of all stored overrides.
+type Snapshot struct {
+	Rules     map[string]map[string]RuleOverride             `json:"rules,omitempty"`
+	Flags     map[string]map[string]FlagOverride             `json:"flags,omitempty"`
+	FlagRules map[string]map[string]map[int]FlagRuleOverride `json:"flag_rules,omitempty"`
 }
 
 // NewStore creates an empty override store.
@@ -159,4 +170,130 @@ func (s *Store) FlagRule(bundleID, flagKey string, ruleIndex int) (FlagRuleOverr
 	}
 	ov, ok := rules[ruleIndex]
 	return ov, ok
+}
+
+// Snapshot returns a deep copy of the current override store.
+func (s *Store) Snapshot() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := Snapshot{
+		Rules:     make(map[string]map[string]RuleOverride, len(s.rules)),
+		Flags:     make(map[string]map[string]FlagOverride, len(s.flags)),
+		FlagRules: make(map[string]map[string]map[int]FlagRuleOverride, len(s.flagRules)),
+	}
+	for bundleID, rules := range s.rules {
+		cloned := make(map[string]RuleOverride, len(rules))
+		for name, ov := range rules {
+			cloned[name] = cloneRuleOverride(ov)
+		}
+		out.Rules[bundleID] = cloned
+	}
+	for bundleID, flags := range s.flags {
+		cloned := make(map[string]FlagOverride, len(flags))
+		for key, ov := range flags {
+			cloned[key] = cloneFlagOverride(ov)
+		}
+		out.Flags[bundleID] = cloned
+	}
+	for bundleID, flags := range s.flagRules {
+		clonedFlags := make(map[string]map[int]FlagRuleOverride, len(flags))
+		for key, rules := range flags {
+			clonedRules := make(map[int]FlagRuleOverride, len(rules))
+			for idx, ov := range rules {
+				clonedRules[idx] = cloneFlagRuleOverride(ov)
+			}
+			clonedFlags[key] = clonedRules
+		}
+		out.FlagRules[bundleID] = clonedFlags
+	}
+	return out
+}
+
+// Restore replaces the store contents with a snapshot.
+func (s *Store) Restore(snapshot Snapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rules = make(map[string]map[string]RuleOverride, len(snapshot.Rules))
+	s.flags = make(map[string]map[string]FlagOverride, len(snapshot.Flags))
+	s.flagRules = make(map[string]map[string]map[int]FlagRuleOverride, len(snapshot.FlagRules))
+	for bundleID, rules := range snapshot.Rules {
+		cloned := make(map[string]RuleOverride, len(rules))
+		for name, ov := range rules {
+			cloned[name] = cloneRuleOverride(ov)
+		}
+		s.rules[bundleID] = cloned
+	}
+	for bundleID, flags := range snapshot.Flags {
+		cloned := make(map[string]FlagOverride, len(flags))
+		for key, ov := range flags {
+			cloned[key] = cloneFlagOverride(ov)
+		}
+		s.flags[bundleID] = cloned
+	}
+	for bundleID, flags := range snapshot.FlagRules {
+		clonedFlags := make(map[string]map[int]FlagRuleOverride, len(flags))
+		for key, rules := range flags {
+			clonedRules := make(map[int]FlagRuleOverride, len(rules))
+			for idx, ov := range rules {
+				clonedRules[idx] = cloneFlagRuleOverride(ov)
+			}
+			clonedFlags[key] = clonedRules
+		}
+		s.flagRules[bundleID] = clonedFlags
+	}
+}
+
+// SaveFile persists the current override snapshot to a JSON file.
+func (s *Store) SaveFile(path string) error {
+	data, err := json.MarshalIndent(s.Snapshot(), "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// LoadFile restores a snapshot from a JSON file.
+func (s *Store) LoadFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return err
+	}
+	s.Restore(snapshot)
+	return nil
+}
+
+func cloneRuleOverride(ov RuleOverride) RuleOverride {
+	out := RuleOverride{}
+	if ov.KillSwitch != nil {
+		v := *ov.KillSwitch
+		out.KillSwitch = &v
+	}
+	if ov.Rollout != nil {
+		v := *ov.Rollout
+		out.Rollout = &v
+	}
+	return out
+}
+
+func cloneFlagOverride(ov FlagOverride) FlagOverride {
+	out := FlagOverride{}
+	if ov.KillSwitch != nil {
+		v := *ov.KillSwitch
+		out.KillSwitch = &v
+	}
+	return out
+}
+
+func cloneFlagRuleOverride(ov FlagRuleOverride) FlagRuleOverride {
+	out := FlagRuleOverride{}
+	if ov.Rollout != nil {
+		v := *ov.Rollout
+		out.Rollout = &v
+	}
+	return out
 }

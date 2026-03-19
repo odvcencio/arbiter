@@ -40,22 +40,33 @@ func NewRegistry() *Registry {
 
 // Publish compiles and stores a governed bundle.
 func (r *Registry) Publish(name string, source []byte) (*Bundle, error) {
-	compiled, err := arbiter.CompileFull(source)
-	if err != nil {
-		return nil, fmt.Errorf("compile rules: %w", err)
-	}
-	flagSet, err := flags.Load(source)
-	if err != nil {
-		return nil, fmt.Errorf("compile flags: %w", err)
-	}
-	expertProgram, err := expert.Compile(source)
-	if err != nil {
-		return nil, fmt.Errorf("compile expert rules: %w", err)
-	}
-
 	sum := sha256.Sum256(source)
 	checksum := hex.EncodeToString(sum[:])
 	id := checksum[:16]
+
+	r.mu.RLock()
+	if existing, ok := r.bundles[id]; ok {
+		r.mu.RUnlock()
+		return existing, nil
+	}
+	r.mu.RUnlock()
+
+	parsed, err := arbiter.ParseSource(source)
+	if err != nil {
+		return nil, fmt.Errorf("parse bundle: %w", err)
+	}
+	compiled, err := arbiter.CompileFullParsed(parsed)
+	if err != nil {
+		return nil, fmt.Errorf("compile rules: %w", err)
+	}
+	flagSet, err := flags.LoadParsed(parsed, compiled)
+	if err != nil {
+		return nil, fmt.Errorf("compile flags: %w", err)
+	}
+	expertProgram, err := expert.CompileParsed(parsed, compiled)
+	if err != nil {
+		return nil, fmt.Errorf("compile expert rules: %w", err)
+	}
 
 	bundle := &Bundle{
 		ID:              id,
@@ -72,6 +83,10 @@ func (r *Registry) Publish(name string, source []byte) (*Bundle, error) {
 	}
 
 	r.mu.Lock()
+	if existing, ok := r.bundles[id]; ok {
+		r.mu.Unlock()
+		return existing, nil
+	}
 	r.bundles[id] = bundle
 	r.mu.Unlock()
 	return bundle, nil

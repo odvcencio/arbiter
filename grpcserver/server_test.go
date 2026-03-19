@@ -276,7 +276,7 @@ func TestServerExpertSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunSession second pass: %v", err)
 	}
-	if len(run.Outcomes) != 1 || len(run.Facts) != 1 {
+	if len(run.Outcomes) != 0 || len(run.Activations) != 0 || len(run.Facts) != 1 {
 		t.Fatalf("unexpected second run result: %+v", run)
 	}
 }

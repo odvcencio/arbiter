@@ -14,11 +14,11 @@ import (
 
 // Compile compiles .arb source into a CompiledRuleset.
 func Compile(source []byte) (*compiler.CompiledRuleset, error) {
-	lang, root, err := parseSource(source)
+	parsed, err := ParseSource(source)
 	if err != nil {
 		return nil, err
 	}
-	return compiler.CompileCST(root, source, lang)
+	return CompileParsed(parsed)
 }
 
 // CompileResult includes a ruleset and any compiled top-level segments.
@@ -29,23 +29,11 @@ type CompileResult struct {
 
 // CompileFull compiles .arb source and extracts top-level segments.
 func CompileFull(source []byte) (*CompileResult, error) {
-	lang, root, err := parseSource(source)
+	parsed, err := ParseSource(source)
 	if err != nil {
 		return nil, err
 	}
-
-	rs, err := compiler.CompileCST(root, source, lang)
-	if err != nil {
-		return nil, err
-	}
-	segs, err := compileSegments(root, source, lang)
-	if err != nil {
-		return nil, err
-	}
-	return &CompileResult{
-		Ruleset:  rs,
-		Segments: segs,
-	}, nil
+	return CompileFullParsed(parsed)
 }
 
 // CompileJSON compiles a single Arishem JSON rule.

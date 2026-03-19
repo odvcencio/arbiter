@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/cel-go/cel"
 	arbiter "github.com/odvcencio/arbiter"
+	"github.com/odvcencio/arbiter/expert"
+	"github.com/odvcencio/arbiter/flags"
 	"github.com/open-policy-agent/opa/rego"
 )
 
@@ -16,6 +18,56 @@ rule FreeShipping {
 		and region != "XX"
 	}
 	then ApplyShipping {}
+}
+`
+
+const governedSource = `
+segment enterprise {
+	user.plan == "enterprise"
+}
+
+rule BaseDecision {
+	when { user.score >= 600 }
+	then Seed { seeded: true }
+}
+
+rule EnterpriseDecision {
+	requires BaseDecision
+	when segment enterprise { user.cart_total >= 100 }
+	then Approved { tier: "gold" }
+	rollout 100
+}
+`
+
+const flagSource = `
+segment enterprise {
+	user.plan == "enterprise"
+}
+
+flag checkout_v2 type multivariate default "control" {
+	variant "treatment" {
+		layout: "single_page",
+	}
+	when enterprise then "treatment"
+}
+`
+
+const expertSource = `
+expert rule SeedHighRisk {
+	when { applicant.score < 600 }
+	then assert RiskFlag {
+		key: "high_risk",
+		level: "high",
+	}
+}
+
+expert rule RouteManualReview {
+	when {
+		any risk in facts.RiskFlag { risk.level == "high" }
+	}
+	then emit ManualReview {
+		queue: "risk",
+	}
 }
 `
 
@@ -105,4 +157,96 @@ allow if {
 			}
 		}
 	})
+}
+
+func BenchmarkArbiterGovernedRules(b *testing.B) {
+	full, err := arbiter.CompileFull([]byte(governedSource))
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctxMap := map[string]any{
+		"user": map[string]any{
+			"plan":       "enterprise",
+			"score":      710.0,
+			"cart_total": 150.0,
+		},
+		"user.id": "u_123",
+	}
+	dc := arbiter.DataFromMap(ctxMap, full.Ruleset)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		matched, _, err := arbiter.EvalGoverned(full.Ruleset, dc, full.Segments, ctxMap)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(matched) != 2 {
+			b.Fatalf("expected 2 matches, got %d", len(matched))
+		}
+	}
+}
+
+func BenchmarkArbiterFlagExplain(b *testing.B) {
+	f, err := flags.Load([]byte(flagSource))
+	if err != nil {
+		b.Fatal(err)
+	}
+	ctxMap := map[string]any{
+		"user": map[string]any{
+			"plan": "enterprise",
+		},
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		eval := f.Explain("checkout_v2", ctxMap)
+		if eval.Variant.Name != "treatment" {
+			b.Fatalf("expected treatment, got %q", eval.Variant.Name)
+		}
+	}
+}
+
+func BenchmarkArbiterExpertSession(b *testing.B) {
+	program, err := expert.Compile([]byte(expertSource))
+	if err != nil {
+		b.Fatal(err)
+	}
+	envelope := map[string]any{
+		"applicant": map[string]any{
+			"score": 540.0,
+		},
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		session := expert.NewSession(program, envelope, nil, expert.Options{})
+		result, err := session.Run(context.Background())
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(result.Outcomes) != 1 {
+			b.Fatalf("expected 1 outcome, got %d", len(result.Outcomes))
+		}
+	}
+}
+
+func BenchmarkArbiterBundleCompileArtifacts(b *testing.B) {
+	source := []byte(governedSource + "\n" + flagSource + "\n" + expertSource)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := arbiter.CompileFull(source); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := flags.Load(source); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := expert.Compile(source); err != nil {
+			b.Fatal(err)
+		}
+	}
 }

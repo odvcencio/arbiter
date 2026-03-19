@@ -27,8 +27,21 @@ type Flags struct {
 
 // Load parses .arb source, extracts flags + segments, and compiles segments.
 func Load(source []byte) (*Flags, error) {
+	parsed, err := arbiter.ParseSource(source)
+	if err != nil {
+		return nil, err
+	}
+	full, err := arbiter.CompileFullParsed(parsed)
+	if err != nil {
+		return nil, err
+	}
+	return LoadParsed(parsed, full)
+}
+
+// LoadParsed parses flags from a previously parsed source and compiled segment set.
+func LoadParsed(parsed *arbiter.ParsedSource, full *arbiter.CompileResult) (*Flags, error) {
 	f := &Flags{}
-	if err := f.parse(source); err != nil {
+	if err := f.parseParsed(parsed, full); err != nil {
 		return nil, err
 	}
 	return f, nil
@@ -40,7 +53,15 @@ func LoadFile(path string) (*Flags, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Load(unit.Source)
+	parsed, err := arbiter.ParseSource(unit.Source)
+	if err != nil {
+		return nil, err
+	}
+	full, err := arbiter.CompileFullParsed(parsed)
+	if err != nil {
+		return nil, err
+	}
+	return LoadParsed(parsed, full)
 }
 
 // LoadEnv loads flags for a specific environment.
@@ -52,8 +73,16 @@ func LoadEnv(dir, env string) (*Flags, error) {
 
 // Reload atomically re-parses and swaps the flag definitions from new source.
 func (f *Flags) Reload(source []byte) error {
+	parsed, err := arbiter.ParseSource(source)
+	if err != nil {
+		return err
+	}
+	full, err := arbiter.CompileFullParsed(parsed)
+	if err != nil {
+		return err
+	}
 	newF := &Flags{}
-	if err := newF.parse(source); err != nil {
+	if err := newF.parseParsed(parsed, full); err != nil {
 		return err
 	}
 	f.mu.Lock()
@@ -70,7 +99,24 @@ func (f *Flags) ReloadFile(path string) error {
 	if err != nil {
 		return err
 	}
-	return f.Reload(unit.Source)
+	parsed, err := arbiter.ParseSource(unit.Source)
+	if err != nil {
+		return err
+	}
+	full, err := arbiter.CompileFullParsed(parsed)
+	if err != nil {
+		return err
+	}
+	newF := &Flags{}
+	if err := newF.parseParsed(parsed, full); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.defs = newF.defs
+	f.segments = newF.segments
+	f.source = newF.source
+	f.mu.Unlock()
+	return nil
 }
 
 // Enabled returns true if the flag is on for boolean flags,
@@ -465,28 +511,16 @@ func compileInlineSegment(conditionSource string) (*govern.CompiledSegment, erro
 
 // --- CST parsing ---
 
-func (f *Flags) parse(source []byte) error {
-	full, err := arbiter.CompileFull(source)
-	if err != nil {
-		return fmt.Errorf("compile segments: %w", err)
+func (f *Flags) parseParsed(parsed *arbiter.ParsedSource, full *arbiter.CompileResult) error {
+	if parsed == nil {
+		return fmt.Errorf("nil parsed source")
 	}
-
-	lang, err := arbiter.GetLanguage()
-	if err != nil {
-		return fmt.Errorf("get language: %w", err)
+	if full == nil {
+		return fmt.Errorf("nil compiled ruleset")
 	}
-
-	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.Parse(source)
-	if err != nil {
-		return fmt.Errorf("parse: %w", err)
-	}
-
-	root := tree.RootNode()
-	if root.HasError() {
-		return fmt.Errorf("parse errors in arbiter source")
-	}
-
+	source := parsed.Source
+	lang := parsed.Lang
+	root := parsed.Root
 	f.defs = make(map[string]*FlagDef)
 	f.segments = full.Segments
 	f.source = source

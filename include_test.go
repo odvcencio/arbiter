@@ -122,6 +122,51 @@ include "rules.arb"
 	}
 }
 
+func TestLoadFileUnitTracksOriginalFileLinesAcrossIncludes(t *testing.T) {
+	dir := t.TempDir()
+	first := writeTestFile(t, dir, "first.arb", `rule First {
+	when { true }
+	then One {}
+}`)
+	second := writeTestFile(t, dir, "second.arb", `const LIMIT = 10`)
+	main := writeTestFile(t, dir, "main.arb", `
+include "first.arb"
+include "second.arb"
+`)
+
+	unit, err := LoadFileUnit(main)
+	if err != nil {
+		t.Fatalf("LoadFileUnit: %v", err)
+	}
+	if len(unit.Origins) != 2 {
+		t.Fatalf("expected 2 origins, got %+v", unit.Origins)
+	}
+
+	origin, ok := unit.OriginForLine(1)
+	if !ok {
+		t.Fatal("expected origin for generated line 1")
+	}
+	if origin.File != first || origin.SourceLine != 1 || origin.Name != "First" {
+		t.Fatalf("unexpected origin for line 1: %+v", origin)
+	}
+
+	origin, ok = unit.OriginForLine(4)
+	if !ok {
+		t.Fatal("expected origin for generated line 4")
+	}
+	if origin.File != first || origin.SourceLine != 1 || origin.Name != "First" {
+		t.Fatalf("unexpected origin for line 4: %+v", origin)
+	}
+
+	origin, ok = unit.OriginForLine(5)
+	if !ok {
+		t.Fatal("expected origin for generated line 5")
+	}
+	if origin.File != second || origin.SourceLine != 1 || origin.Name != "LIMIT" {
+		t.Fatalf("unexpected origin for line 5: %+v", origin)
+	}
+}
+
 func writeTestFile(t *testing.T, dir, name, contents string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

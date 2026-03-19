@@ -16,7 +16,15 @@ func Watch(path string) (*Flags, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	f, err := Load(unit.Source)
+	parsed, err := arbiter.ParseSource(unit.Source)
+	if err != nil {
+		return nil, nil, err
+	}
+	full, err := arbiter.CompileFullParsed(parsed)
+	if err != nil {
+		return nil, nil, err
+	}
+	f, err := LoadParsed(parsed, full)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -55,10 +63,26 @@ func Watch(path string) (*Flags, func(), error) {
 						log.Printf("flags: reload error: %v", err)
 						continue
 					}
-					if err := f.Reload(nextUnit.Source); err != nil {
+					nextParsed, err := arbiter.ParseSource(nextUnit.Source)
+					if err != nil {
 						log.Printf("flags: reload error: %v", err)
 						continue
 					}
+					nextFull, err := arbiter.CompileFullParsed(nextParsed)
+					if err != nil {
+						log.Printf("flags: reload error: %v", err)
+						continue
+					}
+					newF, err := LoadParsed(nextParsed, nextFull)
+					if err != nil {
+						log.Printf("flags: reload error: %v", err)
+						continue
+					}
+					f.mu.Lock()
+					f.defs = newF.defs
+					f.segments = newF.segments
+					f.source = newF.source
+					f.mu.Unlock()
 					if err := syncWatchedDirs(watcher, watchedDirs, nextUnit.Files); err != nil {
 						log.Printf("flags: watcher sync error: %v", err)
 					}
