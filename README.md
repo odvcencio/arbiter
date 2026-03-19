@@ -4,7 +4,7 @@ A compact language for governed outcomes.
 
 Every decision your software makes — approve this transaction, show this variant, block this request, compute this tax bracket — is a governed outcome. Arbiter gives those decisions a language, compiles them to bytecode, and evaluates simple precompiled rules in the low hundreds of nanoseconds.
 
-```
+```text
 .arb source ──→ Parser ──→ Compiler ──→ Bytecode VM (~200ns simple eval)
                               │
                               ├──→ Arishem JSON (compatibility)
@@ -44,7 +44,7 @@ Segments, rollouts, kill switches, prerequisites, explainability — governance 
 
 ### Rules
 
-```python
+```arb
 rule FreeShipping {
     when {
         user.cart_total >= 35
@@ -59,7 +59,7 @@ rule FreeShipping {
 
 Rules support governance keywords directly:
 
-```python
+```arb
 rule EnhancedRiskCheck priority 1 {
     kill_switch
     requires BasicRiskCheck
@@ -75,7 +75,7 @@ rule EnhancedRiskCheck priority 1 {
 
 Reusable conditions. Define once, reference from any rule or flag.
 
-```python
+```arb
 segment beta_users {
     user.cohort matches "^beta_"
 }
@@ -89,7 +89,7 @@ segment high_value {
 
 Flags add one concept to the governance model: **variants** — named outcomes with typed payloads. Everything else (segments, rollouts, kill switches, prerequisites, explainability) is shared.
 
-```python
+```arb
 flag checkout_v2 type multivariate default "control" {
     owner: "growth"
     ticket: "ENG-1234"
@@ -110,7 +110,7 @@ Schema validation, secret references, request-level caching, hot reload, HTTP se
 
 Forward-chaining rules that reason until quiescence. Facts build on facts. Rules fire, assert new facts into working memory, and the engine loops until nothing changes.
 
-```python
+```arb
 expert rule ComputeAGI priority 15 {
     requires ComputeGrossIncome
     when {
@@ -251,7 +251,7 @@ go install github.com/odvcencio/arbiter/cmd/arbiter@latest
 
 ## Editor Support
 
-Tree-sitter consumers can use [highlights.scm](/home/draco/work/arbiter/highlights.scm) directly for `.arb` highlighting. A minimal VS Code language package also ships in [editors/vscode/arbiter-language](/home/draco/work/arbiter/editors/vscode/arbiter-language) with syntax highlighting, snippets, and `arbiter check` diagnostics on open/save.
+Tree-sitter consumers can use [highlights.scm](highlights.scm) directly for `.arb` highlighting. A minimal VS Code language package also ships in [editors/vscode/arbiter-language](editors/vscode/arbiter-language) with syntax highlighting, snippets, and `arbiter check` diagnostics on open/save.
 
 ## Usage
 
@@ -368,7 +368,7 @@ matched, _ := arbiter.Eval(ruleset, dc)
 
 Declare the data your rules evaluate against.
 
-```python
+```arb
 feature user from "user-service" {
     age: number
     tier: string
@@ -382,7 +382,7 @@ feature user from "user-service" {
 
 Named values inlined at compile time.
 
-```python
+```arb
 const VIP_THRESHOLD = 1000
 const PREMIUM_TIERS = ["gold", "platinum"]
 ```
@@ -391,7 +391,7 @@ const PREMIUM_TIERS = ["gold", "platinum"]
 
 Split one program across multiple files. Each included file is a valid `.arb` fragment.
 
-```python
+```arb
 include "schema.arb"
 include "constants.arb"
 include "segments.arb"
@@ -404,7 +404,7 @@ The compiler expands the include graph into one compilation unit. Constants, seg
 
 ### Rules
 
-```python
+```arb
 rule RuleName priority 1 {
     kill_switch                    # optional: instant disable
     requires OtherRule             # optional: prerequisite
@@ -423,7 +423,7 @@ rule RuleName priority 1 {
 
 ### Expert Rules
 
-```python
+```arb
 expert rule RuleName priority 1 {
     kill_switch
     no_loop
@@ -464,7 +464,7 @@ expert rule UpdateFact {
 
 Expert rules also support binding syntax that compiles to nested existential quantifiers:
 
-```python
+```arb
 expert rule RouteManualReview {
     when {
         bind risk in facts.RiskFlag
@@ -484,7 +484,7 @@ expert rule RouteManualReview {
 
 **Comparison**
 
-```python
+```arb
 x == 1          x != 1
 x > 1           x < 1
 x >= 1          x <= 1
@@ -492,13 +492,13 @@ x >= 1          x <= 1
 
 **Logical**
 
-```python
+```arb
 a and b         a or b          not a
 ```
 
 **Collection**
 
-```python
+```arb
 role in ["admin", "mod"]
 role not in ["banned"]
 tags contains "vip"
@@ -512,7 +512,7 @@ a vague_contains b              # fuzzy substring match in list
 
 **String**
 
-```python
+```arb
 name starts_with "Dr"
 email ends_with ".edu"
 code matches "^[A-Z]{3}$"
@@ -520,14 +520,14 @@ code matches "^[A-Z]{3}$"
 
 **Null**
 
-```python
+```arb
 value is null
 value is not null
 ```
 
 **Range**
 
-```python
+```arb
 age between [18, 65]            # inclusive both ends
 score between (0, 100)          # exclusive both ends
 temp between [0, 100)           # inclusive left, exclusive right
@@ -536,14 +536,14 @@ temp between (0, 100]           # exclusive left, inclusive right
 
 **Math**
 
-```python
+```arb
 price * quantity > 1000
 score + bonus >= threshold
 ```
 
 **Quantifiers**
 
-```python
+```arb
 any item in cart.items { item.price > 100 }
 all item in cart.items { item.in_stock == true }
 none item in cart.items { item.banned == true }
@@ -551,13 +551,13 @@ none item in cart.items { item.banned == true }
 
 **Grouping**
 
-```python
+```arb
 (a > 1 or b > 2) and c > 3
 ```
 
 ## Architecture
 
-```
+```text
 intern/       Constant pool — deduplicates strings and numbers across all rules
 compiler/     CST → bytecode compiler + Arishem JSON loader
 vm/           Stack-based bytecode VM (fixed 256-element stack, low-allocation eval)
@@ -578,7 +578,7 @@ Flat `[]byte` of fixed-width 4-byte instructions: `[opcode(1B), flags(1B), arg(2
 
 ### E-commerce Pricing
 
-```python
+```arb
 const PREMIUM_TIERS = ["gold", "platinum"]
 
 rule VIPDiscount priority 2 {
@@ -597,7 +597,7 @@ rule VIPDiscount priority 2 {
 
 ### Fraud Detection
 
-```python
+```arb
 rule InstantBlock priority 0 {
     kill_switch
     when {
@@ -626,7 +626,7 @@ rule GeoMismatch priority 3 {
 
 ### Tax Computation (Expert)
 
-```python
+```arb
 expert rule ComputeGrossIncome priority 5 {
     when { income.wages > 0 or income.interest > 0 }
     then assert GrossIncome {
