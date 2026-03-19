@@ -34,7 +34,7 @@ type Rule = grammargen.Rule
 
 // ArbiterGrammar defines the arbiter rule engine DSL.
 func ArbiterGrammar() *Grammar {
-	g := NewGrammar("arbiter")
+	g := NewGrammar("arb")
 
 	// --- Source file ---
 	g.Define("source_file", Repeat(

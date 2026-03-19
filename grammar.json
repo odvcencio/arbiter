@@ -1,5 +1,5 @@
 {
-  "name": "arbiter",
+  "name": "arb",
   "word": "identifier",
   "rules": {
     "source_file": {
@@ -170,7 +170,7 @@
             },
             {
               "type": "STRING",
-              "value": "\u003c"
+              "value": "<"
             },
             {
               "name": "type_name",
@@ -178,7 +178,7 @@
             },
             {
               "type": "STRING",
-              "value": "\u003e"
+              "value": ">"
             }
           ],
           "type": "SEQ"
@@ -1473,7 +1473,7 @@
         "members": [
           {
             "type": "STRING",
-            "value": "\u003e"
+            "value": ">"
           },
           {
             "type": "STRING",
@@ -1489,7 +1489,7 @@
         "members": [
           {
             "type": "STRING",
-            "value": "\u003c"
+            "value": "<"
           },
           {
             "type": "STRING",
@@ -1548,11 +1548,11 @@
                 },
                 {
                   "type": "STRING",
-                  "value": "\u003e"
+                  "value": ">"
                 },
                 {
                   "type": "STRING",
-                  "value": "\u003c"
+                  "value": "<"
                 }
               ],
               "type": "CHOICE"
@@ -2434,5 +2434,8 @@
   ],
   "externals": [],
   "inline": [],
-  "supertypes": []
+  "supertypes": [],
+  "file_extensions": [
+    ".arb"
+  ]
 }
