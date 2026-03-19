@@ -12,7 +12,7 @@
 //	arbiter eval <file.arb> --data '{...}'    — compile and eval against JSON
 //	arbiter expert <file.arb> --envelope '{...}' [--facts '[...]'] — run one expert session
 //	arbiter import <file.json> [-o output.arb] — decompile Arishem JSON to .arb
-//	arbiter serve [--grpc :8081] [--audit-file decisions.jsonl] — start gRPC API
+//	arbiter serve [--grpc :8081] [--audit-file decisions.jsonl] [--bundle-file bundles.json] [--overrides-file overrides.json] — start gRPC API
 package main
 
 import (
@@ -147,6 +147,8 @@ func main() {
 	case "serve":
 		grpcAddr := ":8081"
 		auditFile := ""
+		bundleFile := ""
+		overridesFile := ""
 		for i := 2; i < len(os.Args); i++ {
 			if os.Args[i] == "--grpc" && i+1 < len(os.Args) {
 				grpcAddr = os.Args[i+1]
@@ -156,8 +158,16 @@ func main() {
 				auditFile = os.Args[i+1]
 				i++
 			}
+			if os.Args[i] == "--bundle-file" && i+1 < len(os.Args) {
+				bundleFile = os.Args[i+1]
+				i++
+			}
+			if os.Args[i] == "--overrides-file" && i+1 < len(os.Args) {
+				overridesFile = os.Args[i+1]
+				i++
+			}
 		}
-		if err := serveCmd(grpcAddr, auditFile); err != nil {
+		if err := serveCmd(grpcAddr, auditFile, bundleFile, overridesFile); err != nil {
 			fmt.Fprintln(os.Stderr, formatCLIError(err))
 			os.Exit(1)
 		}
@@ -423,7 +433,7 @@ func importCmd(path, outPath string) error {
 	return fmt.Errorf("cannot parse %s: expected Arishem JSON with rules array, rule array, or single rule", path)
 }
 
-func serveCmd(grpcAddr, auditFile string) error {
+func serveCmd(grpcAddr, auditFile, bundleFile, overridesFile string) error {
 	lis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", grpcAddr, err)
@@ -443,8 +453,23 @@ func serveCmd(grpcAddr, auditFile string) error {
 		defer closer.Close()
 	}
 
+	registry := grpcserver.NewRegistry()
+	if bundleFile != "" {
+		registry, err = grpcserver.NewFileRegistry(bundleFile)
+		if err != nil {
+			return fmt.Errorf("open bundle registry: %w", err)
+		}
+	}
+	store := overrides.NewStore()
+	if overridesFile != "" {
+		store, err = overrides.NewFileStore(overridesFile)
+		if err != nil {
+			return fmt.Errorf("open override store: %w", err)
+		}
+	}
+
 	grpcSrv := grpc.NewServer()
-	arbiterv1.RegisterArbiterServiceServer(grpcSrv, grpcserver.NewServer(grpcserver.NewRegistry(), overrides.NewStore(), sink))
+	arbiterv1.RegisterArbiterServiceServer(grpcSrv, grpcserver.NewServer(registry, store, sink))
 
 	fmt.Fprintf(os.Stderr, "arbiter gRPC listening on %s\n", grpcAddr)
 	return grpcSrv.Serve(lis)

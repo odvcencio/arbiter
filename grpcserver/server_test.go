@@ -59,6 +59,25 @@ expert rule RouteManualReview {
 }
 `
 
+const testSourceV2 = `
+segment enterprise {
+	user.plan == "enterprise"
+}
+
+rule HighValue {
+	when segment enterprise {
+		user.cart_total > 100
+	}
+	then Approve {
+		tier: "platinum",
+	}
+}
+
+flag checkout_v2 type boolean default false {
+	when enterprise then true
+}
+`
+
 const expertMutationSource = `
 expert rule LowerRisk {
 	when {
@@ -172,6 +191,88 @@ func TestServerPublishEvaluateAndOverride(t *testing.T) {
 	}
 	if flagResp.Variant != "false" || !flagResp.IsDefault {
 		t.Fatalf("expected default false after kill switch, got %+v", flagResp)
+	}
+}
+
+func TestServerBundleHistoryAndRollbackByName(t *testing.T) {
+	client, cleanup := newTestClient(t)
+	defer cleanup()
+
+	pub1, err := client.PublishBundle(context.Background(), &arbiterv1.PublishBundleRequest{
+		Name:   "checkout",
+		Source: []byte(testSource),
+	})
+	if err != nil {
+		t.Fatalf("PublishBundle first: %v", err)
+	}
+	pub2, err := client.PublishBundle(context.Background(), &arbiterv1.PublishBundleRequest{
+		Name:   "checkout",
+		Source: []byte(testSourceV2),
+	})
+	if err != nil {
+		t.Fatalf("PublishBundle second: %v", err)
+	}
+
+	list, err := client.ListBundles(context.Background(), &arbiterv1.ListBundlesRequest{Name: "checkout"})
+	if err != nil {
+		t.Fatalf("ListBundles: %v", err)
+	}
+	if len(list.Bundles) != 2 {
+		t.Fatalf("expected 2 bundles, got %+v", list.Bundles)
+	}
+	if !list.Bundles[0].Active || list.Bundles[0].BundleId != pub2.BundleId {
+		t.Fatalf("expected second publish to be active, got %+v", list.Bundles)
+	}
+
+	ctxMap, err := structpb.NewStruct(map[string]any{
+		"user": map[string]any{
+			"plan":       "enterprise",
+			"cart_total": 150.0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewStruct: %v", err)
+	}
+
+	eval, err := client.EvaluateRules(context.Background(), &arbiterv1.EvaluateRulesRequest{
+		BundleName: "checkout",
+		Context:    ctxMap,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateRules by name: %v", err)
+	}
+	if got := eval.Matched[0].Params.AsMap()["tier"]; got != "platinum" {
+		t.Fatalf("expected active bundle tier platinum, got %+v", eval.Matched)
+	}
+
+	rollback, err := client.RollbackBundle(context.Background(), &arbiterv1.RollbackBundleRequest{Name: "checkout"})
+	if err != nil {
+		t.Fatalf("RollbackBundle: %v", err)
+	}
+	if rollback.Bundle.GetBundleId() != pub1.BundleId || rollback.PreviousBundleId != pub2.BundleId {
+		t.Fatalf("unexpected rollback response: %+v", rollback)
+	}
+
+	eval, err = client.EvaluateRules(context.Background(), &arbiterv1.EvaluateRulesRequest{
+		BundleName: "checkout",
+		Context:    ctxMap,
+	})
+	if err != nil {
+		t.Fatalf("EvaluateRules after rollback: %v", err)
+	}
+	if got := eval.Matched[0].Params.AsMap()["tier"]; got != "gold" {
+		t.Fatalf("expected rolled back bundle tier gold, got %+v", eval.Matched)
+	}
+
+	activate, err := client.ActivateBundle(context.Background(), &arbiterv1.ActivateBundleRequest{
+		Name:     "checkout",
+		BundleId: pub2.BundleId,
+	})
+	if err != nil {
+		t.Fatalf("ActivateBundle: %v", err)
+	}
+	if activate.Bundle.GetBundleId() != pub2.BundleId || !activate.Bundle.GetActive() {
+		t.Fatalf("unexpected activate response: %+v", activate)
 	}
 }
 

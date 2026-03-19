@@ -46,7 +46,7 @@ func NewServer(registry *Registry, store *overrides.Store, sink audit.Sink) *Ser
 }
 
 // PublishBundle compiles and stores a governed bundle.
-func (s *Server) PublishBundle(_ context.Context, req *arbiterv1.PublishBundleRequest) (*arbiterv1.PublishBundleResponse, error) {
+func (s *Server) PublishBundle(ctx context.Context, req *arbiterv1.PublishBundleRequest) (*arbiterv1.PublishBundleResponse, error) {
 	if len(req.GetSource()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "source is required")
 	}
@@ -54,6 +54,17 @@ func (s *Server) PublishBundle(_ context.Context, req *arbiterv1.PublishBundleRe
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "publish bundle: %v", err)
 	}
+	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
+		Timestamp: time.Now().UTC(),
+		BundleID:  bundle.ID,
+		Kind:      "bundle",
+		Bundle: &audit.BundleChange{
+			Action:   "publish",
+			Name:     bundle.Name,
+			BundleID: bundle.ID,
+			Checksum: bundle.Checksum,
+		},
+	})
 	return &arbiterv1.PublishBundleResponse{
 		BundleId:        bundle.ID,
 		Checksum:        bundle.Checksum,
@@ -64,9 +75,71 @@ func (s *Server) PublishBundle(_ context.Context, req *arbiterv1.PublishBundleRe
 	}, nil
 }
 
+// ListBundles lists published bundles and active versions.
+func (s *Server) ListBundles(_ context.Context, req *arbiterv1.ListBundlesRequest) (*arbiterv1.ListBundlesResponse, error) {
+	bundles := s.registry.List(req.GetName())
+	resp := &arbiterv1.ListBundlesResponse{
+		Bundles: make([]*arbiterv1.BundleSummary, 0, len(bundles)),
+	}
+	for _, bundle := range bundles {
+		resp.Bundles = append(resp.Bundles, s.protoBundleSummary(bundle))
+	}
+	return resp, nil
+}
+
+// ActivateBundle switches the active version for one bundle name.
+func (s *Server) ActivateBundle(ctx context.Context, req *arbiterv1.ActivateBundleRequest) (*arbiterv1.ActivateBundleResponse, error) {
+	if req.GetName() == "" || req.GetBundleId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name and bundle_id are required")
+	}
+	bundle, err := s.registry.Activate(req.GetName(), req.GetBundleId())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "activate bundle: %v", err)
+	}
+	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
+		Timestamp: time.Now().UTC(),
+		BundleID:  bundle.ID,
+		Kind:      "bundle",
+		Bundle: &audit.BundleChange{
+			Action:   "activate",
+			Name:     bundle.Name,
+			BundleID: bundle.ID,
+			Checksum: bundle.Checksum,
+		},
+	})
+	return &arbiterv1.ActivateBundleResponse{Bundle: s.protoBundleSummary(bundle)}, nil
+}
+
+// RollbackBundle reactivates the previous published bundle version.
+func (s *Server) RollbackBundle(ctx context.Context, req *arbiterv1.RollbackBundleRequest) (*arbiterv1.RollbackBundleResponse, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+	bundle, previous, err := s.registry.Rollback(req.GetName())
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "rollback bundle: %v", err)
+	}
+	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
+		Timestamp: time.Now().UTC(),
+		BundleID:  bundle.ID,
+		Kind:      "bundle",
+		Bundle: &audit.BundleChange{
+			Action:           "rollback",
+			Name:             bundle.Name,
+			BundleID:         bundle.ID,
+			Checksum:         bundle.Checksum,
+			PreviousBundleID: previous.ID,
+		},
+	})
+	return &arbiterv1.RollbackBundleResponse{
+		Bundle:           s.protoBundleSummary(bundle),
+		PreviousBundleId: previous.ID,
+	}, nil
+}
+
 // EvaluateRules evaluates rules in a published bundle.
 func (s *Server) EvaluateRules(ctx context.Context, req *arbiterv1.EvaluateRulesRequest) (*arbiterv1.EvaluateRulesResponse, error) {
-	bundle, err := s.bundle(req.GetBundleId())
+	bundle, err := s.bundleRef(req.GetBundleId(), req.GetBundleName())
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +186,7 @@ func (s *Server) EvaluateRules(ctx context.Context, req *arbiterv1.EvaluateRules
 
 // ResolveFlag evaluates a flag in a published bundle.
 func (s *Server) ResolveFlag(ctx context.Context, req *arbiterv1.ResolveFlagRequest) (*arbiterv1.ResolveFlagResponse, error) {
-	bundle, err := s.bundle(req.GetBundleId())
+	bundle, err := s.bundleRef(req.GetBundleId(), req.GetBundleName())
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +243,9 @@ func (s *Server) SetRuleOverride(ctx context.Context, req *arbiterv1.SetRuleOver
 		v := uint8(req.Rollout.GetValue())
 		ov.Rollout = &v
 	}
-	s.overrides.SetRule(req.GetBundleId(), req.GetRuleName(), ov)
+	if err := s.overrides.SetRule(req.GetBundleId(), req.GetRuleName(), ov); err != nil {
+		return nil, status.Errorf(codes.Internal, "persist rule override: %v", err)
+	}
 	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
 		Timestamp: time.Now().UTC(),
 		BundleID:  req.GetBundleId(),
@@ -199,7 +274,9 @@ func (s *Server) SetFlagOverride(ctx context.Context, req *arbiterv1.SetFlagOver
 		v := req.KillSwitch.GetValue()
 		ov.KillSwitch = &v
 	}
-	s.overrides.SetFlag(req.GetBundleId(), req.GetFlagKey(), ov)
+	if err := s.overrides.SetFlag(req.GetBundleId(), req.GetFlagKey(), ov); err != nil {
+		return nil, status.Errorf(codes.Internal, "persist flag override: %v", err)
+	}
 	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
 		Timestamp: time.Now().UTC(),
 		BundleID:  req.GetBundleId(),
@@ -233,7 +310,9 @@ func (s *Server) SetFlagRuleOverride(ctx context.Context, req *arbiterv1.SetFlag
 		v := uint8(req.Rollout.GetValue())
 		ov.Rollout = &v
 	}
-	s.overrides.SetFlagRule(req.GetBundleId(), req.GetFlagKey(), int(req.GetRuleIndex()), ov)
+	if err := s.overrides.SetFlagRule(req.GetBundleId(), req.GetFlagKey(), int(req.GetRuleIndex()), ov); err != nil {
+		return nil, status.Errorf(codes.Internal, "persist flag rule override: %v", err)
+	}
 	ruleIndex := int(req.GetRuleIndex())
 	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
 		Timestamp: time.Now().UTC(),
@@ -253,6 +332,17 @@ func (s *Server) bundle(id string) (*Bundle, error) {
 	bundle, ok := s.registry.Get(id)
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "bundle %q not found", id)
+	}
+	return bundle, nil
+}
+
+func (s *Server) bundleRef(id, name string) (*Bundle, error) {
+	bundle, err := s.registry.Resolve(id, name)
+	if err != nil {
+		if id == "" && name == "" {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		return nil, status.Error(codes.NotFound, err.Error())
 	}
 	return bundle, nil
 }
@@ -345,6 +435,23 @@ func toGovernTrace(steps []flags.TraceStep) []govern.TraceStep {
 		})
 	}
 	return out
+}
+
+func (s *Server) protoBundleSummary(bundle *Bundle) *arbiterv1.BundleSummary {
+	if bundle == nil {
+		return nil
+	}
+	active, _ := s.registry.GetActive(bundle.Name)
+	return &arbiterv1.BundleSummary{
+		BundleId:        bundle.ID,
+		Name:            bundle.Name,
+		Checksum:        bundle.Checksum,
+		PublishedAt:     timestamppb.New(bundle.Published),
+		RuleCount:       uint32(bundle.RuleCount),
+		FlagCount:       uint32(bundle.FlagCount),
+		ExpertRuleCount: uint32(bundle.ExpertRuleCount),
+		Active:          active != nil && active.ID == bundle.ID,
+	}
 }
 
 var _ arbiterv1.ArbiterServiceServer = (*Server)(nil)

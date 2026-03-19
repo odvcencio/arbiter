@@ -10,6 +10,9 @@ import "google/protobuf/wrappers.proto";
 
 service ArbiterService {
   rpc PublishBundle(PublishBundleRequest) returns (PublishBundleResponse);
+  rpc ListBundles(ListBundlesRequest) returns (ListBundlesResponse);
+  rpc ActivateBundle(ActivateBundleRequest) returns (ActivateBundleResponse);
+  rpc RollbackBundle(RollbackBundleRequest) returns (RollbackBundleResponse);
   rpc EvaluateRules(EvaluateRulesRequest) returns (EvaluateRulesResponse);
   rpc ResolveFlag(ResolveFlagRequest) returns (ResolveFlagResponse);
   rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
@@ -37,6 +40,43 @@ message PublishBundleResponse {
   uint32 expert_rule_count = 6;
 }
 
+message BundleSummary {
+  string bundle_id = 1;
+  string name = 2;
+  string checksum = 3;
+  google.protobuf.Timestamp published_at = 4;
+  uint32 rule_count = 5;
+  uint32 flag_count = 6;
+  uint32 expert_rule_count = 7;
+  bool active = 8;
+}
+
+message ListBundlesRequest {
+  string name = 1;
+}
+
+message ListBundlesResponse {
+  repeated BundleSummary bundles = 1;
+}
+
+message ActivateBundleRequest {
+  string name = 1;
+  string bundle_id = 2;
+}
+
+message ActivateBundleResponse {
+  BundleSummary bundle = 1;
+}
+
+message RollbackBundleRequest {
+  string name = 1;
+}
+
+message RollbackBundleResponse {
+  BundleSummary bundle = 1;
+  string previous_bundle_id = 2;
+}
+
 message TraceStep {
   string check = 1;
   bool result = 2;
@@ -55,6 +95,7 @@ message EvaluateRulesRequest {
   string bundle_id = 1;
   google.protobuf.Struct context = 2;
   string request_id = 3;
+  string bundle_name = 4;
 }
 
 message EvaluateRulesResponse {
@@ -67,6 +108,7 @@ message ResolveFlagRequest {
   string flag_key = 2;
   google.protobuf.Struct context = 3;
   string request_id = 4;
+  string bundle_name = 5;
 }
 
 message ResolveFlagResponse {
@@ -103,6 +145,7 @@ message StartSessionRequest {
   string bundle_id = 1;
   google.protobuf.Struct envelope = 2;
   repeated ExpertFact facts = 3;
+  string bundle_name = 4;
 }
 
 message StartSessionResponse {

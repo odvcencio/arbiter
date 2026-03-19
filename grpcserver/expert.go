@@ -15,7 +15,7 @@ import (
 
 // StartSession creates a new expert session for a published bundle.
 func (s *Server) StartSession(_ context.Context, req *arbiterv1.StartSessionRequest) (*arbiterv1.StartSessionResponse, error) {
-	bundle, err := s.bundle(req.GetBundleId())
+	bundle, err := s.bundleRef(req.GetBundleId(), req.GetBundleName())
 	if err != nil {
 		return nil, err
 	}

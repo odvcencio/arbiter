@@ -200,6 +200,8 @@ store.SetFlag("bundle_id", "new_feature", overrides.FlagOverride{
 })
 ```
 
+When the store is opened from a file, override mutations are persisted on every write.
+
 ## Serving
 
 ### gRPC API
@@ -209,6 +211,9 @@ Arbiter ships a gRPC server that bundles compilation, evaluation, flag resolutio
 ```protobuf
 service ArbiterService {
     rpc PublishBundle(...)       // compile and register .arb source
+    rpc ListBundles(...)         // list bundle history and active versions
+    rpc ActivateBundle(...)      // switch active version for a bundle name
+    rpc RollbackBundle(...)      // move active version back one revision
     rpc EvaluateRules(...)      // stateless rule evaluation
     rpc ResolveFlag(...)        // flag resolution with explainability
     rpc StartSession(...)       // create an expert session
@@ -223,7 +228,7 @@ service ArbiterService {
 }
 ```
 
-Bundles are published once and evaluated many times. Each bundle compiles rules, expert rules, flags, and segments from a single `.arb` source or from one root file expanded through `include`.
+Bundles are published once and evaluated many times. Each bundle compiles rules, expert rules, flags, and segments from a single `.arb` source or from one root file expanded through `include`. Bundles now keep per-name history and an active version, so callers can evaluate by immutable `bundle_id` or by active `bundle_name`.
 
 ### Audit
 
@@ -235,6 +240,8 @@ server := grpcserver.NewServer(registry, overrides, sink)
 ```
 
 Each audit event captures the full context: matched rules, flag resolutions, expert session outcomes, governance trace steps, timestamps, request IDs, and bundle IDs.
+
+Bundle publishes, activations, rollbacks, and override mutations are also emitted as audit events.
 
 ## Install
 
@@ -257,6 +264,7 @@ arbiter emit rules.arb             # emit Arishem JSON
 arbiter emit rules.arb --rule Name # emit single rule
 arbiter check rules.arb            # validate without emitting
 arbiter expert tax.arb --envelope '{...}' [--facts '[...]']
+arbiter serve --grpc :8081 --audit-file decisions.jsonl --bundle-file bundles.json --overrides-file overrides.json
 ```
 
 When `include` is involved, file-backed commands report diagnostics against the original source file:

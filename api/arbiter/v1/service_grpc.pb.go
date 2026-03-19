@@ -20,6 +20,9 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	ArbiterService_PublishBundle_FullMethodName       = "/arbiter.v1.ArbiterService/PublishBundle"
+	ArbiterService_ListBundles_FullMethodName         = "/arbiter.v1.ArbiterService/ListBundles"
+	ArbiterService_ActivateBundle_FullMethodName      = "/arbiter.v1.ArbiterService/ActivateBundle"
+	ArbiterService_RollbackBundle_FullMethodName      = "/arbiter.v1.ArbiterService/RollbackBundle"
 	ArbiterService_EvaluateRules_FullMethodName       = "/arbiter.v1.ArbiterService/EvaluateRules"
 	ArbiterService_ResolveFlag_FullMethodName         = "/arbiter.v1.ArbiterService/ResolveFlag"
 	ArbiterService_StartSession_FullMethodName        = "/arbiter.v1.ArbiterService/StartSession"
@@ -38,6 +41,9 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ArbiterServiceClient interface {
 	PublishBundle(ctx context.Context, in *PublishBundleRequest, opts ...grpc.CallOption) (*PublishBundleResponse, error)
+	ListBundles(ctx context.Context, in *ListBundlesRequest, opts ...grpc.CallOption) (*ListBundlesResponse, error)
+	ActivateBundle(ctx context.Context, in *ActivateBundleRequest, opts ...grpc.CallOption) (*ActivateBundleResponse, error)
+	RollbackBundle(ctx context.Context, in *RollbackBundleRequest, opts ...grpc.CallOption) (*RollbackBundleResponse, error)
 	EvaluateRules(ctx context.Context, in *EvaluateRulesRequest, opts ...grpc.CallOption) (*EvaluateRulesResponse, error)
 	ResolveFlag(ctx context.Context, in *ResolveFlagRequest, opts ...grpc.CallOption) (*ResolveFlagResponse, error)
 	StartSession(ctx context.Context, in *StartSessionRequest, opts ...grpc.CallOption) (*StartSessionResponse, error)
@@ -63,6 +69,36 @@ func (c *arbiterServiceClient) PublishBundle(ctx context.Context, in *PublishBun
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PublishBundleResponse)
 	err := c.cc.Invoke(ctx, ArbiterService_PublishBundle_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *arbiterServiceClient) ListBundles(ctx context.Context, in *ListBundlesRequest, opts ...grpc.CallOption) (*ListBundlesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListBundlesResponse)
+	err := c.cc.Invoke(ctx, ArbiterService_ListBundles_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *arbiterServiceClient) ActivateBundle(ctx context.Context, in *ActivateBundleRequest, opts ...grpc.CallOption) (*ActivateBundleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ActivateBundleResponse)
+	err := c.cc.Invoke(ctx, ArbiterService_ActivateBundle_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *arbiterServiceClient) RollbackBundle(ctx context.Context, in *RollbackBundleRequest, opts ...grpc.CallOption) (*RollbackBundleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RollbackBundleResponse)
+	err := c.cc.Invoke(ctx, ArbiterService_RollbackBundle_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +220,9 @@ func (c *arbiterServiceClient) SetFlagRuleOverride(ctx context.Context, in *SetF
 // for forward compatibility.
 type ArbiterServiceServer interface {
 	PublishBundle(context.Context, *PublishBundleRequest) (*PublishBundleResponse, error)
+	ListBundles(context.Context, *ListBundlesRequest) (*ListBundlesResponse, error)
+	ActivateBundle(context.Context, *ActivateBundleRequest) (*ActivateBundleResponse, error)
+	RollbackBundle(context.Context, *RollbackBundleRequest) (*RollbackBundleResponse, error)
 	EvaluateRules(context.Context, *EvaluateRulesRequest) (*EvaluateRulesResponse, error)
 	ResolveFlag(context.Context, *ResolveFlagRequest) (*ResolveFlagResponse, error)
 	StartSession(context.Context, *StartSessionRequest) (*StartSessionResponse, error)
@@ -207,6 +246,15 @@ type UnimplementedArbiterServiceServer struct{}
 
 func (UnimplementedArbiterServiceServer) PublishBundle(context.Context, *PublishBundleRequest) (*PublishBundleResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PublishBundle not implemented")
+}
+func (UnimplementedArbiterServiceServer) ListBundles(context.Context, *ListBundlesRequest) (*ListBundlesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListBundles not implemented")
+}
+func (UnimplementedArbiterServiceServer) ActivateBundle(context.Context, *ActivateBundleRequest) (*ActivateBundleResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ActivateBundle not implemented")
+}
+func (UnimplementedArbiterServiceServer) RollbackBundle(context.Context, *RollbackBundleRequest) (*RollbackBundleResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RollbackBundle not implemented")
 }
 func (UnimplementedArbiterServiceServer) EvaluateRules(context.Context, *EvaluateRulesRequest) (*EvaluateRulesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method EvaluateRules not implemented")
@@ -276,6 +324,60 @@ func _ArbiterService_PublishBundle_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ArbiterServiceServer).PublishBundle(ctx, req.(*PublishBundleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ArbiterService_ListBundles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListBundlesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ArbiterServiceServer).ListBundles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ArbiterService_ListBundles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ArbiterServiceServer).ListBundles(ctx, req.(*ListBundlesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ArbiterService_ActivateBundle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ActivateBundleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ArbiterServiceServer).ActivateBundle(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ArbiterService_ActivateBundle_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ArbiterServiceServer).ActivateBundle(ctx, req.(*ActivateBundleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ArbiterService_RollbackBundle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RollbackBundleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ArbiterServiceServer).RollbackBundle(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ArbiterService_RollbackBundle_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ArbiterServiceServer).RollbackBundle(ctx, req.(*RollbackBundleRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -488,6 +590,18 @@ var ArbiterService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PublishBundle",
 			Handler:    _ArbiterService_PublishBundle_Handler,
+		},
+		{
+			MethodName: "ListBundles",
+			Handler:    _ArbiterService_ListBundles_Handler,
+		},
+		{
+			MethodName: "ActivateBundle",
+			Handler:    _ArbiterService_ActivateBundle_Handler,
+		},
+		{
+			MethodName: "RollbackBundle",
+			Handler:    _ArbiterService_RollbackBundle_Handler,
 		},
 		{
 			MethodName: "EvaluateRules",

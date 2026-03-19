@@ -74,6 +74,15 @@ type OverrideChange struct {
 	Rollout    *uint8 `json:"rollout,omitempty"`
 }
 
+// BundleChange captures one bundle publish or activation mutation.
+type BundleChange struct {
+	Action           string `json:"action"`
+	Name             string `json:"name"`
+	BundleID         string `json:"bundle_id"`
+	Checksum         string `json:"checksum,omitempty"`
+	PreviousBundleID string `json:"previous_bundle_id,omitempty"`
+}
+
 // DecisionEvent is the durable audit record for one governance request.
 type DecisionEvent struct {
 	Timestamp time.Time          `json:"timestamp"`
@@ -85,6 +94,7 @@ type DecisionEvent struct {
 	Flag      *FlagDecision      `json:"flag,omitempty"`
 	Expert    *ExpertDecision    `json:"expert,omitempty"`
 	Override  *OverrideChange    `json:"override,omitempty"`
+	Bundle    *BundleChange      `json:"bundle,omitempty"`
 	Trace     []govern.TraceStep `json:"trace,omitempty"`
 }
 
