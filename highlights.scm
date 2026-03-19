@@ -63,6 +63,12 @@
 ;; Blocks
 (when_block "when" @keyword)
 (when_block "segment" @keyword)
+(expert_when_block "when" @keyword)
+(expert_when_block "segment" @keyword)
+(expert_where_block "where" @keyword)
+(expert_binding "bind" @keyword)
+(expert_binding "in" @keyword)
+(expert_binding name: (identifier) @variable.parameter)
 (then_block "then" @keyword)
 (then_block action_name: (identifier) @function)
 (otherwise_block "otherwise" @keyword)
