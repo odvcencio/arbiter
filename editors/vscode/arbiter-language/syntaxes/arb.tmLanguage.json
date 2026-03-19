@@ -1,0 +1,261 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Arbiter",
+  "scopeName": "source.arbiter",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#actions"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#punctuation"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.arbiter",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.arbiter",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.arbiter",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(include)\\s+(\"(?:\\\\.|[^\"\\\\])*\")",
+          "captures": {
+            "1": {
+              "name": "keyword.control.include.arbiter"
+            },
+            "2": {
+              "name": "string.quoted.double.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b(feature)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(from)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.feature.arbiter"
+            },
+            "2": {
+              "name": "entity.name.type.feature.arbiter"
+            },
+            "3": {
+              "name": "keyword.control.source.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b(const)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.const.arbiter"
+            },
+            "2": {
+              "name": "constant.other.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b(segment)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.segment.arbiter"
+            },
+            "2": {
+              "name": "entity.name.type.segment.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b(expert)\\s+(rule)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.expert.arbiter"
+            },
+            "2": {
+              "name": "keyword.declaration.rule.arbiter"
+            },
+            "3": {
+              "name": "entity.name.function.rule.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b(rule)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.rule.arbiter"
+            },
+            "2": {
+              "name": "entity.name.function.rule.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b(flag)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.flag.arbiter"
+            },
+            "2": {
+              "name": "entity.name.type.flag.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b(variant)\\s+(\"(?:\\\\.|[^\"\\\\])*\")",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.variant.arbiter"
+            },
+            "2": {
+              "name": "string.quoted.double.arbiter"
+            }
+          }
+        }
+      ]
+    },
+    "actions": {
+      "patterns": [
+        {
+          "match": "\\b(then|otherwise)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.action.arbiter"
+            },
+            "2": {
+              "name": "entity.name.function.action.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b(when)\\s+(segment)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.when.arbiter"
+            },
+            "2": {
+              "name": "keyword.control.segment.arbiter"
+            },
+            "3": {
+              "name": "entity.name.type.segment.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b(requires)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.requires.arbiter"
+            },
+            "2": {
+              "name": "entity.name.function.rule.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b(any|all|none)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+(in)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.control.quantifier.arbiter"
+            },
+            "2": {
+              "name": "variable.parameter.quantifier.arbiter"
+            },
+            "3": {
+              "name": "keyword.operator.membership.arbiter"
+            }
+          }
+        },
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*:)",
+          "name": "variable.other.member.arbiter"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.arbiter",
+          "match": "\\b(when|then|otherwise|feature|from|const|segment|flag|variant|defaults|type|default|priority|rollout|requires|kill_switch|no_loop|activation_group|assert|emit|retract|modify|bind|where|set|and|or|not|in|contains|retains|subset_of|superset_of|vague_contains|starts_with|ends_with|matches|between|is|any|all|none)\\b"
+        },
+        {
+          "name": "constant.language.arbiter",
+          "match": "\\b(true|false|null)\\b"
+        },
+        {
+          "name": "storage.type.arbiter",
+          "match": "\\b(number|string|bool|list)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.arbiter",
+          "match": "\\b\\d+(?:\\.\\d+)?\\b"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arbiter",
+          "match": "==|!=|>=|<=|>|<|\\+|-|\\*|/|%|:|\\.|="
+        },
+        {
+          "name": "punctuation.section.block.begin.arbiter",
+          "match": "\\{"
+        },
+        {
+          "name": "punctuation.section.block.end.arbiter",
+          "match": "\\}"
+        },
+        {
+          "name": "punctuation.section.brackets.begin.arbiter",
+          "match": "\\[|\\("
+        },
+        {
+          "name": "punctuation.section.brackets.end.arbiter",
+          "match": "\\]|\\)"
+        },
+        {
+          "name": "punctuation.separator.comma.arbiter",
+          "match": ","
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "arbiter-language",
+  "displayName": "Arbiter Language",
+  "description": "Syntax highlighting, comments, brackets, and snippets for Arbiter .arb files.",
+  "version": "0.1.0",
+  "publisher": "odvcencio",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "arbiter",
+    "dsl",
+    "rules",
+    "feature-flags",
+    "expert-system"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "arbiter",
+        "aliases": [
+          "Arbiter",
+          "arbiter"
+        ],
+        "extensions": [
+          ".arb"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "arbiter",
+        "scopeName": "source.arbiter",
+        "path": "./syntaxes/arb.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "arbiter",
+        "path": "./snippets/arbiter.code-snippets"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/odvcencio/arbiter"
+  }
+}

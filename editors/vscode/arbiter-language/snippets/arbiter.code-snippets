@@ -1,0 +1,83 @@
+{
+  "Rule": {
+    "prefix": "arb-rule",
+    "body": [
+      "rule ${1:RuleName} {",
+      "    when { ${2:true} }",
+      "    then ${3:ActionName} {",
+      "        ${4:key}: ${5:value},",
+      "    }",
+      "}"
+    ],
+    "description": "Stateless Arbiter rule"
+  },
+  "Expert Assert Rule": {
+    "prefix": "arb-expert-assert",
+    "body": [
+      "expert rule ${1:RuleName} {",
+      "    when { ${2:true} }",
+      "    then assert ${3:FactType} {",
+      "        key: ${4:\"id\"},",
+      "        ${5:field}: ${6:value},",
+      "    }",
+      "}"
+    ],
+    "description": "Expert rule that asserts a fact"
+  },
+  "Expert Emit Rule": {
+    "prefix": "arb-expert-emit",
+    "body": [
+      "expert rule ${1:RuleName} {",
+      "    when { ${2:true} }",
+      "    then emit ${3:OutcomeName} {",
+      "        ${4:key}: ${5:value},",
+      "    }",
+      "}"
+    ],
+    "description": "Expert rule that emits an outcome"
+  },
+  "Expert Binding Rule": {
+    "prefix": "arb-expert-bind",
+    "body": [
+      "expert rule ${1:RuleName} {",
+      "    when {",
+      "        bind ${2:risk} in ${3:facts.RiskFlag}",
+      "        bind ${4:txn} in ${5:facts.Transaction}",
+      "        where {",
+      "            ${2:risk}.${6:account_id} == ${4:txn}.${6:account_id}",
+      "            and ${2:risk}.level == ${7:\"high\"}",
+      "        }",
+      "    }",
+      "    then emit ${8:OutcomeName} {",
+      "        ${9:key}: ${10:value},",
+      "    }",
+      "}"
+    ],
+    "description": "Expert rule with bind/where joins"
+  },
+  "Segment": {
+    "prefix": "arb-segment",
+    "body": [
+      "segment ${1:name} {",
+        "    ${2:true}",
+      "}"
+    ],
+    "description": "Segment declaration"
+  },
+  "Flag": {
+    "prefix": "arb-flag",
+    "body": [
+      "flag ${1:key} type ${2|boolean,multivariate|} default ${3:false} {",
+      "    when ${4:segment_name} then ${5:true}",
+      "}"
+    ],
+    "description": "Feature flag declaration"
+  },
+  "Include": {
+    "prefix": "arb-include",
+    "body": [
+      "include \"${1:file.arb}\""
+    ],
+    "description": "Include another Arbiter source file"
+  }
+}

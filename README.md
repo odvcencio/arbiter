@@ -239,6 +239,10 @@ Each audit event captures the full context: matched rules, flag resolutions, exp
 go install github.com/odvcencio/arbiter/cmd/arbiter@latest
 ```
 
+## Editor Support
+
+Tree-sitter consumers can use [highlights.scm](/home/draco/work/arbiter/highlights.scm) directly for `.arb` highlighting. A minimal VS Code language package also ships in [editors/vscode/arbiter-language](/home/draco/work/arbiter/editors/vscode/arbiter-language) with syntax highlighting, bracket/comment support, folding, and starter snippets.
+
 ## Usage
 
 ### CLI
@@ -305,6 +309,27 @@ For multi-file expert programs:
 ```go
 program, _ := expert.CompileFile("taxes/main.arb")
 ```
+
+### Go Library — Authorization Helper
+
+```go
+decision, _ := authz.EvaluateSource(source, authz.Request{
+    Actor: map[string]any{
+        "role":   "admin",
+        "org_id": "org_1",
+    },
+    Action: "read",
+    Resource: map[string]any{
+        "org_id": "org_1",
+    },
+})
+
+if decision.Allowed {
+    // one or more rules emitted Allow
+}
+```
+
+The helper is intentionally thin. It just standardizes `actor`, `action`, and `resource` in the evaluation context and treats matched `Allow` actions as authorization success.
 
 ### Migrating from Arishem
 
@@ -420,6 +445,24 @@ expert rule UpdateFact {
 }
 ```
 
+Expert rules also support binding syntax that compiles to nested existential quantifiers:
+
+```python
+expert rule RouteManualReview {
+    when {
+        bind risk in facts.RiskFlag
+        bind txn in facts.Transaction
+        where {
+            risk.account_id == txn.account_id
+            and risk.level == "high"
+        }
+    }
+    then emit ManualReview {
+        queue: "risk",
+    }
+}
+```
+
 ### Operators
 
 **Comparison**
@@ -512,7 +555,7 @@ decompile/    Bytecode → Arishem JSON
 sourceunit.go Multi-file include expansion for file-backed APIs
 ```
 
-Flat `[]byte` of fixed-width 4-byte instructions: `[opcode(1B), flags(1B), arg(2B)]`. Constant pool indices are `uint16`, giving 65K unique values per type. The parser uses [gotreesitter](https://github.com/odvcencio/gotreesitter), so any editor with tree-sitter support gets syntax highlighting, folding, and structural navigation for `.arb` files.
+Flat `[]byte` of fixed-width 4-byte instructions: `[opcode(1B), flags(1B), arg(2B)]`. Constant pool indices are `uint16`, giving 65K unique values per type. The parser uses [gotreesitter](https://github.com/odvcencio/gotreesitter), and the repo now ships both a tree-sitter highlight query and a minimal VS Code language package for `.arb` files.
 
 ## Examples
 
