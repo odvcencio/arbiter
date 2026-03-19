@@ -309,6 +309,27 @@ rule T { when { true } then A {} }
 	}
 }
 
+func TestParseInlineSlashComment(t *testing.T) {
+	sexp := parseArb(t, `rule T { when { true } then A {} } // trailing comment
+`)
+	if !strings.Contains(sexp, "rule_declaration") {
+		t.Error("inline // comment should not break parsing")
+	}
+}
+
+func TestParseBlockComment(t *testing.T) {
+	sexp := parseArb(t, `/* multi-line
+comment before the rule */
+rule T {
+	when { true } /* mid-rule note */
+	then A {}
+}
+`)
+	if !strings.Contains(sexp, "rule_declaration") {
+		t.Error("block comment should not break parsing")
+	}
+}
+
 func TestParseThreeWayAnd(t *testing.T) {
 	sexp := parseArb(t, `rule T { when { a > 1 and b > 2 and c > 3 } then A {} }`)
 	// Should have 3 comparison_expr nodes

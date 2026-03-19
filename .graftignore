@@ -1,0 +1,20 @@
+# Compiled binary
+/arbiter
+
+# SDK build artifacts
+sdks/node/node_modules/
+sdks/rust/target/
+__pycache__/
+*.pyc
+sdks/python/*.egg-info/
+sdks/python/dist/
+sdks/python/build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store

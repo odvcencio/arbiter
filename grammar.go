@@ -52,7 +52,11 @@ func ArbiterGrammar() *Grammar {
 	))
 
 	// --- Comments (extras — auto-skipped) ---
-	g.Define("comment", Token(Pat(`#[^\n]*`)))
+	g.Define("comment", Token(Choice(
+		Pat(`#[^\n]*`),
+		Pat(`//[^\n]*`),
+		Pat(`/\*([^*]|\*+[^*/])*\*+/`),
+	)))
 
 	g.Define("include_declaration", Seq(
 		Str("include"),

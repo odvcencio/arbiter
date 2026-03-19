@@ -1,0 +1,16 @@
+[package]
+name = "arbiter-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Thin Rust gRPC client for Arbiter"
+license = "MIT"
+
+[dependencies]
+prost = "0.13"
+prost-types = "0.13"
+serde_json = "1.0"
+tonic = { version = "0.12", features = ["transport"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[build-dependencies]
+tonic-build = "0.12"
