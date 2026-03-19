@@ -2,10 +2,10 @@
 
 A compact language for governed outcomes.
 
-Every decision your software makes — approve this transaction, show this variant, block this request, compute this tax bracket — is a governed outcome. Arbiter gives those decisions a language, compiles them to bytecode, and evaluates them in **223 nanoseconds**.
+Every decision your software makes — approve this transaction, show this variant, block this request, compute this tax bracket — is a governed outcome. Arbiter gives those decisions a language, compiles them to bytecode, and evaluates simple precompiled rules in the low hundreds of nanoseconds.
 
 ```
-.arb source ──→ Parser ──→ Compiler ──→ Bytecode VM (~223ns/eval)
+.arb source ──→ Parser ──→ Compiler ──→ Bytecode VM (~200ns simple eval)
                               │
                               ├──→ Arishem JSON (compatibility)
                               ├──→ CEL
@@ -36,7 +36,7 @@ Arbiter's numbers come from this repo's benchmarks. Cross-engine runtime compari
 
 CEL is ~2.7x faster on a bare boolean predicate — it's a lean expression evaluator. Arbiter carries rule-engine machinery (governance gates, action resolution, constant pool) and is still in the same class. OPA is 25x slower with 67x more allocations.
 
-Fixed 256-element stack. Zero heap allocation during evaluation. The constant pool interns all strings and numbers — 10K rules referencing the same field names share one copy.
+Fixed 256-element stack. The current public benchmark path is low-allocation rather than zero-allocation: `96 B/op`, `3 allocs/op`. The constant pool interns all strings and numbers — 10K rules referencing the same field names share one copy.
 
 ## Governance
 
@@ -90,17 +90,17 @@ segment high_value {
 Flags add one concept to the governance model: **variants** — named outcomes with typed payloads. Everything else (segments, rollouts, kill switches, prerequisites, explainability) is shared.
 
 ```python
-flag checkout_v2 {
-    description: "New checkout flow"
-    default: control
+flag checkout_v2 type multivariate default "control" {
+    owner: "growth"
+    ticket: "ENG-1234"
 
-    variant treatment {
+    variant "treatment" {
         show_new_ui: true,
         layout: "single_page",
     }
 
-    when segment beta_users serve treatment
-    when { user.id % 100 < 20 } serve treatment rollout 50
+    when beta_users then "treatment"
+    when { user.country == "US" } rollout 50 then "treatment"
 }
 ```
 
@@ -131,7 +131,20 @@ expert rule EmitDetermination priority 90 {
 }
 ```
 
-Two action kinds: `assert` mutates working memory (triggers more rule firings), `emit` produces a final outcome (does not trigger re-firing). The session runs with guardrails — configurable max rounds and max mutations, context cancellation. Every firing is recorded in the activation trace.
+Expert actions:
+
+- `assert` inserts or updates a fact and can trigger more rule firings
+- `emit` produces a final outcome without mutating working memory
+- `retract` removes a fact by `type` and `key`
+- `modify` updates fields on an existing fact with a `set { ... }` block
+
+Expert controls:
+
+- `kill_switch`, `requires`, and `rollout` work the same way they do for ordinary rules
+- `no_loop` prevents a rule from re-firing solely because of its own mutations
+- `activation_group name` allows only the first matching rule in a group to fire per round
+
+The session runs with guardrails — configurable max rounds and max mutations, context cancellation. Every firing is recorded in the activation trace.
 
 ### Explainability
 
@@ -147,6 +160,28 @@ eval := flags.Explain("checkout_v2", ctx)
 // Expert inference
 result, _ := session.Run(ctx)
 result.Activations // every firing, every round, what changed
+```
+
+Governed and flag traces use the same `check/result/detail` shape:
+
+```json
+[
+  {
+    "check": "requires BasicRiskCheck",
+    "result": true,
+    "detail": "BasicRiskCheck -> true"
+  },
+  {
+    "check": "segment high_risk",
+    "result": true,
+    "detail": "model.risk_score > 0.8 -> true"
+  },
+  {
+    "check": "rollout 20%",
+    "result": false,
+    "detail": "bucket(\"user_123\") = 57, threshold = 20"
+  }
+]
 ```
 
 ### Runtime Overrides
@@ -174,13 +209,18 @@ service ArbiterService {
     rpc PublishBundle(...)       // compile and register .arb source
     rpc EvaluateRules(...)      // stateless rule evaluation
     rpc ResolveFlag(...)        // flag resolution with explainability
+    rpc StartSession(...)       // create an expert session
+    rpc RunSession(...)         // advance until quiescence / guardrail
+    rpc AssertFacts(...)        // insert or update working-memory facts
+    rpc RetractFacts(...)       // remove working-memory facts
+    rpc GetSessionTrace(...)    // current facts, outcomes, activations
     rpc SetRuleOverride(...)    // runtime kill switch / rollout changes
     rpc SetFlagOverride(...)    // runtime flag kill switch
     rpc SetFlagRuleOverride(...)// runtime flag rule rollout changes
 }
 ```
 
-Bundles are published once and evaluated many times. Each bundle compiles rules, expert rules, flags, and segments from a single `.arb` source.
+Bundles are published once and evaluated many times. Each bundle compiles rules, expert rules, flags, and segments from a single `.arb` source or from one root file expanded through `include`.
 
 ### Audit
 
@@ -209,6 +249,7 @@ arbiter eval rules.arb --data '{...}'  # evaluate against data
 arbiter emit rules.arb             # emit Arishem JSON
 arbiter emit rules.arb --rule Name # emit single rule
 arbiter check rules.arb            # validate without emitting
+arbiter expert tax.arb --envelope '{...}' [--facts '[...]']
 ```
 
 ### Go Library — Stateless Rules
@@ -225,13 +266,21 @@ result, _ := arbiter.CompileFull(source)
 matched, trace, _ := arbiter.EvalGoverned(result.Ruleset, dc, result.Segments, ctx)
 ```
 
+Use file-aware APIs when your source uses `include`:
+
+```go
+ruleset, _ := arbiter.CompileFile("rules/main.arb")
+full, _ := arbiter.CompileFullFile("rules/main.arb")
+json, _ := arbiter.TranspileFile("rules/main.arb")
+```
+
 ### Go Library — Flags
 
 ```go
 f, _ := flags.Load(source)
 variant := f.Variant("checkout_v2", ctx)
 eval := f.Explain("checkout_v2", ctx)
-f, _ = flags.Watch("flags.arb")          // hot reload
+f, _ = flags.Watch("flags.arb")          // hot reload across the include graph
 http.Handle("/flags", f.Handler())        // serve over HTTP
 ```
 
@@ -249,6 +298,12 @@ for _, outcome := range result.Outcomes {
     fmt.Printf("%s → %s %v\n", outcome.Rule, outcome.Name, outcome.Params)
 }
 fmt.Printf("quiesced in %d rounds, %d mutations\n", result.Rounds, result.Mutations)
+```
+
+For multi-file expert programs:
+
+```go
+program, _ := expert.CompileFile("taxes/main.arb")
 ```
 
 ### Migrating from Arishem
@@ -290,6 +345,21 @@ const VIP_THRESHOLD = 1000
 const PREMIUM_TIERS = ["gold", "platinum"]
 ```
 
+### Includes
+
+Split one program across multiple files. Each included file is a valid `.arb` fragment.
+
+```python
+include "schema.arb"
+include "constants.arb"
+include "segments.arb"
+include "phase1_gross_income.arb"
+include "phase2_deductions.arb"
+include "phase3_agi.arb"
+```
+
+The compiler expands the include graph into one compilation unit. Constants, segments, rules, expert rules, and prerequisites work across file boundaries. `include` is file-based: use `CompileFile`, `CompileFullFile`, `TranspileFile`, `flags.LoadFile`, or `expert.CompileFile` when it is present.
+
 ### Rules
 
 ```python
@@ -314,7 +384,9 @@ rule RuleName priority 1 {
 ```python
 expert rule RuleName priority 1 {
     kill_switch
+    no_loop
     requires OtherRule
+    activation_group Resolution
     when { condition }
     then assert FactType {         # assert: mutate working memory
         key: identifier,
@@ -327,6 +399,23 @@ expert rule EmitResult priority 99 {
     when { condition }
     then emit OutcomeName {        # emit: produce final outcome
         field: value,
+    }
+}
+
+expert rule ClearFact {
+    when { condition }
+    then retract FactType {
+        key: identifier,
+    }
+}
+
+expert rule UpdateFact {
+    when { condition }
+    then modify FactType {
+        key: identifier
+        set {
+            field: value,
+        }
     }
 }
 ```
@@ -411,15 +500,16 @@ none item in cart.items { item.banned == true }
 ```
 intern/       Constant pool — deduplicates strings and numbers across all rules
 compiler/     CST → bytecode compiler + Arishem JSON loader
-vm/           Stack-based bytecode VM (fixed 256-element stack, zero-alloc eval)
+vm/           Stack-based bytecode VM (fixed 256-element stack, low-allocation eval)
 govern/       Governance primitives: segments, rollouts, kill switches, prerequisites, trace
 flags/        Feature flags: variants, schema validation, secret references, hot reload
-expert/       Forward-chaining inference: working memory, assert/emit, quiescence detection
+expert/       Forward-chaining inference: working memory, assert/emit/retract/modify, activation trace
 audit/        Durable decision logging (Sink interface, JSONL default)
 overrides/    Runtime governance overrides (kill switches, rollout percentages)
 grpcserver/   gRPC service: bundle registry, evaluation, flag resolution, expert sessions
 emit/         Code generators: Rego, CEL, Drools DRL
 decompile/    Bytecode → Arishem JSON
+sourceunit.go Multi-file include expansion for file-backed APIs
 ```
 
 Flat `[]byte` of fixed-width 4-byte instructions: `[opcode(1B), flags(1B), arg(2B)]`. Constant pool indices are `uint16`, giving 65K unique values per type. The parser uses [gotreesitter](https://github.com/odvcencio/gotreesitter), so any editor with tree-sitter support gets syntax highlighting, folding, and structural navigation for `.arb` files.
