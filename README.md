@@ -409,13 +409,14 @@ rule RuleName priority 1 {
     kill_switch                    # optional: instant disable
     requires OtherRule             # optional: prerequisite
     when segment high_value {      # optional: segment gate
-        condition
+        user.cart_total >= 100
     }
     then ActionName {
-        key: value,
+        type: "percentage",
+        amount: 10,
     }
     otherwise FallbackAction {     # optional: when condition is false
-        key: value,
+        reason: "not eligible",
     }
     rollout 50                     # optional: percentage gate
 }
@@ -429,34 +430,34 @@ expert rule RuleName priority 1 {
     no_loop
     requires OtherRule
     activation_group Resolution
-    when { condition }
-    then assert FactType {         # assert: mutate working memory
-        key: identifier,
-        field: value,
+    when { income.wages > 0 }
+    then assert GrossIncome {      # assert: mutate working memory
+        key: "total",
+        amount: income.wages + income.interest,
     }
     rollout 50
 }
 
 expert rule EmitResult priority 99 {
-    when { condition }
-    then emit OutcomeName {        # emit: produce final outcome
-        field: value,
+    when { any agi in facts.AGI { agi.amount > 0 } }
+    then emit TaxReturn {          # emit: produce final outcome
+        status: "complete",
     }
 }
 
 expert rule ClearFact {
-    when { condition }
-    then retract FactType {
-        key: identifier,
+    when { review.override == true }
+    then retract RiskFlag {
+        key: "account_123",
     }
 }
 
 expert rule UpdateFact {
-    when { condition }
-    then modify FactType {
-        key: identifier
+    when { review.approved == true }
+    then modify RiskFlag {
+        key: "account_123"
         set {
-            field: value,
+            level: "low",
         }
     }
 }
