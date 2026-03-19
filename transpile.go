@@ -46,22 +46,26 @@ type RuleOutput struct {
 
 // Transpile converts .arb source to Arishem-compatible JSON.
 func Transpile(source []byte) (string, error) {
-	lang, root, err := parseTree(source)
+	parsed, err := ParseSource(source)
 	if err != nil {
 		return "", err
 	}
-	if err := rejectIncludeDeclarations(root, source, lang); err != nil {
-		return "", err
-	}
+	return TranspileParsed(parsed)
+}
 
+// TranspileParsed converts a previously parsed .arb program to Arishem-compatible JSON.
+func TranspileParsed(parsed *ParsedSource) (string, error) {
+	if parsed == nil {
+		return "", fmt.Errorf("nil parsed source")
+	}
 	t := &arbTranspiler{
-		src:      source,
-		lang:     lang,
+		src:      parsed.Source,
+		lang:     parsed.Lang,
 		consts:   make(map[string]any),
 		segments: make(map[string]any),
 	}
 
-	result := t.emitSourceFile(root)
+	result := t.emitSourceFile(parsed.Root)
 
 	out, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
@@ -72,37 +76,45 @@ func Transpile(source []byte) (string, error) {
 
 // TranspileFile resolves includes and transpiles a file-backed .arb program.
 func TranspileFile(path string) (string, error) {
-	source, err := LoadFileSource(path)
+	unit, parsed, err := LoadFileParsed(path)
 	if err != nil {
 		return "", err
 	}
-	return Transpile(source)
+	out, err := TranspileParsed(parsed)
+	if err != nil {
+		return "", WrapFileError(unit, err)
+	}
+	return out, nil
 }
 
 // TranspileRule converts a single rule's condition to Arishem JSON (no wrapper).
 func TranspileRule(source []byte, ruleName string) (string, error) {
-	lang, root, err := parseTree(source)
+	parsed, err := ParseSource(source)
 	if err != nil {
 		return "", err
 	}
-	if err := rejectIncludeDeclarations(root, source, lang); err != nil {
-		return "", err
-	}
+	return TranspileRuleParsed(parsed, ruleName)
+}
 
+// TranspileRuleParsed converts one rule condition from a parsed .arb program.
+func TranspileRuleParsed(parsed *ParsedSource, ruleName string) (string, error) {
+	if parsed == nil {
+		return "", fmt.Errorf("nil parsed source")
+	}
 	t := &arbTranspiler{
-		src:      source,
-		lang:     lang,
+		src:      parsed.Source,
+		lang:     parsed.Lang,
 		consts:   make(map[string]any),
 		segments: make(map[string]any),
 	}
 
 	// First pass: collect consts
-	t.collectConsts(root)
-	t.collectSegments(root)
+	t.collectConsts(parsed.Root)
+	t.collectSegments(parsed.Root)
 
 	// Find the named rule
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		c := root.NamedChild(i)
+	for i := 0; i < int(parsed.Root.NamedChildCount()); i++ {
+		c := parsed.Root.NamedChild(i)
 		if t.nodeType(c) == "rule_declaration" {
 			nameNode := t.childByField(c, "name")
 			if nameNode != nil && t.text(nameNode) == ruleName {
@@ -121,11 +133,15 @@ func TranspileRule(source []byte, ruleName string) (string, error) {
 // TranspileRuleFile resolves includes and transpiles one rule from a file-backed
 // .arb program.
 func TranspileRuleFile(path, ruleName string) (string, error) {
-	source, err := LoadFileSource(path)
+	unit, parsed, err := LoadFileParsed(path)
 	if err != nil {
 		return "", err
 	}
-	return TranspileRule(source, ruleName)
+	out, err := TranspileRuleParsed(parsed, ruleName)
+	if err != nil {
+		return "", WrapFileError(unit, err)
+	}
+	return out, nil
 }
 
 type arbTranspiler struct {

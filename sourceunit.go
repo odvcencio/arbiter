@@ -1,9 +1,11 @@
 package arbiter
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/odvcencio/arbiter/compiler"
@@ -25,6 +27,65 @@ type SourceOrigin struct {
 	SourceLine    int
 	Kind          string
 	Name          string
+}
+
+// DiagnosticError is one user-facing diagnostic with file and position data.
+type DiagnosticError struct {
+	File    string
+	Line    int
+	Column  int
+	Message string
+	Err     error
+}
+
+func (e *DiagnosticError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.File == "" {
+		return e.Message
+	}
+	if e.Line <= 0 {
+		return fmt.Sprintf("%s: %s", e.File, e.Message)
+	}
+	if e.Column <= 0 {
+		return fmt.Sprintf("%s:%d: %s", e.File, e.Line, e.Message)
+	}
+	return fmt.Sprintf("%s:%d:%d: %s", e.File, e.Line, e.Column, e.Message)
+}
+
+func (e *DiagnosticError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+type positionedError struct {
+	Line    int
+	Column  int
+	Message string
+	Err     error
+}
+
+func (e *positionedError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.Line <= 0 {
+		return e.Message
+	}
+	if e.Column <= 0 {
+		return fmt.Sprintf("%d: %s", e.Line, e.Message)
+	}
+	return fmt.Sprintf("%d:%d: %s", e.Line, e.Column, e.Message)
+}
+
+func (e *positionedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 // ParsedSource is one parsed in-memory .arb source ready for compilation reuse.
@@ -49,6 +110,50 @@ func (u *SourceUnit) OriginForLine(line int) (SourceOrigin, bool) {
 		found = true
 	}
 	return best, found
+}
+
+func (u *SourceUnit) originForName(name string, kinds ...string) (SourceOrigin, bool) {
+	if u == nil || name == "" {
+		return SourceOrigin{}, false
+	}
+	for _, origin := range u.Origins {
+		if origin.Name != name {
+			continue
+		}
+		for _, kind := range kinds {
+			if origin.Kind == kind {
+				return origin, true
+			}
+		}
+	}
+	return SourceOrigin{}, false
+}
+
+// IsDiagnosticError reports whether err contains a file-positioned diagnostic.
+func IsDiagnosticError(err error) bool {
+	var diag *DiagnosticError
+	return errors.As(err, &diag)
+}
+
+// WrapFileError remaps a generated-source error back to the original included file.
+func WrapFileError(unit *SourceUnit, err error) error {
+	if unit == nil || err == nil {
+		return err
+	}
+	var diag *DiagnosticError
+	if errors.As(err, &diag) {
+		return err
+	}
+	var pos *positionedError
+	if errors.As(err, &pos) {
+		if mapped, ok := unit.mapPosition(pos.Line, pos.Column, pos.Message, err); ok {
+			return mapped
+		}
+	}
+	if mapped, ok := unit.mapNamedError(err); ok {
+		return mapped
+	}
+	return err
 }
 
 // LoadFileUnit reads a root .arb file, resolves top-level include statements,
@@ -88,6 +193,19 @@ func LoadFileSource(path string) ([]byte, error) {
 		return nil, err
 	}
 	return unit.Source, nil
+}
+
+// LoadFileParsed resolves includes and parses a file-backed .arb program once.
+func LoadFileParsed(path string) (*SourceUnit, *ParsedSource, error) {
+	unit, err := LoadFileUnit(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	parsed, err := ParseSource(unit.Source)
+	if err != nil {
+		return nil, nil, WrapFileError(unit, err)
+	}
+	return unit, parsed, nil
 }
 
 // ParseSource parses raw .arb source for reuse across multiple compilation steps.
@@ -135,28 +253,28 @@ func CompileFullParsed(parsed *ParsedSource) (*CompileResult, error) {
 
 // CompileFile compiles a file-backed .arb program with include resolution.
 func CompileFile(path string) (*compiler.CompiledRuleset, error) {
-	source, err := LoadFileSource(path)
+	unit, parsed, err := LoadFileParsed(path)
 	if err != nil {
 		return nil, err
 	}
-	parsed, err := ParseSource(source)
+	rs, err := CompileParsed(parsed)
 	if err != nil {
-		return nil, err
+		return nil, WrapFileError(unit, err)
 	}
-	return CompileParsed(parsed)
+	return rs, nil
 }
 
 // CompileFullFile compiles a file-backed .arb program with include resolution.
 func CompileFullFile(path string) (*CompileResult, error) {
-	source, err := LoadFileSource(path)
+	unit, parsed, err := LoadFileParsed(path)
 	if err != nil {
 		return nil, err
 	}
-	parsed, err := ParseSource(source)
+	full, err := CompileFullParsed(parsed)
 	if err != nil {
-		return nil, err
+		return nil, WrapFileError(unit, err)
 	}
-	return CompileFullParsed(parsed)
+	return full, nil
 }
 
 type sourceUnitLoader struct {
@@ -294,7 +412,7 @@ func parseTreeWithLanguage(source []byte, lang *gotreesitter.Language) (*gotrees
 	}
 	root := tree.RootNode()
 	if root.HasError() {
-		return nil, fmt.Errorf("parse errors in arbiter source")
+		return nil, buildParseError(root, source, lang)
 	}
 	return root, nil
 }
@@ -312,4 +430,182 @@ func rejectIncludeDeclarations(root *gotreesitter.Node, source []byte, lang *got
 		return fmt.Errorf("include %s requires file-based compilation; use CompileFile or LoadFileUnit", nodeText(pathNode, source))
 	}
 	return nil
+}
+
+func buildParseError(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) error {
+	node := firstParseProblem(root)
+	if node == nil {
+		return &positionedError{
+			Line:    1,
+			Column:  1,
+			Message: "parse error",
+			Err:     fmt.Errorf("parse errors in arbiter source"),
+		}
+	}
+	point := node.StartPoint()
+	return &positionedError{
+		Line:    int(point.Row) + 1,
+		Column:  int(point.Column) + 1,
+		Message: parseProblemMessage(node, source, lang),
+		Err:     fmt.Errorf("parse errors in arbiter source"),
+	}
+}
+
+func firstParseProblem(node *gotreesitter.Node) *gotreesitter.Node {
+	if node == nil {
+		return nil
+	}
+	if node.IsMissing() || node.IsError() {
+		return node
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		if child := node.Child(i); child != nil {
+			if found := firstParseProblem(child); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
+}
+
+func parseProblemMessage(node *gotreesitter.Node, source []byte, lang *gotreesitter.Language) string {
+	if node == nil {
+		return "parse error"
+	}
+	kind := node.Type(lang)
+	if node.IsMissing() {
+		if kind != "" && kind != "ERROR" {
+			return fmt.Sprintf("parse error: missing %s", kind)
+		}
+		return "parse error: missing token"
+	}
+	snippet := strings.TrimSpace(nodeText(node, source))
+	snippet = strings.Join(strings.Fields(snippet), " ")
+	if len(snippet) > 40 {
+		snippet = snippet[:37] + "..."
+	}
+	if snippet != "" {
+		return fmt.Sprintf("parse error near %q", snippet)
+	}
+	return "parse error"
+}
+
+func (u *SourceUnit) mapPosition(line, column int, message string, err error) (*DiagnosticError, bool) {
+	if line <= 0 {
+		return nil, false
+	}
+	origin, ok := u.OriginForLine(line)
+	if !ok {
+		return nil, false
+	}
+	mappedLine := origin.SourceLine + (line - origin.GeneratedLine)
+	return &DiagnosticError{
+		File:    origin.File,
+		Line:    mappedLine,
+		Column:  column,
+		Message: message,
+		Err:     err,
+	}, true
+}
+
+func (u *SourceUnit) mapNamedError(err error) (*DiagnosticError, bool) {
+	message := err.Error()
+	if diag, ok := u.namedDiagnostic(message, err, "rule ", "rule_declaration", "expert_rule_declaration"); ok {
+		return diag, true
+	}
+	if diag, ok := u.namedDiagnostic(message, err, "expert rule ", "expert_rule_declaration"); ok {
+		return diag, true
+	}
+	if diag, ok := u.namedDiagnostic(message, err, "flag ", "flag_declaration"); ok {
+		return diag, true
+	}
+	if diag, ok := u.namedDiagnostic(message, err, "compile segment ", "segment_declaration"); ok {
+		return diag, true
+	}
+	return nil, false
+}
+
+func unitDiagnostic(origin SourceOrigin, message string, err error) *DiagnosticError {
+	return &DiagnosticError{
+		File:    origin.File,
+		Line:    origin.SourceLine,
+		Column:  1,
+		Message: message,
+		Err:     err,
+	}
+}
+
+func (u *SourceUnit) namedDiagnostic(message string, err error, prefix string, kinds ...string) (*DiagnosticError, bool) {
+	if !strings.HasPrefix(message, prefix) {
+		return nil, false
+	}
+	rest := strings.TrimPrefix(message, prefix)
+	name, tail, ok := splitDiagnosticName(rest)
+	if !ok {
+		return nil, false
+	}
+	origin, ok := u.originForName(name, kinds...)
+	if !ok {
+		return nil, false
+	}
+	tail = strings.TrimSpace(tail)
+	if tail == "" {
+		tail = prefix + name
+	}
+	diag := unitDiagnostic(origin, message, err)
+	if line, col, embedded, ok := parseEmbeddedPosition(tail); ok {
+		diag.Line = origin.SourceLine + maxInt(0, line-1)
+		diag.Column = col
+		diag.Message = embedded
+		return diag, true
+	}
+	return diag, true
+}
+
+func splitDiagnosticName(rest string) (string, string, bool) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", "", false
+	}
+	if rest[0] == '"' {
+		end := strings.Index(rest[1:], `"`)
+		if end < 0 {
+			return "", "", false
+		}
+		name := rest[1 : end+1]
+		return name, strings.TrimSpace(rest[end+2:]), name != ""
+	}
+	for i, r := range rest {
+		if r == ' ' || r == ':' {
+			name := strings.TrimSpace(rest[:i])
+			return name, strings.TrimSpace(rest[i:]), name != ""
+		}
+	}
+	return strings.TrimSpace(rest), "", true
+}
+
+func parseEmbeddedPosition(message string) (int, int, string, bool) {
+	first, rest, ok := strings.Cut(message, ":")
+	if !ok {
+		return 0, 0, "", false
+	}
+	line, err := strconv.Atoi(strings.TrimSpace(first))
+	if err != nil || line <= 0 {
+		return 0, 0, "", false
+	}
+	second, tail, ok := strings.Cut(rest, ":")
+	if !ok {
+		return line, 0, strings.TrimSpace(rest), true
+	}
+	if col, err := strconv.Atoi(strings.TrimSpace(second)); err == nil && col > 0 {
+		return line, col, strings.TrimSpace(tail), true
+	}
+	return line, 0, strings.TrimSpace(rest), true
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

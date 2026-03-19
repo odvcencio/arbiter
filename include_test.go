@@ -90,6 +90,51 @@ func TestCompileFullFileRejectsIncludeCycle(t *testing.T) {
 	}
 }
 
+func TestCompileFileMapsSemanticErrorsToIncludedFiles(t *testing.T) {
+	dir := t.TempDir()
+	bad := writeTestFile(t, dir, "bad.arb", `
+rule BadRollout {
+	when { true }
+	then Approved {}
+	rollout 101
+}
+`)
+	main := writeTestFile(t, dir, "main.arb", `include "bad.arb"`)
+
+	_, err := CompileFile(main)
+	if err == nil {
+		t.Fatal("expected compile error")
+	}
+	if got := err.Error(); !strings.Contains(got, bad+":2:1:") {
+		t.Fatalf("expected included file diagnostic, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "rule BadRollout: rollout must be between 0 and 100") {
+		t.Fatalf("unexpected compile error: %v", err)
+	}
+}
+
+func TestCompileFileMapsParseErrorsToIncludedFiles(t *testing.T) {
+	dir := t.TempDir()
+	bad := writeTestFile(t, dir, "bad.arb", `
+rule Broken {
+	when { true
+	then Approved {}
+}
+`)
+	main := writeTestFile(t, dir, "main.arb", `include "bad.arb"`)
+
+	_, err := CompileFile(main)
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !strings.Contains(err.Error(), bad+":") {
+		t.Fatalf("expected included file path in parse error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "parse error") {
+		t.Fatalf("expected parse error detail, got %v", err)
+	}
+}
+
 func TestTranspileFileResolvesIncludes(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "constants.arb", `const LIMIT = 100`)

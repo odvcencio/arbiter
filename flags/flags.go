@@ -49,19 +49,19 @@ func LoadParsed(parsed *arbiter.ParsedSource, full *arbiter.CompileResult) (*Fla
 
 // LoadFile loads and compiles flags from a file path.
 func LoadFile(path string) (*Flags, error) {
-	unit, err := arbiter.LoadFileUnit(path)
-	if err != nil {
-		return nil, err
-	}
-	parsed, err := arbiter.ParseSource(unit.Source)
+	unit, parsed, err := arbiter.LoadFileParsed(path)
 	if err != nil {
 		return nil, err
 	}
 	full, err := arbiter.CompileFullParsed(parsed)
 	if err != nil {
-		return nil, err
+		return nil, arbiter.WrapFileError(unit, err)
 	}
-	return LoadParsed(parsed, full)
+	f, err := LoadParsed(parsed, full)
+	if err != nil {
+		return nil, arbiter.WrapFileError(unit, err)
+	}
+	return f, nil
 }
 
 // LoadEnv loads flags for a specific environment.
@@ -95,21 +95,17 @@ func (f *Flags) Reload(source []byte) error {
 
 // ReloadFile atomically reloads from a file path.
 func (f *Flags) ReloadFile(path string) error {
-	unit, err := arbiter.LoadFileUnit(path)
-	if err != nil {
-		return err
-	}
-	parsed, err := arbiter.ParseSource(unit.Source)
+	unit, parsed, err := arbiter.LoadFileParsed(path)
 	if err != nil {
 		return err
 	}
 	full, err := arbiter.CompileFullParsed(parsed)
 	if err != nil {
-		return err
+		return arbiter.WrapFileError(unit, err)
 	}
 	newF := &Flags{}
 	if err := newF.parseParsed(parsed, full); err != nil {
-		return err
+		return arbiter.WrapFileError(unit, err)
 	}
 	f.mu.Lock()
 	f.defs = newF.defs

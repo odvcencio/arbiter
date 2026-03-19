@@ -130,11 +130,19 @@ func CompileParsed(parsed *arbiter.ParsedSource, base *arbiter.CompileResult) (*
 
 // CompileFile resolves includes and compiles expert rules from a root .arb file.
 func CompileFile(path string) (*Program, error) {
-	source, err := arbiter.LoadFileSource(path)
+	unit, parsed, err := arbiter.LoadFileParsed(path)
 	if err != nil {
 		return nil, err
 	}
-	return Compile(source)
+	base, err := arbiter.CompileFullParsed(parsed)
+	if err != nil {
+		return nil, arbiter.WrapFileError(unit, err)
+	}
+	program, err := CompileParsed(parsed, base)
+	if err != nil {
+		return nil, arbiter.WrapFileError(unit, err)
+	}
+	return program, nil
 }
 
 // Rules returns the compiled expert rules in source order.

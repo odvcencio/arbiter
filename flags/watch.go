@@ -12,21 +12,17 @@ import (
 // Watch loads flags from a file and watches for changes, hot-reloading on write.
 // Returns the Flags instance and a stop function.
 func Watch(path string) (*Flags, func(), error) {
-	unit, err := arbiter.LoadFileUnit(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	parsed, err := arbiter.ParseSource(unit.Source)
+	unit, parsed, err := arbiter.LoadFileParsed(path)
 	if err != nil {
 		return nil, nil, err
 	}
 	full, err := arbiter.CompileFullParsed(parsed)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, arbiter.WrapFileError(unit, err)
 	}
 	f, err := LoadParsed(parsed, full)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, arbiter.WrapFileError(unit, err)
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -58,24 +54,19 @@ func Watch(path string) (*Flags, func(), error) {
 				}
 				eventPath := filepath.Clean(event.Name)
 				if _, ok := trackedFiles[eventPath]; ok && (event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0) {
-					nextUnit, err := arbiter.LoadFileUnit(absPath)
-					if err != nil {
-						log.Printf("flags: reload error: %v", err)
-						continue
-					}
-					nextParsed, err := arbiter.ParseSource(nextUnit.Source)
+					nextUnit, nextParsed, err := arbiter.LoadFileParsed(absPath)
 					if err != nil {
 						log.Printf("flags: reload error: %v", err)
 						continue
 					}
 					nextFull, err := arbiter.CompileFullParsed(nextParsed)
 					if err != nil {
-						log.Printf("flags: reload error: %v", err)
+						log.Printf("flags: reload error: %v", arbiter.WrapFileError(nextUnit, err))
 						continue
 					}
 					newF, err := LoadParsed(nextParsed, nextFull)
 					if err != nil {
-						log.Printf("flags: reload error: %v", err)
+						log.Printf("flags: reload error: %v", arbiter.WrapFileError(nextUnit, err))
 						continue
 					}
 					f.mu.Lock()

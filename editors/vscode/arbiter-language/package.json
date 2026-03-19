@@ -5,9 +5,14 @@
   "version": "0.1.0",
   "publisher": "odvcencio",
   "license": "MIT",
+  "main": "./extension.js",
   "engines": {
     "vscode": "^1.88.0"
   },
+  "activationEvents": [
+    "onLanguage:arbiter",
+    "onCommand:arbiter.checkCurrentFile"
+  ],
   "categories": [
     "Programming Languages"
   ],
@@ -44,7 +49,28 @@
         "language": "arbiter",
         "path": "./snippets/arbiter.code-snippets"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "arbiter.checkCurrentFile",
+        "title": "Arbiter: Check Current File"
+      }
+    ],
+    "configuration": {
+      "title": "Arbiter",
+      "properties": {
+        "arbiter.cliPath": {
+          "type": "string",
+          "default": "arbiter",
+          "description": "Path to the Arbiter CLI used for diagnostics."
+        },
+        "arbiter.runCheckOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run `arbiter check` automatically when an .arb file is opened or saved."
+        }
+      }
+    }
   },
   "repository": {
     "type": "git",

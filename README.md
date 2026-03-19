@@ -135,8 +135,8 @@ Expert actions:
 
 - `assert` inserts or updates a fact and can trigger more rule firings
 - `emit` produces a final outcome without mutating working memory
-- `retract` removes a fact by `type` and `key`
-- `modify` updates fields on an existing fact with a `set { ... }` block
+- `retract` hides a fact by `type` and `key` while its rule remains supported
+- `modify` overlays field updates on an existing fact with a `set { ... }` block while its rule remains supported
 
 Expert controls:
 
@@ -145,6 +145,8 @@ Expert controls:
 - `activation_group name` allows only the first matching rule in a group to fire per round
 
 The session runs with guardrails — configurable max rounds and max mutations, context cancellation. Every firing is recorded in the activation trace.
+
+`modify` and `retract` are reversible overlays, not one-way destructive writes. If the supporting rule stops matching, the underlying fact view is recomputed and the overlay falls away. That can produce a steady-state no-op activation in the trace while a modifier or retractor remains active.
 
 ### Explainability
 
@@ -214,6 +216,7 @@ service ArbiterService {
     rpc AssertFacts(...)        // insert or update working-memory facts
     rpc RetractFacts(...)       // remove working-memory facts
     rpc GetSessionTrace(...)    // current facts, outcomes, activations
+    rpc CloseSession(...)       // deterministically dispose of a live session
     rpc SetRuleOverride(...)    // runtime kill switch / rollout changes
     rpc SetFlagOverride(...)    // runtime flag kill switch
     rpc SetFlagRuleOverride(...)// runtime flag rule rollout changes
@@ -241,7 +244,7 @@ go install github.com/odvcencio/arbiter/cmd/arbiter@latest
 
 ## Editor Support
 
-Tree-sitter consumers can use [highlights.scm](/home/draco/work/arbiter/highlights.scm) directly for `.arb` highlighting. A minimal VS Code language package also ships in [editors/vscode/arbiter-language](/home/draco/work/arbiter/editors/vscode/arbiter-language) with syntax highlighting, bracket/comment support, folding, and starter snippets.
+Tree-sitter consumers can use [highlights.scm](/home/draco/work/arbiter/highlights.scm) directly for `.arb` highlighting. A minimal VS Code language package also ships in [editors/vscode/arbiter-language](/home/draco/work/arbiter/editors/vscode/arbiter-language) with syntax highlighting, snippets, and `arbiter check` diagnostics on open/save.
 
 ## Usage
 
@@ -254,6 +257,12 @@ arbiter emit rules.arb             # emit Arishem JSON
 arbiter emit rules.arb --rule Name # emit single rule
 arbiter check rules.arb            # validate without emitting
 arbiter expert tax.arb --envelope '{...}' [--facts '[...]']
+```
+
+When `include` is involved, file-backed commands report diagnostics against the original source file:
+
+```text
+rules/segments.arb:14:1: rule EnterpriseDecision: rollout must be between 0 and 100
 ```
 
 ### Go Library — Stateless Rules

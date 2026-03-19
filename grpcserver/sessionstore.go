@@ -3,6 +3,7 @@ package grpcserver
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/odvcencio/arbiter/expert"
@@ -26,6 +27,7 @@ type ExpertSession struct {
 	Session    *expert.Session
 	CreatedAt  time.Time
 	LastAccess time.Time
+	closed     atomic.Bool
 }
 
 // NewSessionStore creates an empty expert-session store.
@@ -65,17 +67,40 @@ func (ss *SessionStore) Get(id string) (*ExpertSession, bool) {
 	defer ss.mu.Unlock()
 	ss.pruneExpiredLocked(time.Now().UTC())
 	handle, ok := ss.sessions[id]
-	if ok {
+	if ok && !handle.closed.Load() {
 		handle.LastAccess = time.Now().UTC()
+		return handle, true
 	}
-	return handle, ok
+	return nil, false
 }
 
 // Delete removes a session by ID.
-func (ss *SessionStore) Delete(id string) {
+func (ss *SessionStore) Delete(id string) bool {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
+	handle, ok := ss.sessions[id]
+	if !ok {
+		return false
+	}
+	handle.closed.Store(true)
 	delete(ss.sessions, id)
+	return true
+}
+
+// Close removes a specific live session handle.
+func (ss *SessionStore) Close(handle *ExpertSession) bool {
+	if handle == nil {
+		return false
+	}
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	current, ok := ss.sessions[handle.ID]
+	if !ok || current != handle {
+		return false
+	}
+	handle.closed.Store(true)
+	delete(ss.sessions, handle.ID)
+	return true
 }
 
 func (ss *SessionStore) pruneExpiredLocked(now time.Time) {
@@ -84,6 +109,7 @@ func (ss *SessionStore) pruneExpiredLocked(now time.Time) {
 	}
 	for id, handle := range ss.sessions {
 		if now.Sub(handle.LastAccess) > ss.ttl {
+			handle.closed.Store(true)
 			delete(ss.sessions, id)
 		}
 	}
@@ -102,6 +128,7 @@ func (ss *SessionStore) evictIfNeededLocked() {
 		}
 	}
 	if oldestID != "" {
+		ss.sessions[oldestID].closed.Store(true)
 		delete(ss.sessions, oldestID)
 	}
 }

@@ -21,6 +21,19 @@ rule FreeShipping {
 }
 `
 
+const nestedDocumentSource = `
+rule NeedsReview {
+	when {
+		any container in spec.containers {
+			any mount in container.volume_mounts {
+				mount.read_only == false
+			}
+		}
+	}
+	then NeedsReview {}
+}
+`
+
 const governedSource = `
 segment enterprise {
 	user.plan == "enterprise"
@@ -159,6 +172,141 @@ allow if {
 	})
 }
 
+func BenchmarkCompareNestedDocumentArbiterCELOPA(b *testing.B) {
+	input := nestedDocumentInput()
+
+	b.Run("arbiter", func(b *testing.B) {
+		rs, err := arbiter.Compile([]byte(nestedDocumentSource))
+		if err != nil {
+			b.Fatal(err)
+		}
+		dc := arbiter.DataFromMap(input, rs)
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			matched, err := arbiter.Eval(rs, dc)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(matched) != 1 {
+				b.Fatalf("expected 1 match, got %d", len(matched))
+			}
+		}
+	})
+
+	b.Run("cel", func(b *testing.B) {
+		env, err := cel.NewEnv(cel.Variable("input", cel.DynType))
+		if err != nil {
+			b.Fatal(err)
+		}
+		ast, issues := env.Compile(`input.spec.containers.exists(c, c.volume_mounts.exists(m, m.read_only == false))`)
+		if issues != nil && issues.Err() != nil {
+			b.Fatal(issues.Err())
+		}
+		program, err := env.Program(ast)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			out, _, err := program.Eval(map[string]any{"input": input})
+			if err != nil {
+				b.Fatal(err)
+			}
+			ok, _ := out.Value().(bool)
+			if !ok {
+				b.Fatal("expected nested CEL expression to be true")
+			}
+		}
+	})
+
+	b.Run("opa", func(b *testing.B) {
+		query, err := rego.New(
+			rego.Query("data.rules.allow"),
+			rego.Module("rules.rego", `
+package rules
+import rego.v1
+
+allow if {
+	some container in input.spec.containers
+	some mount in container.volume_mounts
+	mount.read_only == false
+}
+`),
+		).PrepareForEval(context.Background())
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			results, err := query.Eval(context.Background(), rego.EvalInput(input))
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(results) == 0 {
+				b.Fatal("expected nested OPA query to allow")
+			}
+		}
+	})
+}
+
+func BenchmarkCompareCompileArbiterCELOPA(b *testing.B) {
+	b.Run("arbiter", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := arbiter.Compile([]byte(compareSource)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("cel", func(b *testing.B) {
+		env, err := cel.NewEnv(
+			cel.Variable("cart_total", cel.DoubleType),
+			cel.Variable("region", cel.StringType),
+		)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			ast, issues := env.Compile(`cart_total >= 35.0 && region != "XX"`)
+			if issues != nil && issues.Err() != nil {
+				b.Fatal(issues.Err())
+			}
+			if _, err := env.Program(ast); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("opa", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if _, err := rego.New(
+				rego.Query("data.rules.allow"),
+				rego.Module("rules.rego", `
+package rules
+import rego.v1
+
+allow if {
+	input.cart_total >= 35
+	input.region != "XX"
+}
+`),
+			).PrepareForEval(context.Background()); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func BenchmarkArbiterGovernedRules(b *testing.B) {
 	full, err := arbiter.CompileFull([]byte(governedSource))
 	if err != nil {
@@ -248,5 +396,27 @@ func BenchmarkArbiterBundleCompileArtifacts(b *testing.B) {
 		if _, err := expert.Compile(source); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func nestedDocumentInput() map[string]any {
+	return map[string]any{
+		"spec": map[string]any{
+			"containers": []any{
+				map[string]any{
+					"name": "api",
+					"volume_mounts": []any{
+						map[string]any{"name": "cfg", "read_only": true},
+						map[string]any{"name": "data", "read_only": false},
+					},
+				},
+				map[string]any{
+					"name": "worker",
+					"volume_mounts": []any{
+						map[string]any{"name": "logs", "read_only": true},
+					},
+				},
+			},
+		},
 	}
 }

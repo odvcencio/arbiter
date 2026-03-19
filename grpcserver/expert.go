@@ -41,11 +41,10 @@ func (s *Server) StartSession(_ context.Context, req *arbiterv1.StartSessionRequ
 
 // RunSession advances an expert session until quiescence or a guardrail.
 func (s *Server) RunSession(ctx context.Context, req *arbiterv1.RunSessionRequest) (*arbiterv1.RunSessionResponse, error) {
-	handle, err := s.session(req.GetSessionId())
+	handle, err := s.lockSession(req.GetSessionId())
 	if err != nil {
 		return nil, err
 	}
-	handle.mu.Lock()
 	defer handle.mu.Unlock()
 
 	mark := handle.Session.Checkpoint()
@@ -72,11 +71,10 @@ func (s *Server) RunSession(ctx context.Context, req *arbiterv1.RunSessionReques
 
 // AssertFacts inserts or updates facts in an expert session.
 func (s *Server) AssertFacts(_ context.Context, req *arbiterv1.AssertFactsRequest) (*arbiterv1.AssertFactsResponse, error) {
-	handle, err := s.session(req.GetSessionId())
+	handle, err := s.lockSession(req.GetSessionId())
 	if err != nil {
 		return nil, err
 	}
-	handle.mu.Lock()
 	defer handle.mu.Unlock()
 	facts, err := expertFactsFromProto(req.GetFacts())
 	if err != nil {
@@ -92,11 +90,10 @@ func (s *Server) AssertFacts(_ context.Context, req *arbiterv1.AssertFactsReques
 
 // RetractFacts removes facts from an expert session.
 func (s *Server) RetractFacts(_ context.Context, req *arbiterv1.RetractFactsRequest) (*arbiterv1.RetractFactsResponse, error) {
-	handle, err := s.session(req.GetSessionId())
+	handle, err := s.lockSession(req.GetSessionId())
 	if err != nil {
 		return nil, err
 	}
-	handle.mu.Lock()
 	defer handle.mu.Unlock()
 	for _, ref := range req.GetFacts() {
 		if err := handle.Session.Retract(ref.GetType(), ref.GetKey()); err != nil {
@@ -108,11 +105,10 @@ func (s *Server) RetractFacts(_ context.Context, req *arbiterv1.RetractFactsRequ
 
 // GetSessionTrace returns the current expert session state.
 func (s *Server) GetSessionTrace(_ context.Context, req *arbiterv1.GetSessionTraceRequest) (*arbiterv1.GetSessionTraceResponse, error) {
-	handle, err := s.session(req.GetSessionId())
+	handle, err := s.lockSession(req.GetSessionId())
 	if err != nil {
 		return nil, err
 	}
-	handle.mu.Lock()
 	defer handle.mu.Unlock()
 	resp, err := protoTraceSnapshot(handle.Session.Snapshot())
 	if err != nil {
@@ -121,9 +117,33 @@ func (s *Server) GetSessionTrace(_ context.Context, req *arbiterv1.GetSessionTra
 	return resp, nil
 }
 
+// CloseSession deterministically disposes of a live expert session.
+func (s *Server) CloseSession(_ context.Context, req *arbiterv1.CloseSessionRequest) (*arbiterv1.CloseSessionResponse, error) {
+	handle, err := s.lockSession(req.GetSessionId())
+	if err != nil {
+		return nil, err
+	}
+	defer handle.mu.Unlock()
+	s.sessions.Close(handle)
+	return &arbiterv1.CloseSessionResponse{}, nil
+}
+
 func (s *Server) session(id string) (*ExpertSession, error) {
 	handle, ok := s.sessions.Get(id)
 	if !ok {
+		return nil, status.Errorf(codes.NotFound, "session %q not found", id)
+	}
+	return handle, nil
+}
+
+func (s *Server) lockSession(id string) (*ExpertSession, error) {
+	handle, err := s.session(id)
+	if err != nil {
+		return nil, err
+	}
+	handle.mu.Lock()
+	if handle.closed.Load() {
+		handle.mu.Unlock()
 		return nil, status.Errorf(codes.NotFound, "session %q not found", id)
 	}
 	return handle, nil

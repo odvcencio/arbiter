@@ -17,6 +17,7 @@ service ArbiterService {
   rpc AssertFacts(AssertFactsRequest) returns (AssertFactsResponse);
   rpc RetractFacts(RetractFactsRequest) returns (RetractFactsResponse);
   rpc GetSessionTrace(GetSessionTraceRequest) returns (GetSessionTraceResponse);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
   rpc SetRuleOverride(SetRuleOverrideRequest) returns (SetRuleOverrideResponse);
   rpc SetFlagOverride(SetFlagOverrideRequest) returns (SetFlagOverrideResponse);
   rpc SetFlagRuleOverride(SetFlagRuleOverrideRequest) returns (SetFlagRuleOverrideResponse);
@@ -154,6 +155,12 @@ message GetSessionTraceResponse {
   uint32 rounds = 5;
   uint32 mutations = 6;
 }
+
+message CloseSessionRequest {
+  string session_id = 1;
+}
+
+message CloseSessionResponse {}
 
 message SetRuleOverrideRequest {
   string bundle_id = 1;

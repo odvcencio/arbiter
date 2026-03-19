@@ -18,9 +18,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/odvcencio/arbiter"
 	arbiterv1 "github.com/odvcencio/arbiter/api/arbiter/v1"
@@ -28,6 +31,7 @@ import (
 	"github.com/odvcencio/arbiter/decompile"
 	"github.com/odvcencio/arbiter/emit"
 	"github.com/odvcencio/arbiter/expert"
+	"github.com/odvcencio/arbiter/flags"
 	"github.com/odvcencio/arbiter/grpcserver"
 	"github.com/odvcencio/arbiter/overrides"
 	"google.golang.org/grpc"
@@ -58,7 +62,7 @@ func main() {
 			}
 		}
 		if err := emitCmd(os.Args[2], ruleName, format); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintln(os.Stderr, formatCLIError(err))
 			os.Exit(1)
 		}
 	case "check":
@@ -67,7 +71,7 @@ func main() {
 			os.Exit(1)
 		}
 		if err := check(os.Args[2]); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintln(os.Stderr, formatCLIError(err))
 			os.Exit(1)
 		}
 	case "compile":
@@ -76,7 +80,7 @@ func main() {
 			os.Exit(1)
 		}
 		if err := compileCmd(os.Args[2]); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintln(os.Stderr, formatCLIError(err))
 			os.Exit(1)
 		}
 	case "eval":
@@ -96,7 +100,7 @@ func main() {
 			os.Exit(1)
 		}
 		if err := evalCmd(os.Args[2], dataJSON); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintln(os.Stderr, formatCLIError(err))
 			os.Exit(1)
 		}
 	case "expert":
@@ -121,7 +125,7 @@ func main() {
 			os.Exit(1)
 		}
 		if err := expertCmd(os.Args[2], envelopeJSON, factsJSON); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintln(os.Stderr, formatCLIError(err))
 			os.Exit(1)
 		}
 	case "import":
@@ -137,7 +141,7 @@ func main() {
 			}
 		}
 		if err := importCmd(os.Args[2], outPath); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintln(os.Stderr, formatCLIError(err))
 			os.Exit(1)
 		}
 	case "serve":
@@ -154,13 +158,56 @@ func main() {
 			}
 		}
 		if err := serveCmd(grpcAddr, auditFile); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintln(os.Stderr, formatCLIError(err))
 			os.Exit(1)
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\nCommands: emit, check, compile, eval, expert, import, serve\n", os.Args[1])
 		os.Exit(1)
 	}
+}
+
+func formatCLIError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if msg, ok := diagnosticString(err); ok {
+		return msg
+	}
+	return fmt.Sprintf("error: %v", err)
+}
+
+func diagnosticString(err error) (string, bool) {
+	var diag *arbiter.DiagnosticError
+	if errors.As(err, &diag) {
+		return diag.Error(), true
+	}
+	for cur := err; cur != nil; cur = errors.Unwrap(cur) {
+		if looksLikeDiagnostic(cur.Error()) {
+			return cur.Error(), true
+		}
+	}
+	return "", false
+}
+
+func looksLikeDiagnostic(message string) bool {
+	_, rest, ok := strings.Cut(message, ":")
+	if !ok {
+		return false
+	}
+	first, rest, ok := strings.Cut(rest, ":")
+	if !ok {
+		return false
+	}
+	if _, err := strconv.Atoi(strings.TrimSpace(first)); err != nil {
+		return false
+	}
+	if second, _, ok := strings.Cut(rest, ":"); ok {
+		if _, err := strconv.Atoi(strings.TrimSpace(second)); err == nil {
+			return true
+		}
+	}
+	return true
 }
 
 func emitCmd(path, ruleName, format string) error {
@@ -216,9 +263,22 @@ func emitCmd(path, ruleName, format string) error {
 }
 
 func check(path string) error {
-	_, err := arbiter.TranspileFile(path)
+	unit, parsed, err := arbiter.LoadFileParsed(path)
 	if err != nil {
 		return fmt.Errorf("check %s: %w", path, err)
+	}
+	full, err := arbiter.CompileFullParsed(parsed)
+	if err != nil {
+		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
+	}
+	if _, err := flags.LoadParsed(parsed, full); err != nil {
+		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
+	}
+	if _, err := expert.CompileParsed(parsed, full); err != nil {
+		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
+	}
+	if _, err := arbiter.TranspileParsed(parsed); err != nil {
+		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
 	}
 
 	fmt.Fprintf(os.Stderr, "%s: ok\n", path)

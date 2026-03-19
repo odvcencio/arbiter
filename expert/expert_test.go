@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	arbiter "github.com/odvcencio/arbiter"
@@ -532,14 +533,87 @@ expert rule ApproveAfterLowerRisk {
 	if len(result.Outcomes) != 1 || result.Outcomes[0].Name != "Approved" {
 		t.Fatalf("expected approval outcome, got %+v", result.Outcomes)
 	}
-	if len(result.Activations) != 2 {
-		t.Fatalf("expected 2 activations, got %+v", result.Activations)
+	if len(result.Activations) != 3 {
+		t.Fatalf("expected 3 activations, got %+v", result.Activations)
 	}
 	if result.Activations[0].Kind != expert.ActionModify {
 		t.Fatalf("expected modify activation first, got %+v", result.Activations[0])
 	}
-	if result.Activations[1].Kind != expert.ActionEmit {
-		t.Fatalf("expected emit activation second, got %+v", result.Activations[1])
+	if result.Activations[1].Kind != expert.ActionModify || result.Activations[1].Changed {
+		t.Fatalf("expected steady-state modify no-op second, got %+v", result.Activations[1])
+	}
+	if result.Activations[2].Kind != expert.ActionEmit {
+		t.Fatalf("expected emit activation third, got %+v", result.Activations[2])
+	}
+}
+
+func TestSessionModifyDerivedFactRevertsWhenModifierStopsMatching(t *testing.T) {
+	src := []byte(`
+expert rule SeedHighRisk {
+	when {
+		any marker in facts.Marker { marker.kind == "high" }
+	}
+	then assert RiskFlag {
+		key: "high_risk",
+		level: "high",
+	}
+}
+
+expert rule LowerRisk {
+	when {
+		any clearance in facts.Clearance { clearance.active == true }
+		and any risk in facts.RiskFlag { risk.level == "high" }
+	}
+	then modify RiskFlag {
+		key: "high_risk"
+		set {
+			level: "low",
+		}
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, []expert.Fact{
+		{
+			Type: "Marker",
+			Key:  "marker_1",
+			Fields: map[string]any{
+				"kind": "high",
+			},
+		},
+		{
+			Type: "Clearance",
+			Key:  "clear_1",
+			Fields: map[string]any{
+				"active": true,
+			},
+		},
+	}, expert.Options{})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+	risk := requireFact(t, first.Facts, "RiskFlag", "high_risk")
+	if risk.Fields["level"] != "low" {
+		t.Fatalf("expected active modifier to lower risk, got %+v", risk)
+	}
+
+	if err := session.Retract("Clearance", "clear_1"); err != nil {
+		t.Fatalf("Retract: %v", err)
+	}
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	risk = requireFact(t, second.Facts, "RiskFlag", "high_risk")
+	if risk.Fields["level"] != "high" {
+		t.Fatalf("expected derived fact to revert once modifier stops matching, got %+v", risk)
 	}
 }
 
@@ -591,14 +665,82 @@ expert rule ApproveWhenNoHighRisk {
 	if len(result.Outcomes) != 1 || result.Outcomes[0].Name != "Approved" {
 		t.Fatalf("expected approval outcome after retract, got %+v", result.Outcomes)
 	}
-	if len(result.Activations) != 2 {
-		t.Fatalf("expected 2 activations, got %+v", result.Activations)
+	if len(result.Activations) != 3 {
+		t.Fatalf("expected 3 activations, got %+v", result.Activations)
 	}
 	if result.Activations[0].Kind != expert.ActionRetract {
 		t.Fatalf("expected retract activation first, got %+v", result.Activations[0])
 	}
-	if result.Activations[1].Kind != expert.ActionEmit {
-		t.Fatalf("expected emit activation second, got %+v", result.Activations[1])
+	if result.Activations[1].Kind != expert.ActionRetract || result.Activations[1].Changed {
+		t.Fatalf("expected steady-state retract no-op second, got %+v", result.Activations[1])
+	}
+	if result.Activations[2].Kind != expert.ActionEmit {
+		t.Fatalf("expected emit activation third, got %+v", result.Activations[2])
+	}
+}
+
+func TestSessionRetractDerivedFactRestoresWhenRetractorStopsMatching(t *testing.T) {
+	src := []byte(`
+expert rule SeedHighRisk {
+	when {
+		any marker in facts.Marker { marker.kind == "high" }
+	}
+	then assert RiskFlag {
+		key: "high_risk",
+		level: "high",
+	}
+}
+
+expert rule SuppressRisk {
+	when {
+		any suppression in facts.Suppression { suppression.active == true }
+		and any risk in facts.RiskFlag { risk.level == "high" }
+	}
+	then retract RiskFlag {
+		key: "high_risk"
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, []expert.Fact{
+		{
+			Type: "Marker",
+			Key:  "marker_1",
+			Fields: map[string]any{
+				"kind": "high",
+			},
+		},
+		{
+			Type: "Suppression",
+			Key:  "suppress_1",
+			Fields: map[string]any{
+				"active": true,
+			},
+		},
+	}, expert.Options{})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+	if hasFact(first.Facts, "RiskFlag", "high_risk") {
+		t.Fatalf("expected active retractor to hide derived fact, got %+v", first.Facts)
+	}
+
+	if err := session.Retract("Suppression", "suppress_1"); err != nil {
+		t.Fatalf("Retract: %v", err)
+	}
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	if !hasFact(second.Facts, "RiskFlag", "high_risk") {
+		t.Fatalf("expected derived fact to return when retractor stops matching, got %+v", second.Facts)
 	}
 }
 
@@ -718,6 +860,30 @@ include "route.arb"
 	}
 }
 
+func TestCompileFileMapsExpertErrorsToIncludedFiles(t *testing.T) {
+	dir := t.TempDir()
+	bad := writeExpertTestFile(t, dir, "bad.arb", `
+expert rule BadModify {
+	when { true }
+	then modify RiskFlag {
+		key: "high_risk",
+	}
+}
+`)
+	main := writeExpertTestFile(t, dir, "main.arb", `include "bad.arb"`)
+
+	_, err := expert.CompileFile(main)
+	if err == nil {
+		t.Fatal("expected compile error")
+	}
+	if got := err.Error(); !strings.Contains(got, bad+":2:1:") {
+		t.Fatalf("expected included expert file diagnostic, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "expert rule BadModify modify RiskFlag: non-empty set block is required") {
+		t.Fatalf("unexpected expert compile error: %v", err)
+	}
+}
+
 func writeExpertTestFile(t *testing.T, dir, name, contents string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -736,4 +902,13 @@ func requireFact(t *testing.T, facts []expert.Fact, factType, key string) expert
 	}
 	t.Fatalf("missing fact %s/%s in %+v", factType, key, facts)
 	return expert.Fact{}
+}
+
+func hasFact(facts []expert.Fact, factType, key string) bool {
+	for _, fact := range facts {
+		if fact.Type == factType && fact.Key == key {
+			return true
+		}
+	}
+	return false
 }

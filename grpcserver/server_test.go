@@ -9,7 +9,9 @@ import (
 	"github.com/odvcencio/arbiter/audit"
 	"github.com/odvcencio/arbiter/overrides"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -279,6 +281,19 @@ func TestServerExpertSessions(t *testing.T) {
 	if len(run.Outcomes) != 0 || len(run.Activations) != 0 || len(run.Facts) != 1 {
 		t.Fatalf("unexpected second run result: %+v", run)
 	}
+
+	if _, err := client.CloseSession(context.Background(), &arbiterv1.CloseSessionRequest{
+		SessionId: start.SessionId,
+	}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+
+	_, err = client.GetSessionTrace(context.Background(), &arbiterv1.GetSessionTraceRequest{
+		SessionId: start.SessionId,
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("expected closed session to be gone, got %v", err)
+	}
 }
 
 func TestServerExpertMutationRules(t *testing.T) {
@@ -333,8 +348,8 @@ func TestServerExpertMutationRules(t *testing.T) {
 	if len(run.Outcomes) != 1 || run.Outcomes[0].GetName() != "Approved" {
 		t.Fatalf("expected approved outcome, got %+v", run.Outcomes)
 	}
-	if len(run.Activations) != 2 {
-		t.Fatalf("expected 2 activations, got %+v", run.Activations)
+	if len(run.Activations) != 3 {
+		t.Fatalf("expected 3 activations, got %+v", run.Activations)
 	}
 }
 
