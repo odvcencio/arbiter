@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.4.2
+
+### Decision Tooling
+
+- **`arbiter diff`** — compare two governed rulesets against the same JSON context or batch of contexts and report added, removed, and changed rule outcomes by request key. This is the deployment-safety surface for “what changes if we ship this ruleset?”
+- **`arbiter replay`** — read audited `kind: "rules"` JSONL decisions, re-evaluate their recorded contexts against a ruleset, and report what would change now. Replay supports request filtering and capped batches for targeted investigations.
+- **Audit-stable comparison** — diff/replay normalize empty action params so `{}` vs omitted audit fields do not create fake changes, and the CLI reports include the compared paths for clearer operator output.
+
+### CLI Maintainability
+
+- **Command dispatch cleanup** — `cmd/arbiter/main.go` now routes through per-command handlers instead of one monolithic switch body, keeping the dispatcher readable as the CLI surface grows.
+- **Command-layer tests** — new tests cover diff output, replay from audit JSONL, key-path context naming, and param normalization at the release surface rather than only at helper level.
+
+---
+
 ## v0.4.1
 
 ### Expert Runtime

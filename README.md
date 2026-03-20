@@ -321,6 +321,8 @@ Tree-sitter consumers can use [highlights.scm](highlights.scm) directly for `.ar
 ```bash
 arbiter compile rules.arb          # compile and show stats
 arbiter eval rules.arb --data '{...}'  # evaluate against data
+arbiter diff current.arb candidate.arb --data-file contexts.json --key request_id
+arbiter replay candidate.arb --audit decisions.jsonl --request-id req-42
 arbiter emit rules.arb             # emit Arishem JSON
 arbiter emit rules.arb --rule Name # emit single rule
 arbiter check rules.arb            # validate without emitting
@@ -328,6 +330,10 @@ arbiter expert tax.arb --envelope '{...}' [--facts '[...]']
 arbiter serve --grpc :8081 --audit-file decisions.jsonl --bundle-file bundles.json --overrides-file overrides.json
 arbiter-agent --upstream 127.0.0.1:8081 --grpc 127.0.0.1:7081 --status 127.0.0.1:7082 --bundle-name checkout --bundle-name pricing
 ```
+
+`arbiter diff` answers “what changes if I ship this ruleset?” by evaluating two governed rulesets against the same JSON context or batch and reporting added, removed, and changed matches keyed by request context.
+
+`arbiter replay` answers “what would happen now?” by reading audited `kind: "rules"` JSONL events, re-evaluating the recorded contexts, and reporting outcome drift. Use `--request-id` to focus on one audited decision or `--limit` to cap the batch.
 
 `arbiter-agent` is the localhost data-plane form factor. It bootstraps one or many active bundles from the upstream control plane with `GetBundle`, keeps `WatchBundles(active_only=true)` streams open, syncs runtime overrides from `GetOverrides` plus `WatchOverrides`, and serves the normal Arbiter gRPC API from its own in-memory registry and override store.
 

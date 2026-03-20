@@ -10,6 +10,8 @@
 //	arbiter check <file.arb>                  — validate without emitting
 //	arbiter compile <file.arb>                — compile to bytecode, print stats
 //	arbiter eval <file.arb> --data '{...}'    — compile and eval against JSON
+//	arbiter diff <base.arb> <candidate.arb> [--data '{...}' | --data-file contexts.json] [--key path] [--json] — compare governed outcomes
+//	arbiter replay <rules.arb> --audit decisions.jsonl [--request-id id] [--limit N] [--json] — replay audited rule decisions
 //	arbiter expert <file.arb> --envelope '{...}' [--facts '[...]'] — run one expert session
 //	arbiter import <file.json> [-o output.arb] — decompile Arishem JSON to .arb
 //	arbiter serve [--grpc :8081] [--audit-file decisions.jsonl] [--bundle-file bundles.json] [--overrides-file overrides.json] — start gRPC API
@@ -37,144 +39,228 @@ import (
 	"google.golang.org/grpc"
 )
 
-func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: arbiter <command> <file>\nCommands: emit, check, compile, eval, expert, import, serve\n")
-		os.Exit(1)
-	}
+const (
+	commandList = "emit, check, compile, eval, diff, replay, expert, import, serve"
+	rootUsage   = "Usage: arbiter <command> <file>\nCommands: " + commandList
+)
 
-	switch os.Args[1] {
-	case "emit":
-		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: arbiter emit <file.arb> [--format rego|cel|drools] [--rule Name]\n")
-			os.Exit(1)
-		}
-		ruleName := ""
-		format := ""
-		for i := 3; i < len(os.Args); i++ {
-			if os.Args[i] == "--rule" && i+1 < len(os.Args) {
-				ruleName = os.Args[i+1]
-				i++
-			}
-			if os.Args[i] == "--format" && i+1 < len(os.Args) {
-				format = os.Args[i+1]
-				i++
-			}
-		}
-		if err := emitCmd(os.Args[2], ruleName, format); err != nil {
+type usageError string
+
+func (e usageError) Error() string { return string(e) }
+
+var commandHandlers = map[string]func([]string) error{
+	"emit":    runEmit,
+	"check":   runCheck,
+	"compile": runCompile,
+	"eval":    runEval,
+	"diff":    runDiff,
+	"replay":  runReplay,
+	"expert":  runExpert,
+	"import":  runImport,
+	"serve":   runServe,
+}
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		var usage usageError
+		if errors.As(err, &usage) {
+			fmt.Fprintln(os.Stderr, usage.Error())
+		} else {
 			fmt.Fprintln(os.Stderr, formatCLIError(err))
-			os.Exit(1)
 		}
-	case "check":
-		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: arbiter check <file.arb>\n")
-			os.Exit(1)
-		}
-		if err := check(os.Args[2]); err != nil {
-			fmt.Fprintln(os.Stderr, formatCLIError(err))
-			os.Exit(1)
-		}
-	case "compile":
-		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: arbiter compile <file.arb>\n")
-			os.Exit(1)
-		}
-		if err := compileCmd(os.Args[2]); err != nil {
-			fmt.Fprintln(os.Stderr, formatCLIError(err))
-			os.Exit(1)
-		}
-	case "eval":
-		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: arbiter eval <file.arb> --data '{...}'\n")
-			os.Exit(1)
-		}
-		dataJSON := ""
-		for i := 3; i < len(os.Args); i++ {
-			if os.Args[i] == "--data" && i+1 < len(os.Args) {
-				dataJSON = os.Args[i+1]
-				i++
-			}
-		}
-		if dataJSON == "" {
-			fmt.Fprintf(os.Stderr, "error: --data flag is required\n")
-			os.Exit(1)
-		}
-		if err := evalCmd(os.Args[2], dataJSON); err != nil {
-			fmt.Fprintln(os.Stderr, formatCLIError(err))
-			os.Exit(1)
-		}
-	case "expert":
-		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: arbiter expert <file.arb> --envelope '{...}' [--facts '[...]']\n")
-			os.Exit(1)
-		}
-		envelopeJSON := ""
-		factsJSON := ""
-		for i := 3; i < len(os.Args); i++ {
-			if os.Args[i] == "--envelope" && i+1 < len(os.Args) {
-				envelopeJSON = os.Args[i+1]
-				i++
-			}
-			if os.Args[i] == "--facts" && i+1 < len(os.Args) {
-				factsJSON = os.Args[i+1]
-				i++
-			}
-		}
-		if envelopeJSON == "" {
-			fmt.Fprintf(os.Stderr, "error: --envelope flag is required\n")
-			os.Exit(1)
-		}
-		if err := expertCmd(os.Args[2], envelopeJSON, factsJSON); err != nil {
-			fmt.Fprintln(os.Stderr, formatCLIError(err))
-			os.Exit(1)
-		}
-	case "import":
-		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: arbiter import <file.json> [-o output.arb]\n")
-			os.Exit(1)
-		}
-		outPath := ""
-		for i := 3; i < len(os.Args); i++ {
-			if os.Args[i] == "-o" && i+1 < len(os.Args) {
-				outPath = os.Args[i+1]
-				i++
-			}
-		}
-		if err := importCmd(os.Args[2], outPath); err != nil {
-			fmt.Fprintln(os.Stderr, formatCLIError(err))
-			os.Exit(1)
-		}
-	case "serve":
-		grpcAddr := ":8081"
-		auditFile := ""
-		bundleFile := ""
-		overridesFile := ""
-		for i := 2; i < len(os.Args); i++ {
-			if os.Args[i] == "--grpc" && i+1 < len(os.Args) {
-				grpcAddr = os.Args[i+1]
-				i++
-			}
-			if os.Args[i] == "--audit-file" && i+1 < len(os.Args) {
-				auditFile = os.Args[i+1]
-				i++
-			}
-			if os.Args[i] == "--bundle-file" && i+1 < len(os.Args) {
-				bundleFile = os.Args[i+1]
-				i++
-			}
-			if os.Args[i] == "--overrides-file" && i+1 < len(os.Args) {
-				overridesFile = os.Args[i+1]
-				i++
-			}
-		}
-		if err := serveCmd(grpcAddr, auditFile, bundleFile, overridesFile); err != nil {
-			fmt.Fprintln(os.Stderr, formatCLIError(err))
-			os.Exit(1)
-		}
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\nCommands: emit, check, compile, eval, expert, import, serve\n", os.Args[1])
 		os.Exit(1)
 	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		return usageError(rootUsage)
+	}
+	handler, ok := commandHandlers[args[0]]
+	if !ok {
+		return usageError(fmt.Sprintf("Unknown command: %s\nCommands: %s", args[0], commandList))
+	}
+	return handler(args[1:])
+}
+
+func runEmit(args []string) error {
+	if len(args) < 1 {
+		return usageError("Usage: arbiter emit <file.arb> [--format rego|cel|drools] [--rule Name]")
+	}
+	ruleName := ""
+	format := ""
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--rule" && i+1 < len(args) {
+			ruleName = args[i+1]
+			i++
+		}
+		if args[i] == "--format" && i+1 < len(args) {
+			format = args[i+1]
+			i++
+		}
+	}
+	return emitCmd(args[0], ruleName, format)
+}
+
+func runCheck(args []string) error {
+	if len(args) < 1 {
+		return usageError("Usage: arbiter check <file.arb>")
+	}
+	return check(args[0])
+}
+
+func runCompile(args []string) error {
+	if len(args) < 1 {
+		return usageError("Usage: arbiter compile <file.arb>")
+	}
+	return compileCmd(args[0])
+}
+
+func runEval(args []string) error {
+	if len(args) < 1 {
+		return usageError("Usage: arbiter eval <file.arb> --data '{...}'")
+	}
+	dataJSON := ""
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--data" && i+1 < len(args) {
+			dataJSON = args[i+1]
+			i++
+		}
+	}
+	if dataJSON == "" {
+		return fmt.Errorf("--data flag is required")
+	}
+	return evalCmd(args[0], dataJSON)
+}
+
+func runDiff(args []string) error {
+	if len(args) < 2 {
+		return usageError("Usage: arbiter diff <base.arb> <candidate.arb> [--data '{...}' | --data-file contexts.json] [--key path] [--json]")
+	}
+	dataJSON := ""
+	dataFile := ""
+	keyPath := ""
+	jsonOut := false
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--data":
+			if i+1 < len(args) {
+				dataJSON = args[i+1]
+				i++
+			}
+		case "--data-file":
+			if i+1 < len(args) {
+				dataFile = args[i+1]
+				i++
+			}
+		case "--key":
+			if i+1 < len(args) {
+				keyPath = args[i+1]
+				i++
+			}
+		case "--json":
+			jsonOut = true
+		}
+	}
+	return diffCmd(args[0], args[1], dataJSON, dataFile, keyPath, jsonOut)
+}
+
+func runReplay(args []string) error {
+	if len(args) < 1 {
+		return usageError("Usage: arbiter replay <rules.arb> --audit decisions.jsonl [--request-id id] [--limit N] [--json]")
+	}
+	auditPath := ""
+	requestID := ""
+	limit := 0
+	jsonOut := false
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--audit":
+			if i+1 < len(args) {
+				auditPath = args[i+1]
+				i++
+			}
+		case "--request-id":
+			if i+1 < len(args) {
+				requestID = args[i+1]
+				i++
+			}
+		case "--limit":
+			if i+1 < len(args) {
+				value, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					return fmt.Errorf("invalid --limit %q: %w", args[i+1], err)
+				}
+				limit = value
+				i++
+			}
+		case "--json":
+			jsonOut = true
+		}
+	}
+	return replayCmd(args[0], auditPath, requestID, limit, jsonOut)
+}
+
+func runExpert(args []string) error {
+	if len(args) < 1 {
+		return usageError("Usage: arbiter expert <file.arb> --envelope '{...}' [--facts '[...]']")
+	}
+	envelopeJSON := ""
+	factsJSON := ""
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--envelope" && i+1 < len(args) {
+			envelopeJSON = args[i+1]
+			i++
+		}
+		if args[i] == "--facts" && i+1 < len(args) {
+			factsJSON = args[i+1]
+			i++
+		}
+	}
+	if envelopeJSON == "" {
+		return fmt.Errorf("--envelope flag is required")
+	}
+	return expertCmd(args[0], envelopeJSON, factsJSON)
+}
+
+func runImport(args []string) error {
+	if len(args) < 1 {
+		return usageError("Usage: arbiter import <file.json> [-o output.arb]")
+	}
+	outPath := ""
+	for i := 1; i < len(args); i++ {
+		if args[i] == "-o" && i+1 < len(args) {
+			outPath = args[i+1]
+			i++
+		}
+	}
+	return importCmd(args[0], outPath)
+}
+
+func runServe(args []string) error {
+	grpcAddr := ":8081"
+	auditFile := ""
+	bundleFile := ""
+	overridesFile := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--grpc" && i+1 < len(args) {
+			grpcAddr = args[i+1]
+			i++
+		}
+		if args[i] == "--audit-file" && i+1 < len(args) {
+			auditFile = args[i+1]
+			i++
+		}
+		if args[i] == "--bundle-file" && i+1 < len(args) {
+			bundleFile = args[i+1]
+			i++
+		}
+		if args[i] == "--overrides-file" && i+1 < len(args) {
+			overridesFile = args[i+1]
+			i++
+		}
+	}
+	return serveCmd(grpcAddr, auditFile, bundleFile, overridesFile)
 }
 
 func formatCLIError(err error) string {
