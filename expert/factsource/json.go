@@ -8,6 +8,7 @@ import (
 
 func init() {
 	Register(".json", LoaderFunc(loadJSON))
+	RegisterSaver(".json", SaverFunc(saveJSON))
 }
 
 // loadJSON reads a JSON file containing an array of fact objects.
@@ -50,4 +51,36 @@ func loadJSON(path string) ([]Fact, error) {
 	}
 
 	return facts, nil
+}
+
+func saveJSON(path string, facts []Fact) error {
+	data, err := json.MarshalIndent(factsToObjects(facts), "", "  ")
+	if err != nil {
+		return fmt.Errorf("json encode: %w", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("json: %w", err)
+	}
+	return nil
+}
+
+func factsToObjects(facts []Fact) []map[string]any {
+	sortedFacts := sortFacts(facts)
+	out := make([]map[string]any, 0, len(sortedFacts))
+	for _, fact := range sortedFacts {
+		obj := make(map[string]any, len(fact.Fields)+2)
+		obj["type"] = fact.Type
+		obj["key"] = fact.Key
+		for key, value := range fact.Fields {
+			switch key {
+			case "type", "key":
+				continue
+			default:
+				obj[key] = value
+			}
+		}
+		out = append(out, obj)
+	}
+	return out
 }

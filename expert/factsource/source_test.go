@@ -1,11 +1,13 @@
 package factsource
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -188,6 +190,152 @@ func TestUnknownExtension(t *testing.T) {
 	_, err := Load("data.xlsx")
 	if err == nil {
 		t.Fatal("expected error for unregistered extension")
+	}
+}
+
+func TestSaveCSVRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "facts.csv")
+	input := []Fact{
+		{Type: "Lead", Key: "b", Fields: map[string]any{"company": "Beta", "score": float64(80)}},
+		{Type: "Lead", Key: "a", Fields: map[string]any{"company": "Alpha", "active": true}},
+	}
+
+	if err := Save(path, input); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	facts, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("got %d facts, want 2", len(facts))
+	}
+	if facts[0].Key != "a" || facts[1].Key != "b" {
+		t.Fatalf("facts not saved deterministically: %+v", facts)
+	}
+}
+
+func TestSaveJSONRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "facts.json")
+	input := []Fact{
+		{Type: "Lead", Key: "a", Fields: map[string]any{"score": float64(95), "key": "a"}},
+	}
+	if err := Save(path, input); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	facts, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(facts) != 1 || facts[0].Fields["score"] != float64(95) {
+		t.Fatalf("unexpected round-trip facts: %+v", facts)
+	}
+}
+
+func TestSaveJSONLRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "facts.jsonl")
+	input := []Fact{
+		{Type: "Lead", Key: "a", Fields: map[string]any{"name": "Alice"}},
+		{Type: "Lead", Key: "b", Fields: map[string]any{"name": "Bob"}},
+	}
+	if err := Save(path, input); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	facts, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(facts) != 2 || facts[1].Fields["name"] != "Bob" {
+		t.Fatalf("unexpected round-trip facts: %+v", facts)
+	}
+}
+
+func TestSaveGoogleSheet(t *testing.T) {
+	var clearCalls, updateCalls int
+	var authHeader string
+	var update googleSheetsWriteRequest
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/values/Leads:clear"):
+			clearCalls++
+			authHeader = r.Header.Get("Authorization")
+			if r.Method != http.MethodPost {
+				t.Fatalf("clear method = %s", r.Method)
+			}
+			_, _ = io.WriteString(w, `{}`)
+		case strings.HasSuffix(r.URL.Path, "/values/Leads"):
+			updateCalls++
+			authHeader = r.Header.Get("Authorization")
+			if r.Method != http.MethodPut {
+				t.Fatalf("update method = %s", r.Method)
+			}
+			if got := r.URL.Query().Get("valueInputOption"); got != "RAW" {
+				t.Fatalf("valueInputOption = %q", got)
+			}
+			if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+				t.Fatalf("decode update: %v", err)
+			}
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	origBaseURL := googleSheetsAPIBaseURL
+	origClient := googleSheetsHTTPClient
+	googleSheetsAPIBaseURL = server.URL
+	googleSheetsHTTPClient = server.Client()
+	t.Cleanup(func() {
+		googleSheetsAPIBaseURL = origBaseURL
+		googleSheetsHTTPClient = origClient
+	})
+	t.Setenv("ARBITER_GSHEETS_ACCESS_TOKEN", "write-token")
+
+	err := Save("gsheet://sheet123/Leads", []Fact{
+		{Type: "Lead", Key: "a", Fields: map[string]any{"score": float64(95)}},
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if clearCalls != 1 || updateCalls != 1 {
+		t.Fatalf("expected clear+update, got clear=%d update=%d", clearCalls, updateCalls)
+	}
+	if authHeader != "Bearer write-token" {
+		t.Fatalf("auth = %q", authHeader)
+	}
+	if update.MajorDimension != "ROWS" {
+		t.Fatalf("majorDimension = %q", update.MajorDimension)
+	}
+	if len(update.Values) != 2 || update.Values[1][0] != "Lead" || update.Values[1][1] != "a" {
+		t.Fatalf("unexpected values payload: %+v", update.Values)
+	}
+}
+
+func TestSaveGoogleSheetRejectsAPIKeyAuth(t *testing.T) {
+	origBaseURL := googleSheetsAPIBaseURL
+	origClient := googleSheetsHTTPClient
+	googleSheetsAPIBaseURL = "https://example.test"
+	googleSheetsHTTPClient = &http.Client{}
+	t.Cleanup(func() {
+		googleSheetsAPIBaseURL = origBaseURL
+		googleSheetsHTTPClient = origClient
+	})
+	t.Setenv("ARBITER_GSHEETS_API_KEY", "read-only-key")
+	t.Setenv("ARBITER_GSHEETS_ACCESS_TOKEN", "")
+	t.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", "")
+	t.Setenv("ARBITER_GSHEETS_SERVICE_ACCOUNT_JSON", "")
+	t.Setenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+	t.Setenv("ARBITER_GSHEETS_SERVICE_ACCOUNT_FILE", "")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+
+	err := Save("gsheet://sheet123/Leads", []Fact{{Type: "Lead", Key: "a"}})
+	if err == nil || !strings.Contains(err.Error(), "API key is read-only for Sheets writes") {
+		t.Fatalf("expected write auth error, got %v", err)
 	}
 }
 

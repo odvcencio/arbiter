@@ -165,6 +165,24 @@ The session runs with guardrails — configurable max rounds and max mutations, 
 
 `modify` and `retract` are reversible overlays, not one-way destructive writes. If the supporting rule stops matching, the underlying fact view is recomputed and the overlay falls away. That can produce a steady-state no-op activation in the trace while a modifier or retractor remains active.
 
+Temporal windows are available directly in the expert context. Facts expose `__round`, `__asserted_at`, and `__age_seconds`, and the session context exposes `current_round` plus `__now`. That lets long-lived sessions write age-based rules without extra scheduler glue:
+
+```arb
+expert rule EscalateStaleCase {
+	when {
+		any case in facts.Case {
+			case.__age_seconds >= 3600
+		}
+	}
+	then emit Escalate {
+		key: case.key,
+		age_seconds: case.__age_seconds,
+	}
+}
+```
+
+For deterministic tests or external schedulers, `expert.Options.Now` lets you inject the session clock instead of relying on `time.Now()`.
+
 ### Continuous Arbiters
 
 Long-lived decision loops are first-class in `.arb` too. An `arbiter` declaration lives beside the rules it runs, so one bundle can define trigger modes, fact sources, outcome routing, persistence, and the decision logic itself.
@@ -189,17 +207,48 @@ The declaration surface is built around a few ideas:
 - `on Outcome where ... handler target` routes by outcome fields, not just outcome name
 - `checkpoint path` marks the arbiter as stateful across restarts
 
-The runtime-side fact adapters already ship separately in `expert/factsource`. Today that includes `.csv`, `.json`, `.jsonl`, `http(s)://`, and `gsheet://SPREADSHEET_ID/SheetName`, with Google Sheets read through the Sheets Values API and the same header-to-fact mapping used for CSV.
+The runtime-side fact adapters already ship separately in `expert/factsource`. Today that includes `.csv`, `.json`, `.jsonl`, `http(s)://`, `gsheet://SPREADSHEET_ID/SheetName`, versioned `postgres://...` tables, and Terraform/HCL inputs via `.tf`, `.tfvars`, `.hcl`, and `terraform://...`.
 
 ```go
 facts, _ := factsource.Load("gsheet://1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms/Leads")
+facts, _ = factsource.Load("postgres://arbiter:secret@db.internal/sales?table=facts&schema=governance")
+facts, _ = factsource.Load("terraform:///srv/infra")
 ```
 
-Sheets auth can come from `ARBITER_GSHEETS_API_KEY`, `ARBITER_GSHEETS_ACCESS_TOKEN`, or service-account JSON/file env vars. As with the other arbiter handlers, `gsheet://` targets inside `on ...` clauses remain part of the declaration surface today; concrete outcome write-back dispatch still lives in the runtime layer above `CompileFull`.
+The same package can now write back to `.csv`, `.json`, `.jsonl`, `gsheet://...`, and `postgres://...` targets:
+
+```go
+_ = factsource.Save("gsheet://1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms/Actions", facts)
+_ = factsource.Save("postgres://arbiter:secret@db.internal/sales?table=facts&mode=replace", facts)
+```
+
+Sheets auth can come from `ARBITER_GSHEETS_API_KEY`, `ARBITER_GSHEETS_ACCESS_TOKEN`, or service-account JSON/file env vars. API keys work for read-only Sheets loads; writes require OAuth or a service account because the adapter clears stale rows before updating the target range.
+
+Postgres targets require a `table=` query parameter and default to `schema=public`, `mode=replace`, and columns `type`, `key`, `fields`, and `version`. Loads return the row version on each fact, and writes run inside a serializable transaction. `mode=replace` is the authoritative full-snapshot path, while `mode=merge` upserts without deleting missing rows.
+
+Terraform sources use gotreesitter's embedded HCL grammar directly. `.tf`, `.tfvars`, and `.hcl` files produce structured facts such as `Resource`, `Module`, `Variable`, `VariableValue`, and `Local`, with nested blocks and object/list values preserved as Go maps and slices. Resource blocks are exposed twice: once as generic `Resource` facts for cross-resource policies, and once under their concrete Terraform type such as `aws_s3_bucket` or `aws_instance` for narrow policies. `terraform://...` accepts a single file or a directory; `.json` targets are treated as `terraform show -json` plan output and extracted into both `Resource` and `ResourceChange` facts keyed by full Terraform address.
+
+Chained arbiters now have a runtime surface too. The `workflow` package compiles the same `.arb` source once, creates one long-lived expert session per arbiter, topologically orders chain edges, and forwards only delta outcomes from upstream arbiters into downstream `source chain://...` inputs.
+
+```go
+w, _ := workflow.Compile(source, workflow.Options{})
+_ = w.SetSourceFacts("https://transactions.internal/feed", []expert.Fact{{
+    Type: "Transaction",
+    Key:  "txn-1",
+    Fields: map[string]any{
+        "amount":  1500.0,
+        "account": "acct-1",
+    },
+}})
+result, _ := w.Run(context.Background())
+_ = result.Arbiters["account_actions"].Delta.Outcomes
+```
+
+`workflow` owns `chain://...` sources at runtime, validates that chain handlers and chain sources agree, and rejects cyclic arbiter graphs. Generic webhook/slack/exec/grpc/audit dispatch still remains a deployment-layer concern above `CompileFull`.
 
 Arbiters are always killable by default. There is no `kill_switch` keyword inside an `arbiter` block because the loop should run unless a runtime stop path is used. The exact stop path can vary by deployment, but the invariant is the same: every arbiter must be stoppable quickly. In practice that can be wired through several control paths, including a control-plane override, a local override file, parent-context cancellation, or ordinary process shutdown/signal handling.
 
-`CompileFull` extracts these declarations alongside rules and segments. In the current codebase, this is the language and compile surface for the always-on modality; transport adapters, persistence wiring, and chained delivery sit one runtime layer above it.
+`CompileFull` still extracts these declarations alongside rules and segments. In the current codebase, the language surface plus `workflow` cover chained orchestration, while transport adapters for webhook/slack/exec/grpc/audit remain one runtime layer above that.
 
 ### Explainability
 
@@ -353,6 +402,45 @@ When `include` is involved, file-backed commands report diagnostics against the 
 rules/segments.arb:14:1: rule EnterpriseDecision: rollout must be between 0 and 100
 ```
 
+### Go Library — HTTP Middleware
+
+You can embed governed rule evaluation directly into an existing `net/http` service. The middleware evaluates once per request, stores the result on the request context, and lets the next handler decide how to act on it.
+
+```go
+compiled, err := arbiter.CompileFullFile("rules.arb")
+if err != nil {
+	log.Fatal(err)
+}
+
+handler := arbiter.Middleware(compiled, func(r *http.Request) (map[string]any, error) {
+	return map[string]any{
+		"request": map[string]any{
+			"method": r.Method,
+		},
+		"user": map[string]any{
+			"role": r.Header.Get("X-Role"),
+		},
+	}, nil
+}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	decision, ok := arbiter.DecisionFromRequest(r)
+	if !ok {
+		http.Error(w, "missing arbiter decision", http.StatusInternalServerError)
+		return
+	}
+	for _, match := range decision.Matched {
+		if match.Action == "Deny" {
+			http.Error(w, "blocked by policy", http.StatusForbidden)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusNoContent)
+}))
+```
+
+If you do not want to hand-build the request context, pass `nil` and use `arbiter.DefaultHTTPContext`. It exposes request metadata under `request.method`, `request.path`, `request.host`, `request.headers`, and `request.query`. Header and query keys are normalized for `.arb` access, so `X-Debug` becomes `request.headers.x_debug` and `dry-run=true` becomes `request.query.dry_run == true`.
+
+For stricter production behavior, use `arbiter.MiddlewareWithOptions` to supply custom request-context builders and custom handlers for context-build failures or evaluation failures.
+
 ### Go Library — Stateless Rules
 
 ```go
@@ -409,6 +497,19 @@ for _, outcome := range result.Outcomes {
     fmt.Printf("%s → %s %v\n", outcome.Rule, outcome.Name, outcome.Params)
 }
 fmt.Printf("quiesced in %d rounds, %d mutations\n", result.Rounds, result.Mutations)
+```
+
+Long-lived sessions can sync authoritative source snapshots and inject a deterministic clock:
+
+```go
+session := expert.NewSession(program, envelope, nil, expert.Options{
+    Now: func() time.Time { return fixedNow },
+})
+
+summary, _ := session.SyncFacts([]expert.Fact{
+    {Type: "Lead", Key: "a", Fields: map[string]any{"score": 95.0}},
+})
+fmt.Printf("added=%d updated=%d retracted=%d\n", summary.Added, summary.Updated, summary.Retracted)
 ```
 
 For multi-file expert programs:

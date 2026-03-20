@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/odvcencio/arbiter/compiler"
 	"github.com/odvcencio/arbiter/govern"
@@ -20,6 +21,7 @@ type Fact struct {
 	Fields        map[string]any `json:"fields,omitempty"`
 	DerivedBy     []string       `json:"derived_by,omitempty"`
 	AssertedRound int            `json:"asserted_round,omitempty"`
+	AssertedAt    int64          `json:"asserted_at,omitempty"`
 }
 
 // Outcome is one emitted expert outcome.
@@ -56,6 +58,7 @@ type Options struct {
 	MaxMutations int
 	BundleID     string
 	Overrides    overrides.View
+	Now          func() time.Time
 }
 
 // Result is the final state of an expert session run.
@@ -66,6 +69,14 @@ type Result struct {
 	Rounds      int          `json:"rounds"`
 	Mutations   int          `json:"mutations"`
 	StopReason  StopReason   `json:"stop_reason"`
+}
+
+// SyncSummary describes one external-fact synchronization pass.
+type SyncSummary struct {
+	Added     int  `json:"added"`
+	Updated   int  `json:"updated"`
+	Retracted int  `json:"retracted"`
+	Changed   bool `json:"changed"`
 }
 
 // Checkpoint marks a session position so callers can request a later delta.
@@ -133,6 +144,8 @@ type Session struct {
 	pool               *vm.StringPool
 	dc                 vm.DataContext
 	evaluator          *vm.Evaluator
+	now                func() time.Time
+	evalNow            int64
 }
 
 // NewSession creates a new in-memory expert session.
@@ -160,6 +173,10 @@ func NewSession(p *Program, envelope map[string]any, facts []Fact, opts Options)
 		factRetracts:   make(map[string]map[string]map[string]retractRecord),
 		modifiesByRule: make(map[string]map[string]modifyRecord),
 		factModifies:   make(map[string]map[string]map[string]modifyRecord),
+	}
+	s.now = opts.Now
+	if s.now == nil {
+		s.now = time.Now
 	}
 	s.initEvalState()
 	for _, fact := range facts {
@@ -203,6 +220,90 @@ func (s *Session) Retract(factType, factKey string) error {
 		delete(s.externalFacts, factType)
 	}
 	s.recomputeFact(factType, factKey, "")
+	return nil
+}
+
+// SyncFacts makes the session's external facts match the provided snapshot.
+// New or changed facts are asserted, and previously external facts missing from
+// the snapshot are retracted.
+func (s *Session) SyncFacts(facts []Fact) (SyncSummary, error) {
+	if s == nil {
+		return SyncSummary{}, fmt.Errorf("nil session")
+	}
+
+	incoming, err := normalizeSyncFacts(facts)
+	if err != nil {
+		return SyncSummary{}, err
+	}
+	summary, err := s.applyIncomingSyncFacts(incoming)
+	if err != nil {
+		return SyncSummary{}, err
+	}
+	if err := s.retractMissingSyncFacts(incoming, &summary); err != nil {
+		return SyncSummary{}, err
+	}
+	return summary, nil
+}
+
+func normalizeSyncFacts(facts []Fact) (map[string]map[string]Fact, error) {
+	incoming := make(map[string]map[string]Fact, len(facts))
+	for _, fact := range facts {
+		if fact.Type == "" {
+			return nil, fmt.Errorf("fact type is required")
+		}
+		if fact.Key == "" {
+			return nil, fmt.Errorf("fact key is required")
+		}
+		byKey, ok := incoming[fact.Type]
+		if !ok {
+			byKey = make(map[string]Fact)
+			incoming[fact.Type] = byKey
+		}
+		if _, exists := byKey[fact.Key]; exists {
+			return nil, fmt.Errorf("duplicate fact %s/%s in sync input", fact.Type, fact.Key)
+		}
+		byKey[fact.Key] = cloneFact(fact)
+	}
+	return incoming, nil
+}
+
+func (s *Session) applyIncomingSyncFacts(incoming map[string]map[string]Fact) (SyncSummary, error) {
+	var summary SyncSummary
+	for factType, byKey := range incoming {
+		currentByKey := s.externalFacts[factType]
+		for factKey, fact := range byKey {
+			current, exists := currentByKey[factKey]
+			changed, err := s.upsertExternalFact(fact)
+			if err != nil {
+				return SyncSummary{}, err
+			}
+			switch {
+			case !exists:
+				summary.Added++
+				summary.Changed = true
+			case changed || stableKey(current.Fields) != stableKey(fact.Fields):
+				summary.Updated++
+				summary.Changed = true
+			}
+		}
+	}
+	return summary, nil
+}
+
+func (s *Session) retractMissingSyncFacts(incoming map[string]map[string]Fact, summary *SyncSummary) error {
+	for factType, byKey := range s.externalFacts {
+		nextByKey := incoming[factType]
+		for factKey := range byKey {
+			if _, ok := nextByKey[factKey]; ok {
+				continue
+			}
+			if err := s.Retract(factType, factKey); err != nil {
+				return err
+			}
+			summary.Retracted++
+			summary.Changed = true
+		}
+	}
 	return nil
 }
 
@@ -270,7 +371,10 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 		s.stopReason = StopQuiescent
 		return s.snapshot(), nil
 	}
-	if s.rounds > 0 && s.stopReason == StopQuiescent && len(s.dirtyFacts) == 0 {
+	nextNow := s.currentUnix()
+	forceFullEval := nextNow != s.evalNow
+	s.evalNow = nextNow
+	if s.rounds > 0 && s.stopReason == StopQuiescent && len(s.dirtyFacts) == 0 && !forceFullEval {
 		return s.snapshot(), nil
 	}
 
@@ -284,7 +388,7 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 		forceStableRound := s.stablePending && s.rounds > 1 && s.lastRoundMutations == 0
 		firedGroups := make(map[string]struct{})
 
-		firstPass := s.rounds == 1
+		firstPass := s.rounds == 1 || (forceFullEval && round == 1)
 		dirtyFacts := s.copyDirtyFacts()
 		dirtySources := s.copyDirtySources()
 		s.clearDirtyFacts()
@@ -560,6 +664,10 @@ func (s *Session) upsertExternalFact(f Fact) (bool, error) {
 		Key:           f.Key,
 		Fields:        cloneMap(f.Fields),
 		AssertedRound: s.rounds,
+		AssertedAt:    f.AssertedAt,
+	}
+	if next.AssertedAt == 0 {
+		next.AssertedAt = s.currentUnix()
 	}
 	if current, ok := byKey[f.Key]; ok && stableKey(current.Fields) == stableKey(next.Fields) {
 		return false, nil
@@ -571,6 +679,9 @@ func (s *Session) upsertExternalFact(f Fact) (bool, error) {
 
 func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
 	fact.AssertedRound = s.rounds
+	if fact.AssertedAt == 0 {
+		fact.AssertedAt = s.evalNow
+	}
 	instance := mutationInstanceKey(rule.Name, fact.Key)
 	next := supportRecord{
 		Instance: instance,
@@ -581,6 +692,7 @@ func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
 			Key:           fact.Key,
 			Fields:        cloneMap(fact.Fields),
 			AssertedRound: fact.AssertedRound,
+			AssertedAt:    fact.AssertedAt,
 		},
 	}
 
@@ -588,6 +700,10 @@ func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
 	prev, hadPrev := byInstance[instance]
 	changed := false
 	sameFact := hadPrev && prev.Fact.Type == next.Fact.Type && prev.Fact.Key == next.Fact.Key
+	if hadPrev && sameFact && stableKey(prev.Fact.Fields) == stableKey(next.Fact.Fields) {
+		next.Fact.AssertedRound = prev.Fact.AssertedRound
+		next.Fact.AssertedAt = prev.Fact.AssertedAt
+	}
 	if hadPrev {
 		s.removeSupportRecord(prev)
 		if !sameFact {
@@ -670,6 +786,7 @@ func (s *Session) recomputeFact(factType, factKey, source string) bool {
 	if currentOK && stableKey(current.Fields) == stableKey(next.Fields) {
 		if !sameStrings(current.DerivedBy, next.DerivedBy) {
 			next.AssertedRound = current.AssertedRound
+			next.AssertedAt = current.AssertedAt
 			byKey := s.facts[factType]
 			byKey[factKey] = next
 		}
@@ -841,7 +958,7 @@ func (s *Session) evalContextIgnoringOwnMutation(rule Rule) (map[string]any, vm.
 		}
 		items := make([]any, 0, len(replaced))
 		for _, fact := range replaced {
-			items = append(items, factEvalFields(fact))
+			items = append(items, factEvalFields(fact, s.evalNow))
 		}
 		factsView[factType] = items
 	}
@@ -1178,13 +1295,7 @@ func (s *Session) buildSingleFactContext(factType string, fact Fact) map[string]
 		newFacts[k] = v
 	}
 	// Replace this fact type with a single-element list
-	fields := make(map[string]any, len(fact.Fields)+2)
-	fields["key"] = fact.Key
-	fields["type"] = fact.Type
-	for k, v := range fact.Fields {
-		fields[k] = v
-	}
-	newFacts[factType] = []any{fields}
+	newFacts[factType] = []any{factEvalFields(fact, s.evalNow)}
 	ctx["facts"] = newFacts
 	return ctx
 }
@@ -1391,6 +1502,10 @@ func (s *Session) initEvalState() {
 	s.factsView = make(map[string]any)
 	s.evalCtx["facts"] = s.factsView
 	s.evalCtx["current_round"] = float64(s.rounds)
+	if s.evalNow == 0 {
+		s.evalNow = s.currentUnix()
+	}
+	s.evalCtx["__now"] = float64(s.evalNow)
 	if s.program == nil || s.program.ruleset == nil {
 		return
 	}
@@ -1404,6 +1519,7 @@ func (s *Session) refreshContextView(firstPass bool, dirtyFacts map[string]struc
 		s.initEvalState()
 	}
 	s.evalCtx["current_round"] = float64(s.rounds)
+	s.evalCtx["__now"] = float64(s.evalNow)
 	if firstPass {
 		dirtyFacts = make(map[string]struct{}, len(s.facts))
 		for factType := range s.facts {
@@ -1418,7 +1534,7 @@ func (s *Session) refreshContextView(firstPass bool, dirtyFacts map[string]struc
 		}
 		items := make([]any, 0, len(byKey))
 		for _, fact := range byKey {
-			items = append(items, factEvalFields(fact))
+			items = append(items, factEvalFields(fact, s.evalNow))
 		}
 		s.factsView[factType] = items
 	}
@@ -1447,6 +1563,7 @@ func (s *Session) sortedFacts() []Fact {
 				Fields:        cloneMap(fact.Fields),
 				DerivedBy:     append([]string(nil), fact.DerivedBy...),
 				AssertedRound: fact.AssertedRound,
+				AssertedAt:    fact.AssertedAt,
 			})
 		}
 	}
@@ -1511,16 +1628,32 @@ func cloneFact(src Fact) Fact {
 		Fields:        cloneMap(src.Fields),
 		DerivedBy:     append([]string(nil), src.DerivedBy...),
 		AssertedRound: src.AssertedRound,
+		AssertedAt:    src.AssertedAt,
 	}
 }
 
-func factEvalFields(fact Fact) map[string]any {
+func factEvalFields(fact Fact, now int64) map[string]any {
 	fields := cloneMap(fact.Fields)
 	if fields == nil {
-		fields = make(map[string]any, 1)
+		fields = make(map[string]any, 5)
 	}
+	fields["key"] = fact.Key
+	fields["type"] = fact.Type
 	fields["__round"] = float64(fact.AssertedRound)
+	fields["__asserted_at"] = float64(fact.AssertedAt)
+	if fact.AssertedAt > 0 && now >= fact.AssertedAt {
+		fields["__age_seconds"] = float64(now - fact.AssertedAt)
+	} else {
+		fields["__age_seconds"] = float64(0)
+	}
 	return fields
+}
+
+func (s *Session) currentUnix() int64 {
+	if s == nil || s.now == nil {
+		return time.Now().UTC().Unix()
+	}
+	return s.now().UTC().Unix()
 }
 
 func sortedModifications(records map[string]modifyRecord, ruleName string, kind ActionKind) []modifyRecord {

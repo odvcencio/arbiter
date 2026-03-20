@@ -10,6 +10,7 @@ import (
 
 func init() {
 	Register(".jsonl", LoaderFunc(loadJSONL))
+	RegisterSaver(".jsonl", SaverFunc(saveJSONL))
 }
 
 // loadJSONL reads a JSON Lines file — one JSON object per line.
@@ -56,4 +57,20 @@ func loadJSONL(path string) ([]Fact, error) {
 	}
 
 	return facts, nil
+}
+
+func saveJSONL(path string, facts []Fact) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("jsonl: %w", err)
+	}
+	defer f.Close()
+
+	enc := json.NewEncoder(f)
+	for _, obj := range factsToObjects(facts) {
+		if err := enc.Encode(obj); err != nil {
+			return fmt.Errorf("jsonl encode: %w", err)
+		}
+	}
+	return nil
 }

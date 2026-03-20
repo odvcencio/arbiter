@@ -13,6 +13,32 @@
 - **Command dispatch cleanup** — `cmd/arbiter/main.go` now routes through per-command handlers instead of one monolithic switch body, keeping the dispatcher readable as the CLI surface grows.
 - **Command-layer tests** — new tests cover diff output, replay from audit JSONL, key-path context naming, and param normalization at the release surface rather than only at helper level.
 
+### HTTP Embedding
+
+- **`arbiter.Middleware`** — Go services can now evaluate governed rules directly in `net/http` without a sidecar, with the decision injected into the request context for downstream handlers.
+- **Production hooks** — `MiddlewareWithOptions` adds explicit request-context builders plus custom build/eval error handlers, so teams can fail closed, fail open, or map errors into their own response format.
+- **Default request context** — `DefaultHTTPContext` exposes normalized request metadata under `request.{method,path,host,headers,query,...}` with header/query key normalization and scalar coercion for the zero-friction path.
+
+### Temporal Windows
+
+- **Wall-clock metadata for facts** — expert facts now carry `asserted_at`, and evaluation contexts expose `__now`, `fact.__asserted_at`, and `fact.__age_seconds` alongside the existing round metadata.
+- **Clock-injected sessions** — `expert.Options.Now` lets tests and production runtimes control the session clock explicitly instead of hard-coding `time.Now()`.
+- **Time wakes quiescent sessions** — a later clock tick now counts as work for expert evaluation, so a long-lived session can emit age-based outcomes without requiring an unrelated fact mutation to wake it up.
+
+### Bidirectional Fact Sync
+
+- **`Session.SyncFacts`** — long-lived expert sessions can now ingest authoritative source snapshots in one call, asserting new facts, updating changed facts, and retracting disappeared external facts with a concrete sync summary.
+- **Write-capable factsource registry** — `expert/factsource` now supports `Save(...)` alongside `Load(...)`, with registered savers for `.csv`, `.json`, `.jsonl`, `gsheet://...`, and `postgres://...`.
+- **Google Sheets full replacement writes** — Sheets save paths now clear stale rows before update and require OAuth/service-account auth for writes instead of silently attempting API-key writes that cannot succeed.
+- **Transactional Postgres fact sources** — `expert/factsource` now supports `postgres://...` and `postgresql://...` with validated table/column config, row-version loading, serializable writes, and explicit `mode=replace|merge` behavior for authoritative snapshots versus non-destructive upserts.
+- **Terraform/HCL fact sources** — `.tf`, `.tfvars`, `.hcl`, and `terraform://...` now load infrastructure definitions as facts using gotreesitter's embedded HCL grammar. Terraform directories are merged deterministically, resources are exposed both as generic `Resource` facts and typed facts like `aws_s3_bucket`, and `terraform://...json` targets ingest `terraform show -json` plans as `Resource` plus `ResourceChange` facts keyed by address.
+
+### Multi-Arbiter Workflows
+
+- **`workflow` runtime package** — chained arbiter declarations now have a real execution layer: compile once, keep one long-lived expert session per arbiter, sync external sources, and run the graph in topological order.
+- **Delta-based chaining** — `on Outcome chain target` now forwards only newly emitted upstream outcomes into downstream `source chain://upstream` inputs, which keeps chained arbiters event-driven instead of replaying the entire upstream history on every pass.
+- **Runtime validation** — workflow compilation now rejects unknown chain endpoints, mismatched `chain` handlers versus `source chain://...` declarations, runtime writes to `chain://...` sources, and cyclic arbiter graphs.
+
 ---
 
 ## v0.4.1

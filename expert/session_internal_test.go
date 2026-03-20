@@ -2,7 +2,9 @@ package expert
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	arbiter "github.com/odvcencio/arbiter"
 )
@@ -102,6 +104,167 @@ expert rule CheckAge {
 	}
 	if result.Facts[0].AssertedRound != 1 {
 		t.Fatalf("expected asserted round 1, got %+v", result.Facts[0])
+	}
+	if result.Facts[0].AssertedAt == 0 {
+		t.Fatalf("expected asserted_at to be populated, got %+v", result.Facts[0])
+	}
+}
+
+func TestTemporalWindowsWakeOnClockAdvance(t *testing.T) {
+	program, err := Compile([]byte(`
+expert rule SeedMarker {
+	when { input.go == true }
+	then assert Marker {
+		key: "marker-1",
+		level: "high",
+	}
+}
+
+expert rule CheckAge {
+	when {
+		any marker in facts.Marker {
+			marker.__age_seconds >= 60
+		}
+	}
+	then emit Aged {
+		age_seconds: marker.__age_seconds,
+		now: __now,
+		asserted_at: marker.__asserted_at,
+	}
+}
+`))
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	now := time.Unix(1_000, 0).UTC()
+	session := NewSession(program, map[string]any{
+		"input": map[string]any{"go": true},
+	}, nil, Options{
+		Now: func() time.Time { return now },
+	})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if len(first.Outcomes) != 0 {
+		t.Fatalf("expected no aged outcome on first run, got %+v", first.Outcomes)
+	}
+	if len(first.Facts) != 1 {
+		t.Fatalf("expected one fact on first run, got %+v", first.Facts)
+	}
+	if first.Facts[0].AssertedAt != 1_000 {
+		t.Fatalf("expected asserted_at 1000, got %+v", first.Facts[0])
+	}
+
+	now = time.Unix(1_070, 0).UTC()
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if len(second.Outcomes) != 1 || second.Outcomes[0].Name != "Aged" {
+		t.Fatalf("expected one aged outcome after clock advance, got %+v", second.Outcomes)
+	}
+	if got := second.Outcomes[0].Params["age_seconds"]; got != float64(70) {
+		t.Fatalf("expected age_seconds 70, got %#v", got)
+	}
+	if got := second.Outcomes[0].Params["now"]; got != float64(1070) {
+		t.Fatalf("expected __now 1070, got %#v", got)
+	}
+	if got := second.Outcomes[0].Params["asserted_at"]; got != float64(1000) {
+		t.Fatalf("expected asserted_at 1000, got %#v", got)
+	}
+}
+
+func TestSyncFactsAddsUpdatesAndRetractsExternalFacts(t *testing.T) {
+	program, err := Compile([]byte(`
+expert rule FlagHighScore {
+	when {
+		any lead in facts.Lead {
+			lead.score >= 90
+		}
+	}
+	then assert QualifiedLead {
+		key: lead.key,
+		score: lead.score,
+	}
+}
+`))
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := NewSession(program, nil, nil, Options{})
+	first, err := session.SyncFacts([]Fact{{
+		Type: "Lead",
+		Key:  "a",
+		Fields: map[string]any{
+			"score": float64(95),
+		},
+	}})
+	if err != nil {
+		t.Fatalf("first SyncFacts: %v", err)
+	}
+	if first.Added != 1 || first.Updated != 0 || first.Retracted != 0 || !first.Changed {
+		t.Fatalf("unexpected first sync summary: %+v", first)
+	}
+
+	result, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run after first sync: %v", err)
+	}
+	if len(result.Facts) != 2 {
+		t.Fatalf("expected lead and qualified lead after first sync, got %+v", result.Facts)
+	}
+
+	second, err := session.SyncFacts([]Fact{{
+		Type: "Lead",
+		Key:  "a",
+		Fields: map[string]any{
+			"score": float64(80),
+		},
+	}})
+	if err != nil {
+		t.Fatalf("second SyncFacts: %v", err)
+	}
+	if second.Added != 0 || second.Updated != 1 || second.Retracted != 0 || !second.Changed {
+		t.Fatalf("unexpected second sync summary: %+v", second)
+	}
+
+	result, err = session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run after second sync: %v", err)
+	}
+	if len(result.Facts) != 1 || result.Facts[0].Type != "Lead" {
+		t.Fatalf("expected only updated lead after lowering score, got %+v", result.Facts)
+	}
+
+	third, err := session.SyncFacts(nil)
+	if err != nil {
+		t.Fatalf("third SyncFacts: %v", err)
+	}
+	if third.Added != 0 || third.Updated != 0 || third.Retracted != 1 || !third.Changed {
+		t.Fatalf("unexpected third sync summary: %+v", third)
+	}
+
+	result, err = session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run after retract sync: %v", err)
+	}
+	if len(result.Facts) != 0 {
+		t.Fatalf("expected no facts after retract sync, got %+v", result.Facts)
+	}
+}
+
+func TestSyncFactsRejectsDuplicateInput(t *testing.T) {
+	session := NewSession(&Program{}, nil, nil, Options{})
+	_, err := session.SyncFacts([]Fact{
+		{Type: "Lead", Key: "dup"},
+		{Type: "Lead", Key: "dup"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate fact Lead/dup") {
+		t.Fatalf("expected duplicate fact error, got %v", err)
 	}
 }
 

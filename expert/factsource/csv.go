@@ -8,6 +8,7 @@ import (
 
 func init() {
 	Register(".csv", LoaderFunc(loadCSV))
+	RegisterSaver(".csv", SaverFunc(saveCSV))
 }
 
 // loadCSV reads a CSV file where:
@@ -34,4 +35,22 @@ func loadCSV(path string) ([]Fact, error) {
 		return nil, fmt.Errorf("csv parse: %w", err)
 	}
 	return factsFromRows("csv", records)
+}
+
+func saveCSV(path string, facts []Fact) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("csv: %w", err)
+	}
+	defer f.Close()
+
+	writer := csv.NewWriter(f)
+	if err := writer.WriteAll(factsToRows(facts)); err != nil {
+		return fmt.Errorf("csv write: %w", err)
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return fmt.Errorf("csv flush: %w", err)
+	}
+	return nil
 }
