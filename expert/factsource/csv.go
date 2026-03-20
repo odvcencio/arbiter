@@ -69,6 +69,7 @@ func loadCSV(path string) ([]Fact, error) {
 		}
 
 		fields := make(map[string]any)
+		fields["key"] = key // always include key in fields for rule access
 		for i, val := range row {
 			if i == typeCol || i == keyCol || i >= len(headers) {
 				continue

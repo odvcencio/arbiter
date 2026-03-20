@@ -35,6 +35,7 @@ type Rule struct {
 	FactDeps []string
 	NoLoop   bool
 	Stable   bool
+	PerFact  bool
 	Group    string
 }
 
@@ -181,6 +182,7 @@ func parseExpertRule(n *gotreesitter.Node, source []byte, lang *gotreesitter.Lan
 	}
 	rule.NoLoop = n.ChildByFieldName("no_loop", lang) != nil
 	rule.Stable = n.ChildByFieldName("stable", lang) != nil
+	rule.PerFact = n.ChildByFieldName("per_fact", lang) != nil
 	if groupNode := n.ChildByFieldName("activation_group", lang); groupNode != nil {
 		if nameNode := groupNode.ChildByFieldName("name", lang); nameNode != nil {
 			rule.Group = nodeText(nameNode, source)

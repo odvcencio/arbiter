@@ -203,6 +203,7 @@ func ArbiterGrammar() *Grammar {
 		Str("rule"),
 		Field("name", Sym("identifier")),
 		Optional(Seq(Str("priority"), Field("priority", Sym("number_literal")))),
+		Optional(Field("per_fact", Sym("per_fact"))),
 		Str("{"),
 		Optional(Field("kill_switch", Sym("kill_switch"))),
 		Optional(Field("no_loop", Sym("no_loop"))),
@@ -305,6 +306,7 @@ func ArbiterGrammar() *Grammar {
 
 	g.Define("no_loop", Str("no_loop"))
 	g.Define("stable", Str("stable"))
+	g.Define("per_fact", Str("per_fact"))
 
 	g.Define("expert_activation_group", Seq(
 		Str("activation_group"),

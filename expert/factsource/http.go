@@ -45,9 +45,10 @@ func loadHTTP(url string) ([]Fact, error) {
 		if typ == "" || key == "" {
 			continue
 		}
-		fields := make(map[string]any, len(obj)-2)
+		fields := make(map[string]any, len(obj)-1)
+		fields["key"] = key
 		for k, v := range obj {
-			if k != "type" && k != "key" {
+			if k != "type" {
 				fields[k] = v
 			}
 		}

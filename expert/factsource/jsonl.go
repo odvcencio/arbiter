@@ -43,9 +43,10 @@ func loadJSONL(path string) ([]Fact, error) {
 			continue
 		}
 
-		fields := make(map[string]any, len(obj)-2)
+		fields := make(map[string]any, len(obj)-1)
+		fields["key"] = key
 		for k, v := range obj {
-			if k == "type" || k == "key" {
+			if k == "type" {
 				continue
 			}
 			fields[k] = v

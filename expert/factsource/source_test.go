@@ -1,6 +1,8 @@
 package factsource
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,6 +32,9 @@ DMSent,sarah@co.com,,PayCo,4,true
 	}
 	if facts[0].Fields["title"] != "Head of Fraud" {
 		t.Errorf("title = %v", facts[0].Fields["title"])
+	}
+	if facts[0].Fields["key"] != "sarah@co.com" {
+		t.Errorf("key = %v", facts[0].Fields["key"])
 	}
 
 	// Check coercion
@@ -65,6 +70,9 @@ func TestJSON(t *testing.T) {
 	if facts[0].Fields["score"] != float64(95) {
 		t.Errorf("score = %v", facts[0].Fields["score"])
 	}
+	if facts[0].Fields["key"] != "a@b.com" {
+		t.Errorf("key = %v", facts[0].Fields["key"])
+	}
 }
 
 func TestJSONL(t *testing.T) {
@@ -85,6 +93,23 @@ func TestJSONL(t *testing.T) {
 	if facts[1].Fields["name"] != "Bob" {
 		t.Errorf("name = %v", facts[1].Fields["name"])
 	}
+	if facts[1].Fields["key"] != "c@d.com" {
+		t.Errorf("key = %v", facts[1].Fields["key"])
+	}
+}
+
+func TestHTTP(t *testing.T) {
+	server := newFactSourceTestServer(t, `[{"type":"Lead","key":"a@b.com","name":"Alice"}]`)
+	facts, err := Load(server.URL)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("got %d, want 1", len(facts))
+	}
+	if facts[0].Fields["key"] != "a@b.com" {
+		t.Errorf("key = %v", facts[0].Fields["key"])
+	}
 }
 
 func TestUnknownExtension(t *testing.T) {
@@ -92,4 +117,11 @@ func TestUnknownExtension(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unregistered extension")
 	}
+}
+
+func newFactSourceTestServer(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
 }

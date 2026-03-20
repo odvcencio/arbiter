@@ -469,10 +469,15 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 			}
 			iter := vm.iters[len(vm.iters)-1]
 			vm.iters = vm.iters[:len(vm.iters)-1]
-			if iter.hadPrev {
-				vm.locals[iter.varName] = iter.prev
-			} else {
-				delete(vm.locals, iter.varName)
+			// If the quantifier matched, keep the last-bound value in locals
+			// so action param expressions can reference the matched item.
+			// Only restore/delete on non-match.
+			if !iter.result {
+				if iter.hadPrev {
+					vm.locals[iter.varName] = iter.prev
+				} else {
+					delete(vm.locals, iter.varName)
+				}
 			}
 			vm.push(BoolVal(iter.result))
 
