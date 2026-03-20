@@ -1,6 +1,6 @@
 [package]
 name = "arbiter-sdk"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "Thin Rust gRPC client for Arbiter"
 license = "MIT"
