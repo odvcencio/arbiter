@@ -113,6 +113,30 @@ rule BadRollout {
 	}
 }
 
+func TestCompileFullFileMapsArbiterSemanticErrorsToIncludedFiles(t *testing.T) {
+	dir := t.TempDir()
+	bad := writeTestFile(t, dir, "bad.arb", `
+arbiter Broken {
+	poll 30s
+	checkpoint /tmp/one
+	checkpoint /tmp/two
+	on * stdout
+}
+`)
+	main := writeTestFile(t, dir, "main.arb", `include "bad.arb"`)
+
+	_, err := CompileFullFile(main)
+	if err == nil {
+		t.Fatal("expected compile error")
+	}
+	if got := err.Error(); !strings.Contains(got, bad+":2:1:") {
+		t.Fatalf("expected included file diagnostic, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "arbiter Broken: checkpoint may only be declared once") {
+		t.Fatalf("unexpected compile error: %v", err)
+	}
+}
+
 func TestCompileFileMapsParseErrorsToIncludedFiles(t *testing.T) {
 	dir := t.TempDir()
 	bad := writeTestFile(t, dir, "bad.arb", `

@@ -15,10 +15,11 @@ import (
 
 // Fact is one working-memory fact.
 type Fact struct {
-	Type      string         `json:"type"`
-	Key       string         `json:"key"`
-	Fields    map[string]any `json:"fields,omitempty"`
-	DerivedBy []string       `json:"derived_by,omitempty"`
+	Type          string         `json:"type"`
+	Key           string         `json:"key"`
+	Fields        map[string]any `json:"fields,omitempty"`
+	DerivedBy     []string       `json:"derived_by,omitempty"`
+	AssertedRound int            `json:"asserted_round,omitempty"`
 }
 
 // Outcome is one emitted expert outcome.
@@ -96,31 +97,33 @@ type modifyRecord struct {
 
 // Session runs an expert program against an envelope and working memory.
 type Session struct {
-	program        *Program
-	envelope       map[string]any
-	facts          map[string]map[string]Fact
-	externalFacts  map[string]map[string]Fact
-	outcomes       []Outcome
-	activations    []Activation
-	emitted        map[string]struct{}
-	opts           Options
-	mutations      int
-	rounds         int
-	stopReason     StopReason
-	ruleResults    map[string]bool
-	dirtyFacts     map[string]struct{}
-	dirtySources   map[string]map[string]struct{}
-	supportsByRule map[string]supportRecord
-	factSupports   map[string]map[string]map[string]supportRecord
-	retractsByRule map[string]retractRecord
-	factRetracts   map[string]map[string]map[string]retractRecord
-	modifiesByRule map[string]modifyRecord
-	factModifies   map[string]map[string]map[string]modifyRecord
-	evalCtx        map[string]any
-	factsView      map[string]any
-	pool           *vm.StringPool
-	dc             vm.DataContext
-	evaluator      *vm.Evaluator
+	program            *Program
+	envelope           map[string]any
+	facts              map[string]map[string]Fact
+	externalFacts      map[string]map[string]Fact
+	outcomes           []Outcome
+	activations        []Activation
+	emitted            map[string]struct{}
+	opts               Options
+	mutations          int
+	rounds             int
+	stopReason         StopReason
+	ruleResults        map[string]bool
+	dirtyFacts         map[string]struct{}
+	dirtySources       map[string]map[string]struct{}
+	lastRoundMutations int
+	stablePending      bool
+	supportsByRule     map[string]supportRecord
+	factSupports       map[string]map[string]map[string]supportRecord
+	retractsByRule     map[string]retractRecord
+	factRetracts       map[string]map[string]map[string]retractRecord
+	modifiesByRule     map[string]modifyRecord
+	factModifies       map[string]map[string]map[string]modifyRecord
+	evalCtx            map[string]any
+	factsView          map[string]any
+	pool               *vm.StringPool
+	dc                 vm.DataContext
+	evaluator          *vm.Evaluator
 }
 
 // NewSession creates a new in-memory expert session.
@@ -268,13 +271,15 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 			return s.snapshot(), err
 		}
 		s.rounds++
+		roundMutationsStart := s.mutations
+		forceStableRound := s.stablePending && s.rounds > 1 && s.lastRoundMutations == 0
 		firedGroups := make(map[string]struct{})
 
 		firstPass := s.rounds == 1
 		dirtyFacts := s.copyDirtyFacts()
 		dirtySources := s.copyDirtySources()
 		s.clearDirtyFacts()
-		matched, ruleChanges, evaluated, err := s.runRound(firstPass, dirtyFacts, dirtySources)
+		matched, ruleChanges, evaluated, stableDeferred, err := s.runRound(firstPass, dirtyFacts, dirtySources)
 		if err != nil {
 			return Result{}, err
 		}
@@ -367,7 +372,16 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 			}
 		}
 
+		s.lastRoundMutations = s.mutations - roundMutationsStart
+
 		if !mutated {
+			if stableDeferred {
+				s.lastRoundMutations = s.mutations - roundMutationsStart
+				continue
+			}
+			if forceStableRound {
+				s.stablePending = false
+			}
 			s.stopReason = StopQuiescent
 			return s.snapshot(), nil
 		}
@@ -520,9 +534,10 @@ func (s *Session) upsertExternalFact(f Fact) (bool, error) {
 	}
 
 	next := Fact{
-		Type:   f.Type,
-		Key:    f.Key,
-		Fields: cloneMap(f.Fields),
+		Type:          f.Type,
+		Key:           f.Key,
+		Fields:        cloneMap(f.Fields),
+		AssertedRound: s.rounds,
 	}
 	if current, ok := byKey[f.Key]; ok && stableKey(current.Fields) == stableKey(next.Fields) {
 		return false, nil
@@ -533,13 +548,15 @@ func (s *Session) upsertExternalFact(f Fact) (bool, error) {
 }
 
 func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
+	fact.AssertedRound = s.rounds
 	next := supportRecord{
 		Rule:     rule.Name,
 		Priority: rule.Priority,
 		Fact: Fact{
-			Type:   fact.Type,
-			Key:    fact.Key,
-			Fields: cloneMap(fact.Fields),
+			Type:          fact.Type,
+			Key:           fact.Key,
+			Fields:        cloneMap(fact.Fields),
+			AssertedRound: fact.AssertedRound,
 		},
 	}
 
@@ -614,6 +631,7 @@ func (s *Session) recomputeFact(factType, factKey, source string) bool {
 
 	if currentOK && stableKey(current.Fields) == stableKey(next.Fields) {
 		if !sameStrings(current.DerivedBy, next.DerivedBy) {
+			next.AssertedRound = current.AssertedRound
 			byKey := s.facts[factType]
 			byKey[factKey] = next
 		}
@@ -790,7 +808,7 @@ func (s *Session) evalContextIgnoringOwnMutation(rule Rule) (map[string]any, vm.
 	} else {
 		items := make([]any, 0, len(replaced))
 		for _, fact := range replaced {
-			items = append(items, fact.Fields)
+			items = append(items, factEvalFields(fact))
 		}
 		factsView[factType] = items
 	}
@@ -919,7 +937,7 @@ func (s *Session) removeModification(record modifyRecord) {
 	}
 }
 
-func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}) ([]vm.MatchedRule, map[string]struct{}, map[string]struct{}, error) {
+func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}) ([]vm.MatchedRule, map[string]struct{}, map[string]struct{}, bool, error) {
 	s.refreshContextView(firstPass, dirtyFacts)
 	rc := govern.NewRequestCache(s.program.segments, s.evalCtx)
 	for name, matched := range s.ruleResults {
@@ -933,11 +951,21 @@ func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirty
 	ruleChanges := make(map[string]struct{})
 	matched := make([]vm.MatchedRule, 0)
 	evaluated := make(map[string]struct{})
+	stableDeferred := s.stablePending && s.lastRoundMutations > 0
+	forceStableRound := s.stablePending && s.rounds > 1 && s.lastRoundMutations == 0
 
 	for i, header := range s.program.ruleset.Rules {
 		rule := s.program.rules[i]
 		shouldEval := firstPass || s.shouldEvaluate(rule, dirtyFacts, dirtySources, ruleChanges)
+		if rule.Stable && forceStableRound {
+			shouldEval = true
+		}
 		if !shouldEval {
+			continue
+		}
+		if rule.Stable && (s.rounds == 1 || s.lastRoundMutations > 0) {
+			s.stablePending = true
+			stableDeferred = true
 			continue
 		}
 		evaluated[rule.Name] = struct{}{}
@@ -946,7 +974,7 @@ func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirty
 		ruleRC := rc
 		tempCtx, tempDC, ok, err := s.evalContextIgnoringOwnMutation(rule)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, false, err
 		}
 		if ok {
 			dc = tempDC
@@ -958,7 +986,7 @@ func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirty
 
 		result, mr, err := s.evalRule(rule, header, s.evaluator, dc, ruleRC)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, false, err
 		}
 		prev := current[rule.Name]
 		current[rule.Name] = result
@@ -972,7 +1000,7 @@ func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirty
 	}
 
 	s.ruleResults = current
-	return matched, ruleChanges, evaluated, nil
+	return matched, ruleChanges, evaluated, stableDeferred, nil
 }
 
 func (s *Session) evalRule(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext, rc *govern.RequestCache) (bool, vm.MatchedRule, error) {
@@ -1044,6 +1072,9 @@ func (s *Session) shouldEvaluate(rule Rule, dirtyFacts map[string]struct{}, dirt
 }
 
 func (s *Session) hasPendingWork(dirtyRules map[string]struct{}) bool {
+	if s.stablePending {
+		return true
+	}
 	for _, rule := range s.program.rules {
 		if s.shouldEvaluate(rule, s.dirtyFacts, s.dirtySources, dirtyRules) {
 			return true
@@ -1173,6 +1204,7 @@ func (s *Session) initEvalState() {
 	}
 	s.factsView = make(map[string]any)
 	s.evalCtx["facts"] = s.factsView
+	s.evalCtx["current_round"] = float64(s.rounds)
 	if s.program == nil || s.program.ruleset == nil {
 		return
 	}
@@ -1185,6 +1217,7 @@ func (s *Session) refreshContextView(firstPass bool, dirtyFacts map[string]struc
 	if s.evalCtx == nil || s.factsView == nil || s.dc == nil || s.evaluator == nil {
 		s.initEvalState()
 	}
+	s.evalCtx["current_round"] = float64(s.rounds)
 	if firstPass {
 		dirtyFacts = make(map[string]struct{}, len(s.facts))
 		for factType := range s.facts {
@@ -1199,7 +1232,7 @@ func (s *Session) refreshContextView(firstPass bool, dirtyFacts map[string]struc
 		}
 		items := make([]any, 0, len(byKey))
 		for _, fact := range byKey {
-			items = append(items, fact.Fields)
+			items = append(items, factEvalFields(fact))
 		}
 		s.factsView[factType] = items
 	}
@@ -1223,10 +1256,11 @@ func (s *Session) sortedFacts() []Fact {
 		for _, key := range keys {
 			fact := byKey[key]
 			out = append(out, Fact{
-				Type:      fact.Type,
-				Key:       fact.Key,
-				Fields:    cloneMap(fact.Fields),
-				DerivedBy: append([]string(nil), fact.DerivedBy...),
+				Type:          fact.Type,
+				Key:           fact.Key,
+				Fields:        cloneMap(fact.Fields),
+				DerivedBy:     append([]string(nil), fact.DerivedBy...),
+				AssertedRound: fact.AssertedRound,
 			})
 		}
 	}
@@ -1286,11 +1320,21 @@ func cloneActivations(src []Activation, start int) []Activation {
 
 func cloneFact(src Fact) Fact {
 	return Fact{
-		Type:      src.Type,
-		Key:       src.Key,
-		Fields:    cloneMap(src.Fields),
-		DerivedBy: append([]string(nil), src.DerivedBy...),
+		Type:          src.Type,
+		Key:           src.Key,
+		Fields:        cloneMap(src.Fields),
+		DerivedBy:     append([]string(nil), src.DerivedBy...),
+		AssertedRound: src.AssertedRound,
 	}
+}
+
+func factEvalFields(fact Fact) map[string]any {
+	fields := cloneMap(fact.Fields)
+	if fields == nil {
+		fields = make(map[string]any, 1)
+	}
+	fields["__round"] = float64(fact.AssertedRound)
+	return fields
 }
 
 func sortedModifications(records map[string]modifyRecord, ruleName string, kind ActionKind) []modifyRecord {

@@ -1,6 +1,11 @@
 package arbiter
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/odvcencio/arbiter/compiler"
+	"github.com/odvcencio/arbiter/intern"
+)
 
 // Helper that compiles .arb source and evals against the given data context.
 // Returns true if any rule matched (non-fallback).
@@ -16,6 +21,26 @@ func evalRule(t *testing.T, source string, data map[string]any) bool {
 		t.Fatalf("eval: %v", err)
 	}
 	return len(matched) > 0
+}
+
+func makeBytecodeRuleSet(pool *intern.Pool, code []byte, ruleName string) *compiler.CompiledRuleset {
+	nameIdx := pool.String(ruleName)
+	actionIdx := uint16(0)
+	actionNameIdx := pool.String("Act")
+	return &compiler.CompiledRuleset{
+		Constants:    pool,
+		Instructions: code,
+		Rules: []compiler.RuleHeader{{
+			NameIdx:      nameIdx,
+			Priority:     1,
+			ConditionOff: 0,
+			ConditionLen: uint32(len(code)),
+			ActionIdx:    actionIdx,
+		}},
+		Actions: []compiler.ActionEntry{{
+			NameIdx: actionNameIdx,
+		}},
+	}
 }
 
 // === Comparison Operators ===
@@ -111,6 +136,27 @@ func TestEvalStringNeq(t *testing.T) {
 	}
 	if evalRule(t, src, map[string]any{"name": "alice"}) {
 		t.Error("should not match")
+	}
+}
+
+func TestEvalStringConcat(t *testing.T) {
+	src := `rule T { when { true } then Act { message: "Hello " + user.name } }`
+	rs, err := Compile([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dc := DataFromMap(map[string]any{
+		"user": map[string]any{"name": "World"},
+	}, rs)
+	matched, err := Eval(rs, dc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matched) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matched))
+	}
+	if matched[0].Params["message"] != "Hello World" {
+		t.Fatalf("message: got %v, want %q", matched[0].Params["message"], "Hello World")
 	}
 }
 
@@ -579,6 +625,122 @@ func TestEvalActionParams(t *testing.T) {
 	}
 	if matched[0].Params["ttl"] != float64(3600) {
 		t.Errorf("param ttl: got %v, want 3600", matched[0].Params["ttl"])
+	}
+}
+
+func TestEvalSetLocalBytecode(t *testing.T) {
+	pool := intern.NewPool()
+	tempIdx := pool.String("temp")
+
+	var code []byte
+	code = compiler.Emit(code, compiler.OpLoadNum, 0, pool.Number(42))
+	code = compiler.Emit(code, compiler.OpSetLocal, 0, tempIdx)
+	code = compiler.Emit(code, compiler.OpLoadVar, 0, tempIdx)
+	code = compiler.Emit(code, compiler.OpLoadNum, 0, pool.Number(42))
+	code = compiler.Emit(code, compiler.OpEq, 0, 0)
+	code = compiler.Emit(code, compiler.OpRuleMatch, 0, 0)
+
+	rs := makeBytecodeRuleSet(pool, code, "SetLocal")
+	dc := DataFromMap(map[string]any{}, rs)
+	matched, err := Eval(rs, dc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matched) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matched))
+	}
+}
+
+func TestEvalAggregateBytecode(t *testing.T) {
+	pool := intern.NewPool()
+	itemIdx := pool.String("item")
+	itemsIdx := pool.String("items")
+	priceIdx := pool.String("item.price")
+
+	var code []byte
+	code = compiler.Emit(code, compiler.OpLoadVar, 0, itemsIdx)
+	code = compiler.Emit(code, compiler.OpAggBegin, compiler.FlagSum, itemIdx)
+	bodyStart := len(code)
+	code = compiler.Emit(code, compiler.OpLoadVar, 0, priceIdx)
+	bodyLen := uint16(len(code) - bodyStart)
+	code = compiler.Emit(code, compiler.OpAggAccum, compiler.FlagSum, bodyLen)
+	code = compiler.Emit(code, compiler.OpAggEnd, compiler.FlagSum, 0)
+	code = compiler.Emit(code, compiler.OpLoadNum, 0, pool.Number(100))
+	code = compiler.Emit(code, compiler.OpGt, 0, 0)
+	code = compiler.Emit(code, compiler.OpRuleMatch, 0, 0)
+
+	rs := makeBytecodeRuleSet(pool, code, "AggSum")
+	dc := DataFromMap(map[string]any{
+		"items": []any{
+			map[string]any{"price": 50.0},
+			map[string]any{"price": 60.0},
+		},
+	}, rs)
+	matched, err := Eval(rs, dc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matched) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matched))
+	}
+}
+
+func TestEvalAggregateCountAndAvgBytecode(t *testing.T) {
+	pool := intern.NewPool()
+	itemIdx := pool.String("item")
+	valuesIdx := pool.String("values")
+	scoreIdx := pool.String("item.score")
+
+	var countCode []byte
+	countCode = compiler.Emit(countCode, compiler.OpLoadVar, 0, valuesIdx)
+	countCode = compiler.Emit(countCode, compiler.OpAggBegin, compiler.FlagCount, itemIdx)
+	countBodyStart := len(countCode)
+	countCode = compiler.Emit(countCode, compiler.OpLoadNum, 0, pool.Number(1))
+	countBodyLen := uint16(len(countCode) - countBodyStart)
+	countCode = compiler.Emit(countCode, compiler.OpAggAccum, compiler.FlagCount, countBodyLen)
+	countCode = compiler.Emit(countCode, compiler.OpAggEnd, compiler.FlagCount, 0)
+	countCode = compiler.Emit(countCode, compiler.OpLoadNum, 0, pool.Number(3))
+	countCode = compiler.Emit(countCode, compiler.OpEq, 0, 0)
+	countCode = compiler.Emit(countCode, compiler.OpRuleMatch, 0, 0)
+
+	countRS := makeBytecodeRuleSet(pool, countCode, "AggCount")
+	countDC := DataFromMap(map[string]any{
+		"values": []any{1.0, 2.0, 3.0},
+	}, countRS)
+	countMatched, err := Eval(countRS, countDC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(countMatched) != 1 {
+		t.Fatalf("count: expected 1 match, got %d", len(countMatched))
+	}
+
+	var avgCode []byte
+	avgCode = compiler.Emit(avgCode, compiler.OpLoadVar, 0, valuesIdx)
+	avgCode = compiler.Emit(avgCode, compiler.OpAggBegin, compiler.FlagAvg, itemIdx)
+	avgBodyStart := len(avgCode)
+	avgCode = compiler.Emit(avgCode, compiler.OpLoadVar, 0, scoreIdx)
+	avgBodyLen := uint16(len(avgCode) - avgBodyStart)
+	avgCode = compiler.Emit(avgCode, compiler.OpAggAccum, compiler.FlagAvg, avgBodyLen)
+	avgCode = compiler.Emit(avgCode, compiler.OpAggEnd, compiler.FlagAvg, 0)
+	avgCode = compiler.Emit(avgCode, compiler.OpLoadNum, 0, pool.Number(7))
+	avgCode = compiler.Emit(avgCode, compiler.OpGt, 0, 0)
+	avgCode = compiler.Emit(avgCode, compiler.OpRuleMatch, 0, 0)
+
+	avgRS := makeBytecodeRuleSet(pool, avgCode, "AggAvg")
+	avgDC := DataFromMap(map[string]any{
+		"values": []any{
+			map[string]any{"score": 8.0},
+			map[string]any{"score": 9.0},
+			map[string]any{"score": 6.0},
+		},
+	}, avgRS)
+	avgMatched, err := Eval(avgRS, avgDC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(avgMatched) != 1 {
+		t.Fatalf("avg: expected 1 match, got %d", len(avgMatched))
 	}
 }
 

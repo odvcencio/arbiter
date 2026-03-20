@@ -5,7 +5,7 @@ import warnings
 
 from arbiter.v1 import service_pb2 as arbiter_dot_v1_dot_service__pb2
 
-GRPC_GENERATED_VERSION = '1.71.2'
+GRPC_GENERATED_VERSION = '1.78.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in arbiter/v1/service_pb2_grpc.py depends on'
+        + ' but the generated code in arbiter/v1/service_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -53,6 +53,26 @@ class ArbiterServiceStub(object):
                 '/arbiter.v1.ArbiterService/RollbackBundle',
                 request_serializer=arbiter_dot_v1_dot_service__pb2.RollbackBundleRequest.SerializeToString,
                 response_deserializer=arbiter_dot_v1_dot_service__pb2.RollbackBundleResponse.FromString,
+                _registered_method=True)
+        self.GetBundle = channel.unary_unary(
+                '/arbiter.v1.ArbiterService/GetBundle',
+                request_serializer=arbiter_dot_v1_dot_service__pb2.GetBundleRequest.SerializeToString,
+                response_deserializer=arbiter_dot_v1_dot_service__pb2.GetBundleResponse.FromString,
+                _registered_method=True)
+        self.WatchBundles = channel.unary_stream(
+                '/arbiter.v1.ArbiterService/WatchBundles',
+                request_serializer=arbiter_dot_v1_dot_service__pb2.WatchBundlesRequest.SerializeToString,
+                response_deserializer=arbiter_dot_v1_dot_service__pb2.BundleEvent.FromString,
+                _registered_method=True)
+        self.GetOverrides = channel.unary_unary(
+                '/arbiter.v1.ArbiterService/GetOverrides',
+                request_serializer=arbiter_dot_v1_dot_service__pb2.GetOverridesRequest.SerializeToString,
+                response_deserializer=arbiter_dot_v1_dot_service__pb2.GetOverridesResponse.FromString,
+                _registered_method=True)
+        self.WatchOverrides = channel.unary_stream(
+                '/arbiter.v1.ArbiterService/WatchOverrides',
+                request_serializer=arbiter_dot_v1_dot_service__pb2.WatchOverridesRequest.SerializeToString,
+                response_deserializer=arbiter_dot_v1_dot_service__pb2.OverrideEvent.FromString,
                 _registered_method=True)
         self.EvaluateRules = channel.unary_unary(
                 '/arbiter.v1.ArbiterService/EvaluateRules',
@@ -133,6 +153,30 @@ class ArbiterServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def RollbackBundle(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetBundle(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WatchBundles(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetOverrides(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WatchOverrides(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -226,6 +270,26 @@ def add_ArbiterServiceServicer_to_server(servicer, server):
                     servicer.RollbackBundle,
                     request_deserializer=arbiter_dot_v1_dot_service__pb2.RollbackBundleRequest.FromString,
                     response_serializer=arbiter_dot_v1_dot_service__pb2.RollbackBundleResponse.SerializeToString,
+            ),
+            'GetBundle': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetBundle,
+                    request_deserializer=arbiter_dot_v1_dot_service__pb2.GetBundleRequest.FromString,
+                    response_serializer=arbiter_dot_v1_dot_service__pb2.GetBundleResponse.SerializeToString,
+            ),
+            'WatchBundles': grpc.unary_stream_rpc_method_handler(
+                    servicer.WatchBundles,
+                    request_deserializer=arbiter_dot_v1_dot_service__pb2.WatchBundlesRequest.FromString,
+                    response_serializer=arbiter_dot_v1_dot_service__pb2.BundleEvent.SerializeToString,
+            ),
+            'GetOverrides': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetOverrides,
+                    request_deserializer=arbiter_dot_v1_dot_service__pb2.GetOverridesRequest.FromString,
+                    response_serializer=arbiter_dot_v1_dot_service__pb2.GetOverridesResponse.SerializeToString,
+            ),
+            'WatchOverrides': grpc.unary_stream_rpc_method_handler(
+                    servicer.WatchOverrides,
+                    request_deserializer=arbiter_dot_v1_dot_service__pb2.WatchOverridesRequest.FromString,
+                    response_serializer=arbiter_dot_v1_dot_service__pb2.OverrideEvent.SerializeToString,
             ),
             'EvaluateRules': grpc.unary_unary_rpc_method_handler(
                     servicer.EvaluateRules,
@@ -391,6 +455,114 @@ class ArbiterService(object):
             '/arbiter.v1.ArbiterService/RollbackBundle',
             arbiter_dot_v1_dot_service__pb2.RollbackBundleRequest.SerializeToString,
             arbiter_dot_v1_dot_service__pb2.RollbackBundleResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetBundle(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/arbiter.v1.ArbiterService/GetBundle',
+            arbiter_dot_v1_dot_service__pb2.GetBundleRequest.SerializeToString,
+            arbiter_dot_v1_dot_service__pb2.GetBundleResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WatchBundles(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/arbiter.v1.ArbiterService/WatchBundles',
+            arbiter_dot_v1_dot_service__pb2.WatchBundlesRequest.SerializeToString,
+            arbiter_dot_v1_dot_service__pb2.BundleEvent.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetOverrides(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/arbiter.v1.ArbiterService/GetOverrides',
+            arbiter_dot_v1_dot_service__pb2.GetOverridesRequest.SerializeToString,
+            arbiter_dot_v1_dot_service__pb2.GetOverridesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WatchOverrides(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/arbiter.v1.ArbiterService/WatchOverrides',
+            arbiter_dot_v1_dot_service__pb2.WatchOverridesRequest.SerializeToString,
+            arbiter_dot_v1_dot_service__pb2.OverrideEvent.FromString,
             options,
             channel_credentials,
             insecure,

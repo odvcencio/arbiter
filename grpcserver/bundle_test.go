@@ -1,6 +1,9 @@
 package grpcserver
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 const bundleSourceV1 = `
 rule Decide {
@@ -59,5 +62,40 @@ func TestRegistryPersistsHistoryAndRollback(t *testing.T) {
 	active, ok = finalReload.GetActive("checkout")
 	if !ok || active.ID != first.ID {
 		t.Fatalf("expected first bundle active after rollback reload, got %+v ok=%v", active, ok)
+	}
+}
+
+func TestRegistryInstallStoresCompiledBundleWithoutPrematureActivation(t *testing.T) {
+	registry := NewRegistry()
+
+	bundle, err := BuildBundle("checkout", []byte(bundleSourceV1), time.Time{})
+	if err != nil {
+		t.Fatalf("BuildBundle: %v", err)
+	}
+
+	stored, err := registry.Install(bundle, false)
+	if err != nil {
+		t.Fatalf("Install inactive: %v", err)
+	}
+	if stored.ID != bundle.ID {
+		t.Fatalf("unexpected stored bundle id: got %s want %s", stored.ID, bundle.ID)
+	}
+	if _, ok := registry.GetActive("checkout"); ok {
+		t.Fatalf("expected install(false) to leave checkout inactive")
+	}
+	if got, ok := registry.Get(bundle.ID); !ok || got.ID != bundle.ID {
+		t.Fatalf("expected compiled bundle to be present after install, got %+v ok=%v", got, ok)
+	}
+
+	activated, err := registry.Install(bundle, true)
+	if err != nil {
+		t.Fatalf("Install active: %v", err)
+	}
+	if activated.ID != bundle.ID {
+		t.Fatalf("unexpected activated bundle id: got %s want %s", activated.ID, bundle.ID)
+	}
+	active, ok := registry.GetActive("checkout")
+	if !ok || active.ID != bundle.ID {
+		t.Fatalf("expected install(true) to activate checkout bundle, got %+v ok=%v", active, ok)
 	}
 }

@@ -3,7 +3,10 @@
 ;; Literals
 (comment) @comment
 (string_literal) @string
+(slack_channel_literal) @string.special
+(resource_literal) @string.special
 (number_literal) @number
+(duration_literal) @number
 (bool_literal) @constant.builtin
 
 ;; Identifiers
@@ -23,6 +26,19 @@
 (const_declaration "const" @keyword)
 (const_declaration name: (identifier) @constant)
 
+(arbiter_declaration "arbiter" @keyword)
+(arbiter_declaration name: (identifier) @type.definition)
+(arbiter_poll_clause "poll" @keyword)
+(arbiter_stream_clause "stream" @keyword)
+(arbiter_schedule_clause "schedule" @keyword)
+(arbiter_schedule_clause "source" @keyword)
+(arbiter_source_clause "source" @keyword)
+(arbiter_checkpoint_clause "checkpoint" @keyword)
+(arbiter_handler_clause "on" @keyword)
+(arbiter_handler_filter "where" @keyword)
+(arbiter_handler_kind) @keyword
+(arbiter_wildcard) @operator
+
 (segment_declaration "segment" @keyword)
 (segment_declaration name: (identifier) @type.definition)
 
@@ -38,6 +54,7 @@
 ;; Governance nodes (named child nodes, not anonymous strings)
 (kill_switch) @keyword
 (no_loop) @keyword
+(stable) @keyword
 (rule_requires "requires" @keyword)
 (rule_requires name: (identifier) @function)
 (rule_excludes "excludes" @keyword)
@@ -59,6 +76,7 @@
 (flag_requires "requires" @keyword)
 (flag_requires flag_name: (identifier) @function)
 (flag_rule "when" @keyword)
+(flag_rule "else" @keyword)
 (flag_rule "then" @keyword)
 (flag_rule "rollout" @keyword)
 
@@ -71,6 +89,8 @@
 (expert_binding "bind" @keyword)
 (expert_binding "in" @keyword)
 (expert_binding name: (identifier) @variable.parameter)
+(let_binding "let" @keyword)
+(let_binding name: (identifier) @variable.parameter)
 (then_block "then" @keyword)
 (then_block action_name: (identifier) @function)
 (otherwise_block "otherwise" @keyword)
@@ -110,6 +130,8 @@
 "any" @keyword
 "all" @keyword
 "none" @keyword
+(aggregate_expr function: (identifier) @keyword
+  (#match? @keyword "^(sum|count|avg)$"))
 
 ;; Expert actions
 "assert" @keyword

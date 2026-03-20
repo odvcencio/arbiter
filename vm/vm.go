@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,13 +39,15 @@ type DebugResult struct {
 }
 
 type iterState struct {
-	kind    uint8
-	varName string
-	items   []any
-	index   int
-	result  bool
-	prev    any
-	hadPrev bool
+	kind     uint8
+	varName  string
+	items    []any
+	index    int
+	result   bool
+	aggSum   float64
+	aggCount int
+	prev     any
+	hadPrev  bool
 }
 
 // VM is the bytecode evaluator.
@@ -276,7 +279,11 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 		// Math
 		case compiler.OpAdd:
 			b, a := vm.pop(), vm.pop()
-			vm.push(NumVal(vm.toNum(a) + vm.toNum(b)))
+			if a.Typ == TypeString || b.Typ == TypeString {
+				vm.push(StrVal(vm.strPool.Intern(vm.valueToString(a) + vm.valueToString(b))))
+			} else {
+				vm.push(NumVal(vm.toNum(a) + vm.toNum(b)))
+			}
 		case compiler.OpSub:
 			b, a := vm.pop(), vm.pop()
 			vm.push(NumVal(vm.toNum(a) - vm.toNum(b)))
@@ -414,7 +421,7 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 			vm.iters = append(vm.iters, iter)
 
 			if len(iter.items) == 0 {
-				nextIP, found := vm.findMatchingIterNext(instrs, ip, end)
+				nextIP, found := vm.findMatchingLoopMid(instrs, ip, end, compiler.OpIterBegin, compiler.OpIterNext, compiler.OpIterEnd)
 				if found {
 					ip = nextIP
 				}
@@ -469,6 +476,79 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 			}
 			vm.push(BoolVal(iter.result))
 
+		case compiler.OpAggBegin:
+			list := vm.pop()
+			iter := iterState{
+				kind:    flags,
+				varName: vm.strPool.Get(arg),
+				items:   vm.listEntries(list),
+			}
+			if vm.locals == nil {
+				vm.locals = make(map[string]any)
+			}
+			if prev, ok := vm.locals[iter.varName]; ok {
+				iter.prev = prev
+				iter.hadPrev = true
+			}
+			vm.iters = append(vm.iters, iter)
+
+			if len(iter.items) == 0 {
+				nextIP, found := vm.findMatchingLoopMid(instrs, ip, end, compiler.OpAggBegin, compiler.OpAggAccum, compiler.OpAggEnd)
+				if found {
+					ip = nextIP
+				}
+				break
+			}
+
+			vm.locals[iter.varName] = iter.items[0]
+
+		case compiler.OpAggAccum:
+			if len(vm.iters) == 0 {
+				break
+			}
+			val := vm.toNum(vm.pop())
+			iter := &vm.iters[len(vm.iters)-1]
+			iter.aggSum += val
+			iter.aggCount++
+			iter.index++
+			if iter.index < len(iter.items) {
+				vm.locals[iter.varName] = iter.items[iter.index]
+				ip -= uint32(arg)
+				continue
+			}
+
+		case compiler.OpAggEnd:
+			if len(vm.iters) == 0 {
+				vm.push(NumVal(0))
+				break
+			}
+			iter := vm.iters[len(vm.iters)-1]
+			vm.iters = vm.iters[:len(vm.iters)-1]
+			if iter.hadPrev {
+				vm.locals[iter.varName] = iter.prev
+			} else {
+				delete(vm.locals, iter.varName)
+			}
+			switch iter.kind {
+			case compiler.FlagCount:
+				vm.push(NumVal(float64(iter.aggCount)))
+			case compiler.FlagAvg:
+				if iter.aggCount == 0 {
+					vm.push(NumVal(0))
+				} else {
+					vm.push(NumVal(iter.aggSum / float64(iter.aggCount)))
+				}
+			default:
+				vm.push(NumVal(iter.aggSum))
+			}
+
+		case compiler.OpSetLocal:
+			val := vm.pop()
+			if vm.locals == nil {
+				vm.locals = make(map[string]any)
+			}
+			vm.locals[vm.strPool.Get(arg)] = vm.valueToAny(val)
+
 		// Rule match
 		case compiler.OpRuleMatch:
 			// The condition result is whatever is on top of the stack
@@ -495,10 +575,11 @@ func (vm *VM) evalActionParams(instrs []byte, params []compiler.ActionParam, dc 
 	if len(params) == 0 {
 		return nil, nil
 	}
+	baseLocals := cloneLocals(vm.locals)
 	result := make(map[string]any, len(params))
 	for _, p := range params {
 		vm.sp = 0
-		clear(vm.locals)
+		vm.locals = cloneLocals(baseLocals)
 		vm.iters = vm.iters[:0]
 		vm.err = nil
 		vm.evalCondition(instrs, p.ValueOff, p.ValueLen, dc)
@@ -511,6 +592,7 @@ func (vm *VM) evalActionParams(instrs []byte, params []compiler.ActionParam, dc 
 			result[key] = vm.valueToAny(v)
 		}
 	}
+	vm.locals = baseLocals
 	return result, nil
 }
 
@@ -753,7 +835,7 @@ func (vm *VM) lookupLocal(key string) (any, bool) {
 	return resolve(base, key[dot+1:]), true
 }
 
-func (vm *VM) findMatchingIterNext(instrs []byte, beginIP, end uint32) (uint32, bool) {
+func (vm *VM) findMatchingLoopMid(instrs []byte, beginIP, end uint32, beginOp, midOp, endOp compiler.OpCode) (uint32, bool) {
 	depth := 0
 	for pos := beginIP + compiler.InstrSize; pos < end; pos += compiler.InstrSize {
 		if pos+compiler.InstrSize > uint32(len(instrs)) {
@@ -763,17 +845,46 @@ func (vm *VM) findMatchingIterNext(instrs []byte, beginIP, end uint32) (uint32, 
 		copy(buf[:], instrs[pos:pos+compiler.InstrSize])
 		op, _, _ := compiler.DecodeInstr(buf)
 		switch op {
-		case compiler.OpIterBegin:
+		case beginOp:
 			depth++
-		case compiler.OpIterEnd:
+		case endOp:
 			if depth > 0 {
 				depth--
 			}
-		case compiler.OpIterNext:
+		case midOp:
 			if depth == 0 {
 				return pos, true
 			}
 		}
 	}
 	return 0, false
+}
+
+func (vm *VM) valueToString(v Value) string {
+	switch v.Typ {
+	case TypeString:
+		return vm.toStr(v)
+	case TypeNumber:
+		return strconv.FormatFloat(v.Num, 'f', -1, 64)
+	case TypeBool:
+		if v.Bool {
+			return "true"
+		}
+		return "false"
+	case TypeNull:
+		return ""
+	default:
+		return fmt.Sprint(vm.valueToAny(v))
+	}
+}
+
+func cloneLocals(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }

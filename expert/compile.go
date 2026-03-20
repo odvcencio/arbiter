@@ -34,6 +34,7 @@ type Rule struct {
 	Excludes []string
 	FactDeps []string
 	NoLoop   bool
+	Stable   bool
 	Group    string
 }
 
@@ -179,6 +180,7 @@ func parseExpertRule(n *gotreesitter.Node, source []byte, lang *gotreesitter.Lan
 		rule.Priority = parseutil.ParseInt(nodeText(priNode, source))
 	}
 	rule.NoLoop = n.ChildByFieldName("no_loop", lang) != nil
+	rule.Stable = n.ChildByFieldName("stable", lang) != nil
 	if groupNode := n.ChildByFieldName("activation_group", lang); groupNode != nil {
 		if nameNode := groupNode.ChildByFieldName("name", lang); nameNode != nil {
 			rule.Group = nodeText(nameNode, source)
@@ -365,8 +367,10 @@ func expertConditionSource(whenNode *gotreesitter.Node, source []byte, lang *got
 	if whenNode == nil {
 		return "", nil, fmt.Errorf("missing expert when block")
 	}
+	letExprs, letDeps := collectLetBindings(whenNode, source, lang)
 	if exprNode := whenNode.ChildByFieldName("expr", lang); exprNode != nil {
-		return nodeText(whenNode, source), collectFactDeps(exprNode, source, lang), nil
+		deps := append(collectFactDeps(exprNode, source, lang), letDeps...)
+		return nodeText(whenNode, source), uniqueStrings(deps), nil
 	}
 
 	bindingsNode := whenNode.ChildByFieldName("bindings", lang)
@@ -383,7 +387,7 @@ func expertConditionSource(whenNode *gotreesitter.Node, source []byte, lang *got
 	}
 
 	bindings := make([]bindingRef, 0)
-	deps := collectFactDeps(bodyExpr, source, lang)
+	deps := append(collectFactDeps(bodyExpr, source, lang), letDeps...)
 	for i := 0; i < int(bindingsNode.NamedChildCount()); i++ {
 		child := bindingsNode.NamedChild(i)
 		if child.Type(lang) != "expert_binding" {
@@ -417,9 +421,32 @@ func expertConditionSource(whenNode *gotreesitter.Node, source []byte, lang *got
 		out.WriteByte(' ')
 	}
 	out.WriteString("{ ")
+	for _, letExpr := range letExprs {
+		out.WriteString(letExpr)
+		out.WriteByte(' ')
+	}
 	out.WriteString(expr)
 	out.WriteString(" }")
-	return out.String(), deps, nil
+	return out.String(), uniqueStrings(deps), nil
+}
+
+func collectLetBindings(whenNode *gotreesitter.Node, source []byte, lang *gotreesitter.Language) ([]string, []string) {
+	if whenNode == nil {
+		return nil, nil
+	}
+	letExprs := make([]string, 0)
+	letDeps := make([]string, 0)
+	for i := 0; i < int(whenNode.NamedChildCount()); i++ {
+		child := whenNode.NamedChild(i)
+		if child.Type(lang) != "let_binding" {
+			continue
+		}
+		letExprs = append(letExprs, nodeText(child, source))
+		if valueNode := child.ChildByFieldName("value", lang); valueNode != nil {
+			letDeps = append(letDeps, collectFactDeps(valueNode, source, lang)...)
+		}
+	}
+	return letExprs, letDeps
 }
 
 func nodeText(n *gotreesitter.Node, source []byte) string {

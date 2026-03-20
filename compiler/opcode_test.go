@@ -26,6 +26,14 @@ func TestInstructionWithFlags(t *testing.T) {
 	}
 }
 
+func TestInstructionWithAggregateFlags(t *testing.T) {
+	instr := EncodeInstr(OpAggBegin, FlagAvg, 99)
+	op, flags, arg := DecodeInstr(instr)
+	if op != OpAggBegin || flags != FlagAvg || arg != 99 {
+		t.Errorf("got (%d, %d, %d), want (%d, %d, 99)", op, flags, arg, OpAggBegin, FlagAvg)
+	}
+}
+
 func TestAllOpcodesUnique(t *testing.T) {
 	seen := map[OpCode]string{}
 	opcodes := map[string]OpCode{
@@ -44,6 +52,8 @@ func TestAllOpcodesUnique(t *testing.T) {
 		"JumpIfFalse": OpJumpIfFalse, "JumpIfTrue": OpJumpIfTrue,
 		"IterBegin": OpIterBegin, "IterNext": OpIterNext, "IterEnd": OpIterEnd,
 		"RuleMatch": OpRuleMatch,
+		"AggBegin":  OpAggBegin, "AggAccum": OpAggAccum, "AggEnd": OpAggEnd,
+		"SetLocal": OpSetLocal,
 	}
 	for name, op := range opcodes {
 		if prev, ok := seen[op]; ok {

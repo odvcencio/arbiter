@@ -6,29 +6,14 @@ import (
 	"testing"
 
 	arbiterv1 "github.com/odvcencio/arbiter/api/arbiter/v1"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/odvcencio/arbiter/internal/testarbiter"
 	"google.golang.org/protobuf/types/known/structpb"
 )
-
-// addr returns the arbiter gRPC address. In-cluster tests use the k8s
-// service DNS; local tests can override via ARBITER_ADDR.
-func addr() string {
-	if a := os.Getenv("ARBITER_ADDR"); a != "" {
-		return a
-	}
-	return "arbiter.orchard.svc.cluster.local:8081"
-}
 
 func setup(t *testing.T) (arbiterv1.ArbiterServiceClient, string) {
 	t.Helper()
 
-	conn, err := grpc.NewClient(addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(func() { conn.Close() })
-	client := arbiterv1.NewArbiterServiceClient(conn)
+	client := testarbiter.NewClient(t)
 
 	source, err := os.ReadFile("../ci_governance.arb")
 	if err != nil {
@@ -101,9 +86,9 @@ func TestProductionBranchAlwaysAllowed(t *testing.T) {
 		t.Run(branch, func(t *testing.T) {
 			resp := eval(t, client, bundle, map[string]any{
 				"workflow": map[string]any{
-					"branch":               branch,
-					"name":                 "ci",
-					"estimated_minutes":    float64(30),
+					"branch":                 branch,
+					"name":                   "ci",
+					"estimated_minutes":      float64(30),
 					"minutes_since_last_run": float64(0),
 				},
 				"billing": map[string]any{"used_minutes_pct": float64(99)},
@@ -119,9 +104,9 @@ func TestBudgetCriticalBlocksNonProd(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "feat/new-thing",
-			"name":                 "ci",
-			"estimated_minutes":    float64(5),
+			"branch":                 "feat/new-thing",
+			"name":                   "ci",
+			"estimated_minutes":      float64(5),
 			"minutes_since_last_run": float64(60),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(95)},
@@ -135,9 +120,9 @@ func TestBudgetWarningBlocksExpensiveFeatureBranch(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "feat/big-refactor",
-			"name":                 "full-suite",
-			"estimated_minutes":    float64(20),
+			"branch":                 "feat/big-refactor",
+			"name":                   "full-suite",
+			"estimated_minutes":      float64(20),
 			"minutes_since_last_run": float64(60),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(80)},
@@ -151,9 +136,9 @@ func TestBudgetWarningAllowsCheapFeatureBranch(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "feat/small-fix",
-			"name":                 "lint",
-			"estimated_minutes":    float64(3),
+			"branch":                 "feat/small-fix",
+			"name":                   "lint",
+			"estimated_minutes":      float64(3),
 			"minutes_since_last_run": float64(60),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(80)},
@@ -168,9 +153,9 @@ func TestRapidRerunBlocked(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "feat/wip",
-			"name":                 "ci",
-			"estimated_minutes":    float64(5),
+			"branch":                 "feat/wip",
+			"name":                   "ci",
+			"estimated_minutes":      float64(5),
 			"minutes_since_last_run": float64(2),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(10)},
@@ -184,9 +169,9 @@ func TestRapidRerunAllowedOnMain(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "main",
-			"name":                 "ci",
-			"estimated_minutes":    float64(5),
+			"branch":                 "main",
+			"name":                   "ci",
+			"estimated_minutes":      float64(5),
 			"minutes_since_last_run": float64(1),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(10)},
@@ -201,9 +186,9 @@ func TestOffHoursBlocksExpensiveNonProd(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "feat/big-test",
-			"name":                 "e2e-suite",
-			"estimated_minutes":    float64(25),
+			"branch":                 "feat/big-test",
+			"name":                   "e2e-suite",
+			"estimated_minutes":      float64(25),
 			"minutes_since_last_run": float64(60),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(30)},
@@ -217,9 +202,9 @@ func TestOffHoursAllowsCheapNonProd(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "feat/small-fix",
-			"name":                 "lint",
-			"estimated_minutes":    float64(3),
+			"branch":                 "feat/small-fix",
+			"name":                   "lint",
+			"estimated_minutes":      float64(3),
 			"minutes_since_last_run": float64(60),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(30)},
@@ -234,9 +219,9 @@ func TestOffHoursAllowsProductionAlways(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "release",
-			"name":                 "deploy",
-			"estimated_minutes":    float64(30),
+			"branch":                 "release",
+			"name":                   "deploy",
+			"estimated_minutes":      float64(30),
 			"minutes_since_last_run": float64(0),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(95)},
@@ -250,9 +235,9 @@ func TestNormalFeatureBranchAllowed(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "feat/add-login",
-			"name":                 "ci",
-			"estimated_minutes":    float64(8),
+			"branch":                 "feat/add-login",
+			"name":                   "ci",
+			"estimated_minutes":      float64(8),
 			"minutes_since_last_run": float64(30),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(40)},
@@ -267,9 +252,9 @@ func TestRandomBranchAllowedUnderBudget(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "experiment/something",
-			"name":                 "ci",
-			"estimated_minutes":    float64(5),
+			"branch":                 "experiment/something",
+			"name":                   "ci",
+			"estimated_minutes":      float64(5),
 			"minutes_since_last_run": float64(60),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(20)},
@@ -284,9 +269,9 @@ func TestBudgetCriticalStillAllowsProduction(t *testing.T) {
 
 	resp := eval(t, client, bundle, map[string]any{
 		"workflow": map[string]any{
-			"branch":               "main",
-			"name":                 "deploy",
-			"estimated_minutes":    float64(30),
+			"branch":                 "main",
+			"name":                   "deploy",
+			"estimated_minutes":      float64(30),
 			"minutes_since_last_run": float64(1),
 		},
 		"billing": map[string]any{"used_minutes_pct": float64(99)},

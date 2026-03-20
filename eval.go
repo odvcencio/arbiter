@@ -21,10 +21,11 @@ func Compile(source []byte) (*compiler.CompiledRuleset, error) {
 	return CompileParsed(parsed)
 }
 
-// CompileResult includes a ruleset and any compiled top-level segments.
+// CompileResult includes a ruleset, top-level segments, and arbiter declarations.
 type CompileResult struct {
 	Ruleset  *compiler.CompiledRuleset
 	Segments *govern.SegmentSet
+	Arbiters []ArbiterDeclaration
 }
 
 // CompileFull compiles .arb source and extracts top-level segments.

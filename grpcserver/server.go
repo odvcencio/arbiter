@@ -137,6 +137,97 @@ func (s *Server) RollbackBundle(ctx context.Context, req *arbiterv1.RollbackBund
 	}, nil
 }
 
+// GetBundle fetches a published bundle and returns its raw source.
+func (s *Server) GetBundle(_ context.Context, req *arbiterv1.GetBundleRequest) (*arbiterv1.GetBundleResponse, error) {
+	bundle, err := s.bundleRef(req.GetBundleId(), req.GetBundleName())
+	if err != nil {
+		return nil, err
+	}
+	return &arbiterv1.GetBundleResponse{
+		Bundle: s.protoBundleSummary(bundle),
+		Source: append([]byte(nil), bundle.Source...),
+	}, nil
+}
+
+// GetOverrides fetches all runtime overrides for one bundle.
+func (s *Server) GetOverrides(_ context.Context, req *arbiterv1.GetOverridesRequest) (*arbiterv1.GetOverridesResponse, error) {
+	bundle, err := s.bundleRef(req.GetBundleId(), req.GetBundleName())
+	if err != nil {
+		return nil, err
+	}
+	return &arbiterv1.GetOverridesResponse{
+		Overrides: s.protoBundleOverrides(s.overrides.SnapshotForBundle(bundle.ID)),
+	}, nil
+}
+
+// WatchOverrides streams one bundle's override snapshot and subsequent mutations.
+func (s *Server) WatchOverrides(req *arbiterv1.WatchOverridesRequest, stream arbiterv1.ArbiterService_WatchOverridesServer) error {
+	if req.GetBundleId() == "" {
+		return status.Error(codes.InvalidArgument, "bundle_id is required")
+	}
+	if _, err := s.bundle(req.GetBundleId()); err != nil {
+		return err
+	}
+
+	snapshot, events, cancel := s.overrides.Subscribe(req.GetBundleId())
+	defer cancel()
+
+	if err := stream.Send(s.protoOverrideEvent(overrides.OverrideEvent{
+		Type:     overrides.OverrideEventSnapshot,
+		BundleID: snapshot.BundleID,
+		Snapshot: snapshot,
+	})); err != nil {
+		return err
+	}
+	for {
+		select {
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		case event := <-events:
+			if err := stream.Send(s.protoOverrideEvent(event)); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// WatchBundles streams the active bundle state and subsequent updates.
+func (s *Server) WatchBundles(req *arbiterv1.WatchBundlesRequest, stream arbiterv1.ArbiterService_WatchBundlesServer) error {
+	ctx := stream.Context()
+	nameFilter := uniqueNames(req.GetNames())
+
+	initial, events, cancel := s.registry.SubscribeBundles(req.GetNames(), req.GetActiveOnly())
+	defer cancel()
+
+	for _, bundle := range initial {
+		if err := stream.Send(s.protoBundleEvent(bundleEvent{
+			Type:   bundleEventSnapshot,
+			Bundle: bundle,
+		})); err != nil {
+			return err
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case event := <-events:
+			if event.Bundle == nil {
+				continue
+			}
+			if len(nameFilter) > 0 {
+				if _, ok := nameFilter[event.Bundle.Name]; !ok {
+					continue
+				}
+			}
+			if err := stream.Send(s.protoBundleEvent(event)); err != nil {
+				return err
+			}
+		}
+	}
+}
+
 // EvaluateRules evaluates rules in a published bundle.
 func (s *Server) EvaluateRules(ctx context.Context, req *arbiterv1.EvaluateRulesRequest) (*arbiterv1.EvaluateRulesResponse, error) {
 	bundle, err := s.bundleRef(req.GetBundleId(), req.GetBundleName())
@@ -484,6 +575,147 @@ func (s *Server) protoBundleSummary(bundle *Bundle) *arbiterv1.BundleSummary {
 		FlagCount:       uint32(bundle.FlagCount),
 		ExpertRuleCount: uint32(bundle.ExpertRuleCount),
 		Active:          active != nil && active.ID == bundle.ID,
+	}
+}
+
+func (s *Server) protoBundleOverrides(snapshot overrides.BundleSnapshot) *arbiterv1.BundleOverrides {
+	if snapshot.BundleID == "" && len(snapshot.Rules) == 0 && len(snapshot.Flags) == 0 && len(snapshot.FlagRules) == 0 {
+		return nil
+	}
+	out := &arbiterv1.BundleOverrides{
+		BundleId:  snapshot.BundleID,
+		Rules:     make([]*arbiterv1.RuleOverrideEntry, 0, len(snapshot.Rules)),
+		Flags:     make([]*arbiterv1.FlagOverrideEntry, 0, len(snapshot.Flags)),
+		FlagRules: make([]*arbiterv1.FlagRuleOverrideEntry, 0),
+	}
+	for ruleName, ov := range snapshot.Rules {
+		out.Rules = append(out.Rules, protoRuleOverrideEntry(ruleName, ov))
+	}
+	for flagKey, ov := range snapshot.Flags {
+		out.Flags = append(out.Flags, protoFlagOverrideEntry(flagKey, ov))
+	}
+	for flagKey, rules := range snapshot.FlagRules {
+		for idx, ov := range rules {
+			out.FlagRules = append(out.FlagRules, protoFlagRuleOverrideEntry(flagKey, idx, ov))
+		}
+	}
+	return out
+}
+
+func (s *Server) protoOverrideEvent(event overrides.OverrideEvent) *arbiterv1.OverrideEvent {
+	snapshot := (*arbiterv1.BundleOverrides)(nil)
+	if event.Type == overrides.OverrideEventSnapshot {
+		snapshot = s.protoBundleOverrides(event.Snapshot)
+	}
+	out := &arbiterv1.OverrideEvent{
+		Type:     protoOverrideEventType(event.Type),
+		BundleId: event.BundleID,
+		Snapshot: snapshot,
+		RuleName: event.RuleName,
+		FlagKey:  event.FlagKey,
+	}
+	switch event.Type {
+	case overrides.OverrideEventRule:
+		out.Rule = protoRuleOverrideEntry(event.RuleName, event.Rule)
+	case overrides.OverrideEventFlag:
+		out.Flag = protoFlagOverrideEntry(event.FlagKey, event.Flag)
+	case overrides.OverrideEventFlagRule:
+		out.RuleIndex = uint32(event.RuleIndex)
+		out.FlagRule = protoFlagRuleOverrideEntry(event.FlagKey, event.RuleIndex, event.FlagRule)
+	}
+	return out
+}
+
+func protoRuleOverrideEntry(ruleName string, ov overrides.RuleOverride) *arbiterv1.RuleOverrideEntry {
+	out := &arbiterv1.RuleOverrideEntry{RuleName: ruleName}
+	if ov.KillSwitch != nil {
+		out.KillSwitchSet = true
+		out.KillSwitch = *ov.KillSwitch
+	}
+	if ov.Rollout != nil {
+		out.RolloutSet = true
+		out.Rollout = uint32(*ov.Rollout)
+	}
+	return out
+}
+
+func protoFlagOverrideEntry(flagKey string, ov overrides.FlagOverride) *arbiterv1.FlagOverrideEntry {
+	out := &arbiterv1.FlagOverrideEntry{FlagKey: flagKey}
+	if ov.KillSwitch != nil {
+		out.KillSwitchSet = true
+		out.KillSwitch = *ov.KillSwitch
+	}
+	return out
+}
+
+func protoFlagRuleOverrideEntry(flagKey string, ruleIndex int, ov overrides.FlagRuleOverride) *arbiterv1.FlagRuleOverrideEntry {
+	out := &arbiterv1.FlagRuleOverrideEntry{FlagKey: flagKey, RuleIndex: uint32(ruleIndex)}
+	if ov.Rollout != nil {
+		out.RolloutSet = true
+		out.Rollout = uint32(*ov.Rollout)
+	}
+	return out
+}
+
+func protoOverrideEventType(eventType overrides.OverrideEventType) arbiterv1.OverrideEventType {
+	switch eventType {
+	case overrides.OverrideEventSnapshot:
+		return arbiterv1.OverrideEventType_OVERRIDE_EVENT_TYPE_SNAPSHOT
+	case overrides.OverrideEventRule:
+		return arbiterv1.OverrideEventType_OVERRIDE_EVENT_TYPE_RULE
+	case overrides.OverrideEventFlag:
+		return arbiterv1.OverrideEventType_OVERRIDE_EVENT_TYPE_FLAG
+	case overrides.OverrideEventFlagRule:
+		return arbiterv1.OverrideEventType_OVERRIDE_EVENT_TYPE_FLAG_RULE
+	default:
+		return arbiterv1.OverrideEventType_OVERRIDE_EVENT_TYPE_UNSPECIFIED
+	}
+}
+
+const bundleEventSnapshot bundleEventType = "snapshot"
+
+func uniqueNames(names []string) map[string]struct{} {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (s *Server) protoBundleEvent(event bundleEvent) *arbiterv1.BundleEvent {
+	if event.Bundle == nil {
+		return nil
+	}
+	return &arbiterv1.BundleEvent{
+		Type:             s.protoBundleEventType(event.Type),
+		Name:             event.Bundle.Name,
+		Bundle:           s.protoBundleSummary(event.Bundle),
+		Source:           append([]byte(nil), event.Bundle.Source...),
+		PreviousBundleId: event.PreviousBundleID,
+	}
+}
+
+func (s *Server) protoBundleEventType(eventType bundleEventType) arbiterv1.BundleEventType {
+	switch eventType {
+	case bundleEventSnapshot:
+		return arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_SNAPSHOT
+	case bundleEventPublished:
+		return arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_PUBLISHED
+	case bundleEventActivated:
+		return arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_ACTIVATED
+	case bundleEventRolledBack:
+		return arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_ROLLED_BACK
+	default:
+		return arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_UNSPECIFIED
 	}
 }
 

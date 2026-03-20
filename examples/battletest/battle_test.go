@@ -7,26 +7,13 @@ import (
 	"time"
 
 	arbiterv1 "github.com/odvcencio/arbiter/api/arbiter/v1"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"github.com/odvcencio/arbiter/internal/testarbiter"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-func addr() string {
-	if a := os.Getenv("ARBITER_ADDR"); a != "" {
-		return a
-	}
-	return "arbiter.orchard.svc.cluster.local:8081"
-}
-
 func connect(t *testing.T) arbiterv1.ArbiterServiceClient {
 	t.Helper()
-	conn, err := grpc.NewClient(addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(func() { conn.Close() })
-	return arbiterv1.NewArbiterServiceClient(conn)
+	return testarbiter.NewClient(t)
 }
 
 func publish(t *testing.T, client arbiterv1.ArbiterServiceClient, name, file string) string {

@@ -71,6 +71,12 @@ const (
 
 	// Rule boundary
 	OpRuleMatch // pop bool — if true, record rule as matched
+
+	// Future-facing statement/value helpers.
+	OpAggBegin // pop collection, begin aggregation
+	OpAggAccum // pop value, accumulate
+	OpAggEnd   // push aggregate result, cleanup
+	OpSetLocal // pop value, store in locals
 )
 
 // Iterator flags for OpIterBegin.
@@ -78,6 +84,13 @@ const (
 	FlagAny  uint8 = 0
 	FlagAll  uint8 = 1
 	FlagNone uint8 = 2
+)
+
+// Aggregate flags for OpAggBegin/OpAggAccum/OpAggEnd.
+const (
+	FlagSum   uint8 = 0
+	FlagCount uint8 = 1
+	FlagAvg   uint8 = 2
 )
 
 // InstrSize is the fixed width of every instruction in bytes.

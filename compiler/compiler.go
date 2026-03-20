@@ -41,6 +41,7 @@ type cstCompiler struct {
 	lang   *gotreesitter.Language
 	pool   *intern.Pool
 	consts map[string]constVal
+	err    error
 }
 
 func (c *cstCompiler) text(n *gotreesitter.Node) string {
@@ -71,6 +72,9 @@ func (c *cstCompiler) compileSourceFile(root *gotreesitter.Node) (*CompiledRules
 			rh, err := c.compileRule(child, rs)
 			if err != nil {
 				return nil, err
+			}
+			if c.err != nil {
+				return nil, c.err
 			}
 			rs.Rules = append(rs.Rules, rh)
 		}
@@ -185,10 +189,18 @@ func (c *cstCompiler) compileRule(n *gotreesitter.Node, rs *CompiledRuleset) (Ru
 			rh.SegmentNameIdx = c.pool.String(c.text(segNode))
 			rh.HasSegment = true
 		}
+		condOff := uint32(len(rs.Instructions))
+		var code []byte
+		for i := 0; i < int(whenNode.NamedChildCount()); i++ {
+			child := whenNode.NamedChild(i)
+			if c.nodeType(child) == "let_binding" {
+				code = c.compileLet(code, child)
+			}
+		}
 		if exprNode := c.childByField(whenNode, "expr"); exprNode != nil {
-			condOff := uint32(len(rs.Instructions))
-			var code []byte
 			code = c.compileExpr(code, exprNode)
+		}
+		if len(code) > 0 {
 			rs.Instructions = append(rs.Instructions, code...)
 			rh.ConditionOff = condOff
 			rh.ConditionLen = uint32(len(code))
@@ -218,6 +230,9 @@ func (c *cstCompiler) compileRule(n *gotreesitter.Node, rs *CompiledRuleset) (Ru
 			}
 			rh.Rollout = uint8(rollout)
 		}
+	}
+	if c.err != nil {
+		return rh, c.err
 	}
 
 	return rh, nil
@@ -318,6 +333,8 @@ func (c *cstCompiler) compileExpr(code []byte, n *gotreesitter.Node) []byte {
 	// Math
 	case "math_expr":
 		return c.compileMath(code, n)
+	case "aggregate_expr":
+		return c.compileAggregate(code, n)
 
 	// Quantifiers
 	case "quantifier_expr":
@@ -456,6 +473,54 @@ func (c *cstCompiler) compileMath(code []byte, n *gotreesitter.Node) []byte {
 	default:
 		return Emit(code, OpAdd, 0, 0)
 	}
+}
+
+// compileLet emits a let-binding statement that stores the computed value in a local.
+func (c *cstCompiler) compileLet(code []byte, n *gotreesitter.Node) []byte {
+	nameNode := c.childByField(n, "name")
+	valueNode := c.childByField(n, "value")
+	if nameNode == nil || valueNode == nil {
+		return code
+	}
+	code = c.compileExpr(code, valueNode)
+	return Emit(code, OpSetLocal, 0, c.pool.String(c.text(nameNode)))
+}
+
+// compileAggregate emits aggregation opcodes for sum/count/avg.
+func (c *cstCompiler) compileAggregate(code []byte, n *gotreesitter.Node) []byte {
+	funcName := c.text(c.childByField(n, "function"))
+	varName := c.text(c.childByField(n, "var"))
+	varIdx := c.pool.String(varName)
+
+	var flag uint8
+	switch funcName {
+	case "sum":
+		flag = FlagSum
+	case "count":
+		flag = FlagCount
+	case "avg":
+		flag = FlagAvg
+	default:
+		if c.err == nil {
+			c.err = fmt.Errorf("unsupported aggregate function %q", funcName)
+		}
+		return Emit(code, OpLoadNull, 0, 0)
+	}
+
+	code = c.compileExpr(code, c.childByField(n, "collection"))
+	code = Emit(code, OpAggBegin, flag, varIdx)
+
+	bodyStart := len(code)
+	if valueExpr := c.childByField(n, "value_expr"); valueExpr != nil {
+		code = c.compileExpr(code, valueExpr)
+	} else {
+		code = Emit(code, OpLoadNum, 0, c.pool.Number(1))
+	}
+	bodyLen := uint16(len(code) - bodyStart)
+
+	code = Emit(code, OpAggAccum, flag, bodyLen)
+	code = Emit(code, OpAggEnd, flag, 0)
+	return code
 }
 
 // compileQuantifier emits iteration opcodes for any/all/none.

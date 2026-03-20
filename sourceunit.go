@@ -232,7 +232,8 @@ func CompileParsed(parsed *ParsedSource) (*compiler.CompiledRuleset, error) {
 	return compiler.CompileCST(parsed.Root, parsed.Source, parsed.Lang)
 }
 
-// CompileFullParsed compiles a previously parsed source and extracts segments.
+// CompileFullParsed compiles a previously parsed source and extracts segments
+// plus arbiter declarations.
 func CompileFullParsed(parsed *ParsedSource) (*CompileResult, error) {
 	if parsed == nil {
 		return nil, fmt.Errorf("nil parsed source")
@@ -245,9 +246,14 @@ func CompileFullParsed(parsed *ParsedSource) (*CompileResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	arbiters, err := compileArbiters(parsed.Root, parsed.Source, parsed.Lang)
+	if err != nil {
+		return nil, err
+	}
 	return &CompileResult{
 		Ruleset:  rs,
 		Segments: segs,
+		Arbiters: arbiters,
 	}, nil
 }
 
@@ -378,7 +384,7 @@ func declarationOrigin(node *gotreesitter.Node, source []byte, path string, gene
 
 func declarationKey(origin SourceOrigin) (string, bool) {
 	switch origin.Kind {
-	case "const_declaration", "segment_declaration", "rule_declaration", "expert_rule_declaration", "flag_declaration", "feature_declaration":
+	case "const_declaration", "segment_declaration", "rule_declaration", "expert_rule_declaration", "flag_declaration", "feature_declaration", "arbiter_declaration":
 		if origin.Name == "" {
 			return "", false
 		}
@@ -511,6 +517,9 @@ func (u *SourceUnit) mapPosition(line, column int, message string, err error) (*
 func (u *SourceUnit) mapNamedError(err error) (*DiagnosticError, bool) {
 	message := err.Error()
 	if diag, ok := u.namedDiagnostic(message, err, "rule ", "rule_declaration", "expert_rule_declaration"); ok {
+		return diag, true
+	}
+	if diag, ok := u.namedDiagnostic(message, err, "arbiter ", "arbiter_declaration"); ok {
 		return diag, true
 	}
 	if diag, ok := u.namedDiagnostic(message, err, "expert rule ", "expert_rule_declaration"); ok {

@@ -1,0 +1,231 @@
+# Sales Pipeline - Expert Inference
+# Dogfooding: Arbiter governing its own go-to-market.
+# Feed leads as facts, get reminders and actions as outcomes.
+
+arbiter sales_pipeline {
+    poll 30m
+    source crm://leads
+    source crm://activities
+    source crm://pipeline_stats
+    checkpoint /var/lib/arbiter/sales-pipeline.state
+
+    on Action where priority == "high" webhook https://sales.internal/actions/high-priority
+    on Action webhook https://sales.internal/actions
+    on Reminder slack #sales-reminders
+    on Status audit /var/log/arbiter/sales-pipeline.jsonl
+}
+
+# Phase 1: Qualify inbound leads
+
+expert rule QualifyHighTier priority 10 {
+    when {
+        any lead in facts.Lead {
+            lead.title contains "fraud"
+            or lead.title contains "risk"
+            or lead.title contains "platform"
+        }
+    }
+    then assert QualifiedLead {
+        key: lead.email,
+        tier: "high",
+        source: lead.source,
+        company: lead.company,
+    }
+}
+
+expert rule QualifyMedTier priority 11 {
+    excludes QualifyHighTier
+    when {
+        any lead in facts.Lead {
+            lead.title contains "engineer"
+            or lead.title contains "VP"
+            or lead.title contains "CTO"
+        }
+    }
+    then assert QualifiedLead {
+        key: lead.email,
+        tier: "medium",
+        source: lead.source,
+        company: lead.company,
+    }
+}
+
+# Phase 2: Determine outreach action
+
+expert rule FirstTouch priority 20 {
+    when {
+        any ql in facts.QualifiedLead { ql.tier == "high" }
+        and none dm in facts.DMSent { dm.lead == ql.email }
+    }
+    then emit Action {
+        type: "send_dm",
+        template: "benchmark_hook",
+        lead: ql.email,
+        company: ql.company,
+        priority: "high",
+    }
+}
+
+expert rule FirstTouchMedium priority 21 {
+    when {
+        any ql in facts.QualifiedLead { ql.tier == "medium" }
+        and none dm in facts.DMSent { dm.lead == ql.email }
+    }
+    then emit Action {
+        type: "send_dm",
+        template: "problem_hook",
+        lead: ql.email,
+        company: ql.company,
+        priority: "medium",
+    }
+}
+
+# Phase 3: Follow-up on stale conversations
+
+expert rule StaleFollowUp priority 30 {
+    stable
+    when {
+        any dm in facts.DMSent {
+            dm.status == "no_response"
+            and dm.days_since > 3
+        }
+    }
+    then emit Reminder {
+        type: "follow_up",
+        lead: dm.lead,
+        reason: "no response in 3+ days",
+        suggestion: "try different angle or shorter message",
+    }
+}
+
+expert rule WarmFollowUp priority 31 {
+    stable
+    when {
+        any dm in facts.DMSent {
+            dm.status == "responded"
+            and dm.days_since > 1
+            and dm.booked_call == false
+        }
+    }
+    then emit Reminder {
+        type: "book_call",
+        lead: dm.lead,
+        reason: "responded but no call booked",
+        suggestion: "propose specific time",
+    }
+}
+
+# Phase 4: Post-call actions
+
+expert rule PostDemoFollowUp priority 40 {
+    stable
+    when {
+        any call in facts.Call {
+            call.status == "completed"
+            and call.days_since > 0
+        }
+        and none proposal in facts.Proposal { proposal.lead == call.lead }
+    }
+    then emit Action {
+        type: "send_proposal",
+        lead: call.lead,
+        reason: "demo done, no proposal sent",
+    }
+}
+
+expert rule ProposalFollowUp priority 41 {
+    stable
+    when {
+        any prop in facts.Proposal {
+            prop.status == "sent"
+            and prop.days_since > 5
+        }
+    }
+    then emit Reminder {
+        type: "nudge_proposal",
+        lead: prop.lead,
+        reason: "proposal sent 5+ days ago with no response",
+        suggestion: "short check-in, offer to adjust scope",
+    }
+}
+
+# Phase 5: Employer referral detection
+
+expert rule DetectGoServicesLead priority 25 {
+    when {
+        any call in facts.Call {
+            call.needs_go_engineers == true
+        }
+    }
+    then emit Action {
+        type: "employer_referral",
+        lead: call.lead,
+        company: call.company,
+        value: "20k qualified meeting",
+    }
+}
+
+# Phase 6: Daily quota check
+
+expert rule DailyQuotaNotMet priority 50 {
+    stable
+    when {
+        any day in facts.DailyStats {
+            day.date == day.today
+            and day.dms_sent < 10
+        }
+    }
+    then emit Reminder {
+        type: "quota",
+        sent: day.dms_sent,
+        remaining: 10,
+        message: "send more DMs today",
+    }
+}
+
+expert rule DailyQuotaMet priority 51 {
+    stable
+    excludes DailyQuotaNotMet
+    when {
+        any day in facts.DailyStats {
+            day.date == day.today
+            and day.dms_sent >= 10
+        }
+    }
+    then emit Status {
+        type: "quota_met",
+        message: "daily DM quota hit",
+    }
+}
+
+# Phase 7: Pipeline health
+
+expert rule PipelineHealthy priority 60 {
+    stable
+    when {
+        any stats in facts.PipelineStats {
+            stats.active_leads > 5
+            and stats.calls_this_week > 2
+        }
+    }
+    then emit Status {
+        type: "pipeline_healthy",
+        message: "pipeline is active",
+    }
+}
+
+expert rule PipelineCold priority 61 {
+    stable
+    excludes PipelineHealthy
+    when {
+        any stats in facts.PipelineStats {
+            stats.active_leads <= 5
+            or stats.calls_this_week <= 1
+        }
+    }
+    then emit Reminder {
+        type: "pipeline_cold",
+        message: "pipeline needs more leads",
+        suggestion: "spend 30 min on LinkedIn search",
+    }
+}

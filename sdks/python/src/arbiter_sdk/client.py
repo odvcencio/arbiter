@@ -45,6 +45,18 @@ class ArbiterClient:
     def rollback_bundle(self, name: str) -> service_pb2.RollbackBundleResponse:
         return self.stub.RollbackBundle(service_pb2.RollbackBundleRequest(name=name))
 
+    def get_bundle(self, *, bundle_id: str = "", bundle_name: str = "") -> service_pb2.GetBundleResponse:
+        return self.stub.GetBundle(service_pb2.GetBundleRequest(bundle_id=bundle_id, bundle_name=bundle_name))
+
+    def watch_bundles(self, *, names: Sequence[str] = (), active_only: bool = False):
+        return self.stub.WatchBundles(service_pb2.WatchBundlesRequest(names=list(names), active_only=active_only))
+
+    def get_overrides(self, *, bundle_id: str = "", bundle_name: str = "") -> service_pb2.GetOverridesResponse:
+        return self.stub.GetOverrides(service_pb2.GetOverridesRequest(bundle_id=bundle_id, bundle_name=bundle_name))
+
+    def watch_overrides(self, *, bundle_id: str):
+        return self.stub.WatchOverrides(service_pb2.WatchOverridesRequest(bundle_id=bundle_id))
+
     def evaluate_rules(
         self,
         *,

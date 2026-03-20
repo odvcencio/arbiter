@@ -45,6 +45,7 @@ func ArbiterGrammar() *Grammar {
 		Sym("include_declaration"),
 		Sym("feature_declaration"),
 		Sym("const_declaration"),
+		Sym("arbiter_declaration"),
 		Sym("rule_declaration"),
 		Sym("expert_rule_declaration"),
 		Sym("segment_declaration"),
@@ -95,6 +96,78 @@ func ArbiterGrammar() *Grammar {
 		Field("value", Sym("_expr")),
 	))
 
+	g.Define("arbiter_declaration", Seq(
+		Str("arbiter"),
+		Field("name", Sym("identifier")),
+		Str("{"),
+		Repeat(Sym("_arbiter_body")),
+		Str("}"),
+	))
+
+	g.Define("_arbiter_body", Choice(
+		Sym("arbiter_poll_clause"),
+		Sym("arbiter_stream_clause"),
+		Sym("arbiter_schedule_clause"),
+		Sym("arbiter_source_clause"),
+		Sym("arbiter_checkpoint_clause"),
+		Sym("arbiter_handler_clause"),
+	))
+
+	g.Define("arbiter_poll_clause", Seq(
+		Str("poll"),
+		Field("interval", Sym("duration_literal")),
+	))
+
+	g.Define("arbiter_stream_clause", Seq(
+		Str("stream"),
+		Field("target", Sym("arbiter_target")),
+	))
+
+	g.Define("arbiter_schedule_clause", Seq(
+		Str("schedule"),
+		Field("expr", Sym("string_literal")),
+		Optional(Seq(
+			Str("source"),
+			Field("target", Sym("arbiter_target")),
+		)),
+	))
+
+	g.Define("arbiter_source_clause", Seq(
+		Str("source"),
+		Field("target", Sym("arbiter_target")),
+	))
+
+	g.Define("arbiter_checkpoint_clause", Seq(
+		Str("checkpoint"),
+		Field("target", Sym("arbiter_target")),
+	))
+
+	g.Define("arbiter_handler_clause", Seq(
+		Str("on"),
+		Field("outcome", Choice(Sym("identifier"), Sym("arbiter_wildcard"))),
+		Optional(Field("filter", Sym("arbiter_handler_filter"))),
+		Field("kind", Sym("arbiter_handler_kind")),
+		Optional(Field("target", Sym("arbiter_target"))),
+	))
+
+	g.Define("arbiter_handler_filter", Seq(
+		Str("where"),
+		Field("expr", Sym("_expr")),
+	))
+
+	g.Define("arbiter_handler_kind", Choice(
+		Str("webhook"),
+		Str("slack"),
+		Str("chain"),
+		Str("exec"),
+		Str("grpc"),
+		Str("audit"),
+		Str("stdout"),
+	))
+
+	g.Define("arbiter_wildcard", Str("*"))
+	g.Define("arbiter_target", Choice(Sym("identifier"), Sym("slack_channel_literal"), Sym("resource_literal"), Sym("string_literal")))
+
 	// --- Rule declaration ---
 	g.Define("rule_declaration", Seq(
 		Str("rule"),
@@ -133,6 +206,7 @@ func ArbiterGrammar() *Grammar {
 		Str("{"),
 		Optional(Field("kill_switch", Sym("kill_switch"))),
 		Optional(Field("no_loop", Sym("no_loop"))),
+		Optional(Field("stable", Sym("stable"))),
 		Repeat(Choice(Sym("rule_requires"), Sym("rule_excludes"))),
 		Optional(Field("activation_group", Sym("expert_activation_group"))),
 		Repeat(Choice(Sym("rule_requires"), Sym("rule_excludes"))),
@@ -150,6 +224,7 @@ func ArbiterGrammar() *Grammar {
 			Field("segment", Sym("identifier")),
 		)),
 		Str("{"),
+		Repeat(Sym("let_binding")),
 		Field("expr", Sym("_expr")),
 		Str("}"),
 	))
@@ -160,10 +235,13 @@ func ArbiterGrammar() *Grammar {
 			Str("segment"),
 			Field("segment", Sym("identifier")),
 		)),
+		Str("{"),
+		Repeat(Sym("let_binding")),
 		Choice(
-			Seq(Str("{"), Field("expr", Sym("_expr")), Str("}")),
-			Seq(Str("{"), Field("bindings", Sym("expert_binding_clause")), Str("}")),
+			Field("expr", Sym("_expr")),
+			Field("bindings", Sym("expert_binding_clause")),
 		),
+		Str("}"),
 	))
 
 	g.Define("expert_binding_clause", Seq(
@@ -176,6 +254,13 @@ func ArbiterGrammar() *Grammar {
 		Field("name", Sym("identifier")),
 		Str("in"),
 		Field("source", Sym("_value_expr")),
+	))
+
+	g.Define("let_binding", Seq(
+		Str("let"),
+		Field("name", Sym("identifier")),
+		Str("="),
+		Field("value", Sym("_expr")),
 	))
 
 	g.Define("expert_where_block", Seq(
@@ -219,6 +304,7 @@ func ArbiterGrammar() *Grammar {
 	))
 
 	g.Define("no_loop", Str("no_loop"))
+	g.Define("stable", Str("stable"))
 
 	g.Define("expert_activation_group", Seq(
 		Str("activation_group"),
@@ -295,6 +381,7 @@ func ArbiterGrammar() *Grammar {
 	// when { expr } [rollout N] then "variant"
 	// when segment_name { expr } [rollout N] then "variant"
 	g.Define("flag_rule", Seq(
+		Optional(Str("else")),
 		Str("when"),
 		Field("condition", Choice(
 			Seq(Field("segment", Sym("identifier")), Str("{"), Sym("_expr"), Str("}")), // segment + inline
@@ -346,6 +433,7 @@ func ArbiterGrammar() *Grammar {
 	// _value_expr: math and primaries only
 	g.Define("_value_expr", Choice(
 		Sym("math_expr"),
+		Sym("aggregate_expr"),
 		Sym("_primary"),
 	))
 
@@ -459,6 +547,26 @@ func ArbiterGrammar() *Grammar {
 		Str("}"),
 	))
 
+	g.Define("aggregate_expr", Seq(
+		Field("function", Sym("identifier")),
+		Str("("),
+		Choice(
+			Seq(
+				Field("value_expr", Sym("_value_expr")),
+				Str("for"),
+				Field("var", Sym("identifier")),
+				Str("in"),
+				Field("collection", Sym("_expr")),
+			),
+			Seq(
+				Field("var", Sym("identifier")),
+				Str("in"),
+				Field("collection", Sym("_expr")),
+			),
+		),
+		Str(")"),
+	))
+
 	// --- Primaries ---
 	g.Define("_primary", Choice(
 		Sym("member_expr"),
@@ -496,7 +604,10 @@ func ArbiterGrammar() *Grammar {
 	// --- Terminals ---
 	g.Define("identifier", Pat(`[a-zA-Z_][a-zA-Z0-9_]*`))
 	g.Define("number_literal", Pat(`-?[0-9]+(\.[0-9]+)?`))
+	g.Define("duration_literal", Pat(`([0-9]+(ns|us|µs|ms|s|m|h))+`))
 	g.Define("string_literal", Pat(`"[^"]*"`))
+	g.Define("slack_channel_literal", Token(Prec(1, Pat(`#[^\s{}"]+`))))
+	g.Define("resource_literal", Pat(`[^\s{}"#]+`))
 	g.Define("bool_literal", Choice(Str("true"), Str("false")))
 
 	// Extras: whitespace and comments

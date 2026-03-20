@@ -17,6 +17,20 @@ import (
 	"github.com/odvcencio/arbiter/flags"
 )
 
+type bundleEventType string
+
+const (
+	bundleEventPublished  bundleEventType = "published"
+	bundleEventActivated  bundleEventType = "activated"
+	bundleEventRolledBack bundleEventType = "rolled_back"
+)
+
+type bundleEvent struct {
+	Type             bundleEventType
+	Bundle           *Bundle
+	PreviousBundleID string
+}
+
 // Bundle is a published governed artifact available over gRPC.
 type Bundle struct {
 	ID              string
@@ -48,19 +62,38 @@ type registrySnapshot struct {
 
 // Registry stores published bundles and optional active versions per bundle name.
 type Registry struct {
-	mu      sync.RWMutex
-	bundles map[string]*Bundle
-	history map[string][]string
-	active  map[string]string
-	path    string
+	mu          sync.RWMutex
+	bundles     map[string]*Bundle
+	history     map[string][]string
+	active      map[string]string
+	subscribers map[uint64]chan bundleEvent
+	nextSubID   uint64
+	path        string
+}
+
+// BuildBundle compiles one bundle payload without mutating a registry.
+func BuildBundle(name string, source []byte, published time.Time) (*Bundle, error) {
+	if published.IsZero() {
+		published = time.Now().UTC()
+	} else {
+		published = published.UTC()
+	}
+	return compileBundleRecord(bundleRecord{
+		ID:        bundleIdentity(name, source),
+		Name:      name,
+		Checksum:  sourceChecksum(source),
+		Source:    append([]byte(nil), source...),
+		Published: published,
+	})
 }
 
 // NewRegistry creates an empty in-memory bundle registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		bundles: make(map[string]*Bundle),
-		history: make(map[string][]string),
-		active:  make(map[string]string),
+		bundles:     make(map[string]*Bundle),
+		history:     make(map[string][]string),
+		active:      make(map[string]string),
+		subscribers: make(map[uint64]chan bundleEvent),
 	}
 }
 
@@ -130,6 +163,10 @@ func (r *Registry) Publish(name string, source []byte) (*Bundle, error) {
 	if err := r.persistSnapshot(snapshot); err != nil {
 		return nil, err
 	}
+	r.notify(bundleEvent{
+		Type:   bundleEventPublished,
+		Bundle: bundle,
+	})
 	return bundle, nil
 }
 
@@ -174,31 +211,104 @@ func (r *Registry) Resolve(id, name string) (*Bundle, error) {
 func (r *Registry) List(name string) []*Bundle {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-
-	var out []*Bundle
 	if name != "" {
-		for _, id := range r.history[name] {
-			if bundle, ok := r.bundles[id]; ok {
+		return listBundlesLocked(r.bundles, r.history, []string{name})
+	}
+	return listBundlesLocked(r.bundles, r.history, nil)
+}
+
+// ActiveBundles returns the active bundle for each requested name.
+// If names is empty, it returns all active bundles.
+func (r *Registry) ActiveBundles(names []string) []*Bundle {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return activeBundlesLocked(r.bundles, r.active, names)
+}
+
+func activeBundlesLocked(bundles map[string]*Bundle, active map[string]string, names []string) []*Bundle {
+	if len(names) == 0 {
+		keys := make([]string, 0, len(active))
+		for name := range active {
+			keys = append(keys, name)
+		}
+		slices.Sort(keys)
+
+		out := make([]*Bundle, 0, len(keys))
+		for _, name := range keys {
+			if id, ok := active[name]; ok {
+				if bundle, ok := bundles[id]; ok {
+					out = append(out, bundle)
+				}
+			}
+		}
+		return out
+	}
+
+	seen := make(map[string]struct{}, len(names))
+	out := make([]*Bundle, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		if id, ok := active[name]; ok {
+			if bundle, ok := bundles[id]; ok {
 				out = append(out, bundle)
 			}
 		}
-	} else {
-		out = make([]*Bundle, 0, len(r.bundles))
-		for _, bundle := range r.bundles {
-			out = append(out, bundle)
-		}
 	}
-	slices.SortFunc(out, func(a, b *Bundle) int {
-		switch {
-		case a.Published.After(b.Published):
-			return -1
-		case a.Published.Before(b.Published):
-			return 1
-		default:
-			return 0
-		}
-	})
 	return out
+}
+
+// Install stores a precompiled bundle and optionally activates it.
+func (r *Registry) Install(bundle *Bundle, activate bool) (*Bundle, error) {
+	if bundle == nil {
+		return nil, errors.New("bundle is required")
+	}
+	if bundle.ID == "" || bundle.Name == "" {
+		return nil, errors.New("bundle id and name are required")
+	}
+
+	published := false
+	activated := false
+
+	r.mu.Lock()
+	stored := bundle
+	if existing, ok := r.bundles[bundle.ID]; ok {
+		stored = existing
+	} else {
+		r.bundles[bundle.ID] = bundle
+		if !slices.Contains(r.history[bundle.Name], bundle.ID) {
+			r.history[bundle.Name] = append(r.history[bundle.Name], bundle.ID)
+		}
+		published = true
+	}
+	if activate && r.active[stored.Name] != stored.ID {
+		r.active[stored.Name] = stored.ID
+		activated = true
+	}
+	snapshot := r.snapshotLocked()
+	r.mu.Unlock()
+
+	if err := r.persistSnapshot(snapshot); err != nil {
+		return nil, err
+	}
+	if published {
+		r.notify(bundleEvent{
+			Type:   bundleEventPublished,
+			Bundle: stored,
+		})
+	}
+	if activated {
+		r.notify(bundleEvent{
+			Type:   bundleEventActivated,
+			Bundle: stored,
+		})
+	}
+	return stored, nil
 }
 
 // Activate switches the active bundle for one bundle name.
@@ -219,6 +329,10 @@ func (r *Registry) Activate(name, id string) (*Bundle, error) {
 	if err := r.persistSnapshot(snapshot); err != nil {
 		return nil, err
 	}
+	r.notify(bundleEvent{
+		Type:   bundleEventActivated,
+		Bundle: bundle,
+	})
 	return bundle, nil
 }
 
@@ -255,7 +369,130 @@ func (r *Registry) Rollback(name string) (*Bundle, *Bundle, error) {
 	if err := r.persistSnapshot(snapshot); err != nil {
 		return nil, nil, err
 	}
+	r.notify(bundleEvent{
+		Type:             bundleEventRolledBack,
+		Bundle:           previous,
+		PreviousBundleID: currentID,
+	})
 	return previous, current, nil
+}
+
+// Subscribe registers for bundle change events.
+func (r *Registry) Subscribe() (<-chan bundleEvent, func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.subscribers == nil {
+		r.subscribers = make(map[uint64]chan bundleEvent)
+	}
+	id := r.nextSubID
+	r.nextSubID++
+	ch := make(chan bundleEvent, 4)
+	r.subscribers[id] = ch
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			r.mu.Lock()
+			delete(r.subscribers, id)
+			r.mu.Unlock()
+		})
+	}
+	return ch, cancel
+}
+
+// SubscribeActive atomically captures the current active bundles and registers
+// for future bundle change events.
+func (r *Registry) SubscribeActive(names []string) ([]*Bundle, <-chan bundleEvent, func()) {
+	return r.SubscribeBundles(names, true)
+}
+
+// SubscribeBundles atomically captures the current bundle snapshot and registers
+// for future bundle change events.
+func (r *Registry) SubscribeBundles(names []string, activeOnly bool) ([]*Bundle, <-chan bundleEvent, func()) {
+	r.mu.Lock()
+	if r.subscribers == nil {
+		r.subscribers = make(map[uint64]chan bundleEvent)
+	}
+	id := r.nextSubID
+	r.nextSubID++
+	ch := make(chan bundleEvent, 4)
+	r.subscribers[id] = ch
+	initial := activeBundlesLocked(r.bundles, r.active, names)
+	if !activeOnly {
+		initial = listBundlesLocked(r.bundles, r.history, names)
+	}
+	r.mu.Unlock()
+
+	var once sync.Once
+	cancel := func() {
+		once.Do(func() {
+			r.mu.Lock()
+			delete(r.subscribers, id)
+			r.mu.Unlock()
+		})
+	}
+	return initial, ch, cancel
+}
+
+func listBundlesLocked(bundles map[string]*Bundle, history map[string][]string, names []string) []*Bundle {
+	var out []*Bundle
+	if len(names) == 0 {
+		out = make([]*Bundle, 0, len(bundles))
+		for _, bundle := range bundles {
+			out = append(out, bundle)
+		}
+	} else {
+		seen := make(map[string]struct{}, len(names))
+		for _, name := range names {
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			for _, id := range history[name] {
+				if bundle, ok := bundles[id]; ok {
+					out = append(out, bundle)
+				}
+			}
+		}
+	}
+	slices.SortFunc(out, func(a, b *Bundle) int {
+		switch {
+		case a.Published.After(b.Published):
+			return -1
+		case a.Published.Before(b.Published):
+			return 1
+		default:
+			return 0
+		}
+	})
+	return out
+}
+
+func (r *Registry) notify(event bundleEvent) {
+	r.mu.RLock()
+	subscribers := make([]chan bundleEvent, 0, len(r.subscribers))
+	for _, ch := range r.subscribers {
+		subscribers = append(subscribers, ch)
+	}
+	r.mu.RUnlock()
+
+	for _, ch := range subscribers {
+		select {
+		case ch <- event:
+			continue
+		default:
+		}
+		select {
+		case <-ch:
+		default:
+		}
+		select {
+		case ch <- event:
+		default:
+		}
+	}
 }
 
 func (r *Registry) persistSnapshot(snapshot registrySnapshot) error {

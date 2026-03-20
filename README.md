@@ -13,7 +13,7 @@ Every decision your software makes — approve this transaction, show this varia
                               └──→ Drools DRL
 ```
 
-Two runtimes, one language. **Stateless evaluation** for request-path decisions. **Expert inference** for forward-chaining reasoning until quiescence. Same compiler, same VM, same governance.
+Four modalities, one language. **Stateless evaluation** for request-path decisions. **Feature flags** for governed variant resolution. **Expert inference** for forward-chaining reasoning until quiescence. **Continuous arbiters** for always-on decision loops. Same compiler, same VM, same governance.
 
 The parser is built on [gotreesitter](https://github.com/odvcencio/gotreesitter), a pure-Go reimplementation of the tree-sitter runtime — no CGo, no C toolchain, no generated files. Cross-compiles to any `GOOS`/`GOARCH` target Go supports, including WASM.
 
@@ -37,6 +37,23 @@ Arbiter's numbers come from this repo's benchmarks. Cross-engine runtime compari
 CEL is ~2.7x faster on a bare boolean predicate — it's a lean expression evaluator. Arbiter carries rule-engine machinery (governance gates, action resolution, constant pool) and is still in the same class. OPA is 25x slower with 67x more allocations.
 
 Fixed 256-element stack. The current public benchmark path is low-allocation rather than zero-allocation: `96 B/op`, `3 allocs/op`. The constant pool interns all strings and numbers — 10K rules referencing the same field names share one copy.
+
+To separate engine cost from transport cost, this repo also ships a split latency benchmark over the `fraud` example:
+
+```bash
+# Pure in-process governed eval
+go test -run '^$' -bench '^BenchmarkLatencySplit/in_process_governed_eval$' -benchmem
+
+# gRPC through a local kubectl port-forward
+ARBITER_BENCH_PORT_FORWARD_ADDR=127.0.0.1:18081 \
+go test -run '^$' -bench '^BenchmarkLatencySplit/grpc_port_forward$' -benchmem -benchtime=100x
+
+# gRPC direct to the cluster service (run from an environment that can resolve it)
+ARBITER_BENCH_IN_CLUSTER_ADDR=arbiter.orchard.svc.cluster.local:8081 \
+go test -run '^$' -bench '^BenchmarkLatencySplit/grpc_in_cluster$' -benchmem -benchtime=100x
+```
+
+The gRPC benches publish the bundle once, warm it up, and benchmark `EvaluateRules` only.
 
 ## Governance
 
@@ -148,6 +165,34 @@ The session runs with guardrails — configurable max rounds and max mutations, 
 
 `modify` and `retract` are reversible overlays, not one-way destructive writes. If the supporting rule stops matching, the underlying fact view is recomputed and the overlay falls away. That can produce a steady-state no-op activation in the trace while a modifier or retractor remains active.
 
+### Continuous Arbiters
+
+Long-lived decision loops are first-class in `.arb` too. An `arbiter` declaration lives beside the rules it runs, so one bundle can define trigger modes, fact sources, outcome routing, persistence, and the decision logic itself.
+
+```arb
+arbiter trading_system {
+    stream wss://exchange.com/prices
+    schedule "0 8 * * MON-FRI" source https://calendar.api/market-hours
+    checkpoint /var/lib/arbiter/trading.state
+
+    on Opportunity where confidence > 0.8 chain ai_analysis
+    on RiskAlert where severity == "critical" exec "kill-all-orders"
+    on RiskAlert where severity == "warning" slack #trading-risk
+    on * audit /var/log/trading.jsonl
+}
+```
+
+The declaration surface is built around a few ideas:
+
+- `poll 30s`, `schedule "cron expr"`, and `stream uri` are the three first-class trigger modes
+- `source uri` declares external fact inputs, and `chain target_arbiter` declares that one arbiter's outcomes should feed another
+- `on Outcome where ... handler target` routes by outcome fields, not just outcome name
+- `checkpoint path` marks the arbiter as stateful across restarts
+
+Arbiters are always killable by default. There is no `kill_switch` keyword inside an `arbiter` block because the loop should run unless a runtime stop path is used. The exact stop path can vary by deployment, but the invariant is the same: every arbiter must be stoppable quickly. In practice that can be wired through several control paths, including a control-plane override, a local override file, parent-context cancellation, or ordinary process shutdown/signal handling.
+
+`CompileFull` extracts these declarations alongside rules and segments. In the current codebase, this is the language and compile surface for the always-on modality; transport adapters, persistence wiring, and chained delivery sit one runtime layer above it.
+
 ### Explainability
 
 Every evaluation produces a full decision trace — stateless rules, flags, and expert sessions alike.
@@ -214,6 +259,10 @@ service ArbiterService {
     rpc ListBundles(...)         // list bundle history and active versions
     rpc ActivateBundle(...)      // switch active version for a bundle name
     rpc RollbackBundle(...)      // move active version back one revision
+    rpc GetBundle(...)           // fetch active source or immutable bundle by id
+    rpc WatchBundles(...)        // stream bundle snapshots and live changes
+    rpc GetOverrides(...)        // fetch runtime overrides for one bundle
+    rpc WatchOverrides(...)      // stream override snapshot and live mutations
     rpc EvaluateRules(...)      // stateless rule evaluation
     rpc ResolveFlag(...)        // flag resolution with explainability
     rpc StartSession(...)       // create an expert session
@@ -229,6 +278,10 @@ service ArbiterService {
 ```
 
 Bundles are published once and evaluated many times. Each bundle compiles rules, expert rules, flags, and segments from a single `.arb` source or from one root file expanded through `include`. Bundles now keep per-name history and an active version, so callers can evaluate by immutable `bundle_id` or by active `bundle_name`.
+
+`GetBundle` returns the raw `.arb` source for one immutable `bundle_id` or the active bundle for one `bundle_name`. `WatchBundles` streams an initial snapshot plus `published`, `activated`, and `rolled_back` events so sidecars and local agents can keep a compiled local cache hot without polling.
+
+`GetOverrides` returns the current runtime override set for one bundle, and `WatchOverrides` streams a typed snapshot followed by `rule`, `flag`, and `flag_rule` mutations keyed to immutable `bundle_id`.
 
 ### Audit
 
@@ -265,7 +318,20 @@ arbiter emit rules.arb --rule Name # emit single rule
 arbiter check rules.arb            # validate without emitting
 arbiter expert tax.arb --envelope '{...}' [--facts '[...]']
 arbiter serve --grpc :8081 --audit-file decisions.jsonl --bundle-file bundles.json --overrides-file overrides.json
+arbiter-agent --upstream 127.0.0.1:8081 --grpc 127.0.0.1:7081 --status 127.0.0.1:7082 --bundle-name checkout --bundle-name pricing
 ```
+
+`arbiter-agent` is the localhost data-plane form factor. It bootstraps one or many active bundles from the upstream control plane with `GetBundle`, keeps `WatchBundles(active_only=true)` streams open, syncs runtime overrides from `GetOverrides` plus `WatchOverrides`, and serves the normal Arbiter gRPC API from its own in-memory registry and override store.
+
+Repeat `--bundle-name` to keep multiple bundles hot, or set `ARBITER_BUNDLE_NAMES=checkout,pricing`. The legacy single-value `ARBITER_BUNDLE_NAME` env var still works.
+
+Set `--ready-max-staleness 30s` or `ARBITER_AGENT_READY_MAX_STALENESS=30s` if you want `/readyz` to fail once bundle or override sync freshness drifts beyond that age. `0s` keeps the old last-good behavior and disables freshness enforcement.
+
+It also exposes local health and status on the HTTP listener:
+
+- `GET /healthz` for process liveness
+- `GET /readyz` for sync readiness, optionally gated by the configured freshness threshold
+- `GET /status` for JSON introspection of synced bundles, checksums, bundle/override freshness, reconnect/error counters, and the last upstream failure when one is present
 
 When `include` is involved, file-backed commands report diagnostics against the original source file:
 
@@ -293,6 +359,16 @@ Use file-aware APIs when your source uses `include`:
 ruleset, _ := arbiter.CompileFile("rules/main.arb")
 full, _ := arbiter.CompileFullFile("rules/main.arb")
 json, _ := arbiter.TranspileFile("rules/main.arb")
+```
+
+Continuous arbiters come back on the same compile path:
+
+```go
+full, _ := arbiter.CompileFull(source)
+for _, decl := range full.Arbiters {
+    fmt.Printf("%s killable=%t triggers=%d checkpoint=%q\n",
+        decl.Name, decl.Killable, len(decl.Triggers), decl.Checkpoint)
+}
 ```
 
 ### Go Library — Flags

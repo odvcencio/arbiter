@@ -13,6 +13,10 @@ service ArbiterService {
   rpc ListBundles(ListBundlesRequest) returns (ListBundlesResponse);
   rpc ActivateBundle(ActivateBundleRequest) returns (ActivateBundleResponse);
   rpc RollbackBundle(RollbackBundleRequest) returns (RollbackBundleResponse);
+  rpc GetBundle(GetBundleRequest) returns (GetBundleResponse);
+  rpc WatchBundles(WatchBundlesRequest) returns (stream BundleEvent);
+  rpc GetOverrides(GetOverridesRequest) returns (GetOverridesResponse);
+  rpc WatchOverrides(WatchOverridesRequest) returns (stream OverrideEvent);
   rpc EvaluateRules(EvaluateRulesRequest) returns (EvaluateRulesResponse);
   rpc ResolveFlag(ResolveFlagRequest) returns (ResolveFlagResponse);
   rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
@@ -75,6 +79,98 @@ message RollbackBundleRequest {
 message RollbackBundleResponse {
   BundleSummary bundle = 1;
   string previous_bundle_id = 2;
+}
+
+message GetBundleRequest {
+  string bundle_id = 1;
+  string bundle_name = 2;
+}
+
+message GetBundleResponse {
+  BundleSummary bundle = 1;
+  bytes source = 2;
+}
+
+message WatchBundlesRequest {
+  repeated string names = 1;
+  bool active_only = 2;
+}
+
+enum BundleEventType {
+  BUNDLE_EVENT_TYPE_UNSPECIFIED = 0;
+  BUNDLE_EVENT_TYPE_SNAPSHOT = 1;
+  BUNDLE_EVENT_TYPE_PUBLISHED = 2;
+  BUNDLE_EVENT_TYPE_ACTIVATED = 3;
+  BUNDLE_EVENT_TYPE_ROLLED_BACK = 4;
+}
+
+message BundleEvent {
+  BundleEventType type = 1;
+  string name = 2;
+  BundleSummary bundle = 3;
+  bytes source = 4;
+  string previous_bundle_id = 5;
+}
+
+message GetOverridesRequest {
+  string bundle_id = 1;
+  string bundle_name = 2;
+}
+
+message GetOverridesResponse {
+  BundleOverrides overrides = 1;
+}
+
+message WatchOverridesRequest {
+  string bundle_id = 1;
+}
+
+enum OverrideEventType {
+  OVERRIDE_EVENT_TYPE_UNSPECIFIED = 0;
+  OVERRIDE_EVENT_TYPE_SNAPSHOT = 1;
+  OVERRIDE_EVENT_TYPE_RULE = 2;
+  OVERRIDE_EVENT_TYPE_FLAG = 3;
+  OVERRIDE_EVENT_TYPE_FLAG_RULE = 4;
+}
+
+message BundleOverrides {
+  string bundle_id = 1;
+  repeated RuleOverrideEntry rules = 2;
+  repeated FlagOverrideEntry flags = 3;
+  repeated FlagRuleOverrideEntry flag_rules = 4;
+}
+
+message RuleOverrideEntry {
+  string rule_name = 1;
+  bool kill_switch_set = 2;
+  bool kill_switch = 3;
+  bool rollout_set = 4;
+  uint32 rollout = 5;
+}
+
+message FlagOverrideEntry {
+  string flag_key = 1;
+  bool kill_switch_set = 2;
+  bool kill_switch = 3;
+}
+
+message FlagRuleOverrideEntry {
+  string flag_key = 1;
+  uint32 rule_index = 2;
+  bool rollout_set = 3;
+  uint32 rollout = 4;
+}
+
+message OverrideEvent {
+  OverrideEventType type = 1;
+  string bundle_id = 2;
+  BundleOverrides snapshot = 3;
+  string rule_name = 4;
+  RuleOverrideEntry rule = 5;
+  string flag_key = 6;
+  FlagOverrideEntry flag = 7;
+  uint32 rule_index = 8;
+  FlagRuleOverrideEntry flag_rule = 9;
 }
 
 message TraceStep {

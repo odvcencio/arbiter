@@ -150,6 +150,79 @@ func TestParseConstList(t *testing.T) {
 	}
 }
 
+func TestParseArbiterDeclaration(t *testing.T) {
+	sexp := parseArb(t, `
+arbiter trading_system {
+	stream wss://exchange.com/prices
+	schedule "0 8 * * MON-FRI" source https://calendar.api/market-hours
+	checkpoint /var/lib/arbiter/trading.state
+	on Opportunity where confidence > 0.8 chain ai_analysis
+	on RiskAlert where severity == "warning" slack #trading-risk
+	on * audit /var/log/trading.jsonl
+}`)
+	if !strings.Contains(sexp, "arbiter_declaration") {
+		t.Fatal("expected arbiter_declaration")
+	}
+	if strings.Count(sexp, "arbiter_stream_clause") != 1 {
+		t.Fatalf("expected 1 arbiter_stream_clause node, got: %s", sexp)
+	}
+	if strings.Count(sexp, "arbiter_schedule_clause") != 1 {
+		t.Fatalf("expected 1 arbiter_schedule_clause node, got: %s", sexp)
+	}
+	if strings.Count(sexp, "arbiter_checkpoint_clause") != 1 {
+		t.Fatalf("expected 1 arbiter_checkpoint_clause node, got: %s", sexp)
+	}
+	if strings.Count(sexp, "arbiter_handler_clause") != 3 {
+		t.Fatalf("expected 3 arbiter_handler_clause nodes, got: %s", sexp)
+	}
+	if strings.Count(sexp, "arbiter_handler_filter") != 2 {
+		t.Fatalf("expected 2 arbiter_handler_filter nodes, got: %s", sexp)
+	}
+}
+
+func TestParseArbiterRejectsKillSwitchKeyword(t *testing.T) {
+	_, err := ParseSource([]byte(`
+arbiter trading_system {
+	kill_switch
+	poll 30s
+	on * stdout
+}`))
+	if err == nil {
+		t.Fatal("expected arbiter kill_switch syntax to be rejected")
+	}
+}
+
+func TestParseArbiterSlackTargetDoesNotConsumeHashComments(t *testing.T) {
+	sexp := parseArb(t, `
+arbiter alerts {
+	poll 30s
+	on Alert where severity == "warning" slack #warnings
+	# real comment
+	on * stdout
+}`)
+	if !strings.Contains(sexp, "arbiter_declaration") {
+		t.Fatalf("expected arbiter declaration, got: %s", sexp)
+	}
+	if strings.Count(sexp, "arbiter_handler_clause") != 2 {
+		t.Fatalf("expected 2 handler clauses, got: %s", sexp)
+	}
+}
+
+func TestParseArbiterSlackTargetAllowsTrailingHashComment(t *testing.T) {
+	sexp := parseArb(t, `
+arbiter alerts {
+	poll 30s
+	on Alert slack #warnings #comment without leading space
+	on * stdout
+}`)
+	if !strings.Contains(sexp, "arbiter_declaration") {
+		t.Fatalf("expected arbiter declaration, got: %s", sexp)
+	}
+	if strings.Count(sexp, "arbiter_handler_clause") != 2 {
+		t.Fatalf("expected 2 handler clauses, got: %s", sexp)
+	}
+}
+
 func TestParseFeature(t *testing.T) {
 	sexp := parseArb(t, `feature user from "user-service" { age: number name: string active: bool }`)
 	if !strings.Contains(sexp, "feature_declaration") {
@@ -269,6 +342,54 @@ func TestParseQuantifier(t *testing.T) {
 	}
 }
 
+func TestParseMultiQuantifierAnd(t *testing.T) {
+	sexp := parseArb(t, `
+expert rule T {
+	when {
+		any risk in facts.RiskFlag { risk.level == "high" }
+		and any txn in facts.Transaction { txn.amount > 1000 }
+	}
+	then assert Combined { key: "both" }
+}`)
+	if strings.Count(sexp, "quantifier_expr") != 2 {
+		t.Fatalf("expected 2 quantifier_expr nodes, got: %s", sexp)
+	}
+	if !strings.Contains(sexp, "and_expr") {
+		t.Fatalf("expected top-level and_expr, got: %s", sexp)
+	}
+}
+
+func TestParseAggregate(t *testing.T) {
+	sexp := parseArb(t, `rule T { when { sum(item.price for item in cart.items) > 100 } then A {} }`)
+	if !strings.Contains(sexp, "aggregate_expr") {
+		t.Error("expected aggregate_expr")
+	}
+}
+
+func TestParseLetBinding(t *testing.T) {
+	sexp := parseArb(t, `rule T { when { let total = income.wages + income.interest total > 50000 } then Match {} }`)
+	if !strings.Contains(sexp, "let_binding") {
+		t.Error("expected let_binding")
+	}
+}
+
+func TestParseStableExpertRule(t *testing.T) {
+	sexp := parseArb(t, `expert rule AllClear { stable when { none m in facts.Marker { true } } then emit Status {} }`)
+	if !strings.Contains(sexp, "(stable)") {
+		t.Error("expected stable node")
+	}
+}
+
+func TestParseFlagElseIf(t *testing.T) {
+	sexp := parseArb(t, `flag checkout type multivariate default "control" {
+		when internal then "treatment_b"
+		else when beta_cohort then "treatment_a"
+	}`)
+	if strings.Count(sexp, "flag_rule") != 2 {
+		t.Fatalf("expected 2 flag_rule nodes, got: %s", sexp)
+	}
+}
+
 func TestParseParen(t *testing.T) {
 	sexp := parseArb(t, `rule T { when { (a > 1 or b < 2) and c == 3 } then A {} }`)
 	if !strings.Contains(sexp, "paren_expr") {
@@ -301,11 +422,19 @@ func TestParseActionParams(t *testing.T) {
 }
 
 func TestParseComment(t *testing.T) {
-	sexp := parseArb(t, `# this is a comment
+	sexp := parseArb(t, `#this is a comment
 rule T { when { true } then A {} }
 `)
 	if !strings.Contains(sexp, "rule_declaration") {
 		t.Error("comment should not break parsing")
+	}
+}
+
+func TestParseInlineHashCommentWithoutSpace(t *testing.T) {
+	sexp := parseArb(t, `rule T { when { true } then A {} } #comment
+`)
+	if !strings.Contains(sexp, "rule_declaration") {
+		t.Error("inline # comment should not break parsing")
 	}
 }
 

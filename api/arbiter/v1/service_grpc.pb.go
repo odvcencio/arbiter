@@ -23,6 +23,10 @@ const (
 	ArbiterService_ListBundles_FullMethodName         = "/arbiter.v1.ArbiterService/ListBundles"
 	ArbiterService_ActivateBundle_FullMethodName      = "/arbiter.v1.ArbiterService/ActivateBundle"
 	ArbiterService_RollbackBundle_FullMethodName      = "/arbiter.v1.ArbiterService/RollbackBundle"
+	ArbiterService_GetBundle_FullMethodName           = "/arbiter.v1.ArbiterService/GetBundle"
+	ArbiterService_WatchBundles_FullMethodName        = "/arbiter.v1.ArbiterService/WatchBundles"
+	ArbiterService_GetOverrides_FullMethodName        = "/arbiter.v1.ArbiterService/GetOverrides"
+	ArbiterService_WatchOverrides_FullMethodName      = "/arbiter.v1.ArbiterService/WatchOverrides"
 	ArbiterService_EvaluateRules_FullMethodName       = "/arbiter.v1.ArbiterService/EvaluateRules"
 	ArbiterService_ResolveFlag_FullMethodName         = "/arbiter.v1.ArbiterService/ResolveFlag"
 	ArbiterService_StartSession_FullMethodName        = "/arbiter.v1.ArbiterService/StartSession"
@@ -44,6 +48,10 @@ type ArbiterServiceClient interface {
 	ListBundles(ctx context.Context, in *ListBundlesRequest, opts ...grpc.CallOption) (*ListBundlesResponse, error)
 	ActivateBundle(ctx context.Context, in *ActivateBundleRequest, opts ...grpc.CallOption) (*ActivateBundleResponse, error)
 	RollbackBundle(ctx context.Context, in *RollbackBundleRequest, opts ...grpc.CallOption) (*RollbackBundleResponse, error)
+	GetBundle(ctx context.Context, in *GetBundleRequest, opts ...grpc.CallOption) (*GetBundleResponse, error)
+	WatchBundles(ctx context.Context, in *WatchBundlesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BundleEvent], error)
+	GetOverrides(ctx context.Context, in *GetOverridesRequest, opts ...grpc.CallOption) (*GetOverridesResponse, error)
+	WatchOverrides(ctx context.Context, in *WatchOverridesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OverrideEvent], error)
 	EvaluateRules(ctx context.Context, in *EvaluateRulesRequest, opts ...grpc.CallOption) (*EvaluateRulesResponse, error)
 	ResolveFlag(ctx context.Context, in *ResolveFlagRequest, opts ...grpc.CallOption) (*ResolveFlagResponse, error)
 	StartSession(ctx context.Context, in *StartSessionRequest, opts ...grpc.CallOption) (*StartSessionResponse, error)
@@ -104,6 +112,64 @@ func (c *arbiterServiceClient) RollbackBundle(ctx context.Context, in *RollbackB
 	}
 	return out, nil
 }
+
+func (c *arbiterServiceClient) GetBundle(ctx context.Context, in *GetBundleRequest, opts ...grpc.CallOption) (*GetBundleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBundleResponse)
+	err := c.cc.Invoke(ctx, ArbiterService_GetBundle_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *arbiterServiceClient) WatchBundles(ctx context.Context, in *WatchBundlesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BundleEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ArbiterService_ServiceDesc.Streams[0], ArbiterService_WatchBundles_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchBundlesRequest, BundleEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ArbiterService_WatchBundlesClient = grpc.ServerStreamingClient[BundleEvent]
+
+func (c *arbiterServiceClient) GetOverrides(ctx context.Context, in *GetOverridesRequest, opts ...grpc.CallOption) (*GetOverridesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetOverridesResponse)
+	err := c.cc.Invoke(ctx, ArbiterService_GetOverrides_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *arbiterServiceClient) WatchOverrides(ctx context.Context, in *WatchOverridesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[OverrideEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ArbiterService_ServiceDesc.Streams[1], ArbiterService_WatchOverrides_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchOverridesRequest, OverrideEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ArbiterService_WatchOverridesClient = grpc.ServerStreamingClient[OverrideEvent]
 
 func (c *arbiterServiceClient) EvaluateRules(ctx context.Context, in *EvaluateRulesRequest, opts ...grpc.CallOption) (*EvaluateRulesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -223,6 +289,10 @@ type ArbiterServiceServer interface {
 	ListBundles(context.Context, *ListBundlesRequest) (*ListBundlesResponse, error)
 	ActivateBundle(context.Context, *ActivateBundleRequest) (*ActivateBundleResponse, error)
 	RollbackBundle(context.Context, *RollbackBundleRequest) (*RollbackBundleResponse, error)
+	GetBundle(context.Context, *GetBundleRequest) (*GetBundleResponse, error)
+	WatchBundles(*WatchBundlesRequest, grpc.ServerStreamingServer[BundleEvent]) error
+	GetOverrides(context.Context, *GetOverridesRequest) (*GetOverridesResponse, error)
+	WatchOverrides(*WatchOverridesRequest, grpc.ServerStreamingServer[OverrideEvent]) error
 	EvaluateRules(context.Context, *EvaluateRulesRequest) (*EvaluateRulesResponse, error)
 	ResolveFlag(context.Context, *ResolveFlagRequest) (*ResolveFlagResponse, error)
 	StartSession(context.Context, *StartSessionRequest) (*StartSessionResponse, error)
@@ -255,6 +325,18 @@ func (UnimplementedArbiterServiceServer) ActivateBundle(context.Context, *Activa
 }
 func (UnimplementedArbiterServiceServer) RollbackBundle(context.Context, *RollbackBundleRequest) (*RollbackBundleResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RollbackBundle not implemented")
+}
+func (UnimplementedArbiterServiceServer) GetBundle(context.Context, *GetBundleRequest) (*GetBundleResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetBundle not implemented")
+}
+func (UnimplementedArbiterServiceServer) WatchBundles(*WatchBundlesRequest, grpc.ServerStreamingServer[BundleEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method WatchBundles not implemented")
+}
+func (UnimplementedArbiterServiceServer) GetOverrides(context.Context, *GetOverridesRequest) (*GetOverridesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetOverrides not implemented")
+}
+func (UnimplementedArbiterServiceServer) WatchOverrides(*WatchOverridesRequest, grpc.ServerStreamingServer[OverrideEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method WatchOverrides not implemented")
 }
 func (UnimplementedArbiterServiceServer) EvaluateRules(context.Context, *EvaluateRulesRequest) (*EvaluateRulesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method EvaluateRules not implemented")
@@ -381,6 +463,64 @@ func _ArbiterService_RollbackBundle_Handler(srv interface{}, ctx context.Context
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _ArbiterService_GetBundle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBundleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ArbiterServiceServer).GetBundle(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ArbiterService_GetBundle_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ArbiterServiceServer).GetBundle(ctx, req.(*GetBundleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ArbiterService_WatchBundles_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchBundlesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ArbiterServiceServer).WatchBundles(m, &grpc.GenericServerStream[WatchBundlesRequest, BundleEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ArbiterService_WatchBundlesServer = grpc.ServerStreamingServer[BundleEvent]
+
+func _ArbiterService_GetOverrides_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetOverridesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ArbiterServiceServer).GetOverrides(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ArbiterService_GetOverrides_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ArbiterServiceServer).GetOverrides(ctx, req.(*GetOverridesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ArbiterService_WatchOverrides_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchOverridesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ArbiterServiceServer).WatchOverrides(m, &grpc.GenericServerStream[WatchOverridesRequest, OverrideEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ArbiterService_WatchOverridesServer = grpc.ServerStreamingServer[OverrideEvent]
 
 func _ArbiterService_EvaluateRules_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(EvaluateRulesRequest)
@@ -604,6 +744,14 @@ var ArbiterService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ArbiterService_RollbackBundle_Handler,
 		},
 		{
+			MethodName: "GetBundle",
+			Handler:    _ArbiterService_GetBundle_Handler,
+		},
+		{
+			MethodName: "GetOverrides",
+			Handler:    _ArbiterService_GetOverrides_Handler,
+		},
+		{
 			MethodName: "EvaluateRules",
 			Handler:    _ArbiterService_EvaluateRules_Handler,
 		},
@@ -648,6 +796,17 @@ var ArbiterService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ArbiterService_SetFlagRuleOverride_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchBundles",
+			Handler:       _ArbiterService_WatchBundles_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WatchOverrides",
+			Handler:       _ArbiterService_WatchOverrides_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "arbiter/v1/service.proto",
 }

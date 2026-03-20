@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	arbiterv1 "github.com/odvcencio/arbiter/api/arbiter/v1"
 	"github.com/odvcencio/arbiter/audit"
@@ -161,6 +162,21 @@ func TestServerPublishEvaluateAndOverride(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SetRuleOverride: %v", err)
 	}
+	if _, err := client.SetFlagOverride(context.Background(), &arbiterv1.SetFlagOverrideRequest{
+		BundleId:   pub.BundleId,
+		FlagKey:    "checkout_v2",
+		KillSwitch: wrapperspb.Bool(true),
+	}); err != nil {
+		t.Fatalf("SetFlagOverride: %v", err)
+	}
+	if _, err := client.SetFlagRuleOverride(context.Background(), &arbiterv1.SetFlagRuleOverrideRequest{
+		BundleId:  pub.BundleId,
+		FlagKey:   "checkout_v2",
+		RuleIndex: 0,
+		Rollout:   wrapperspb.UInt32(25),
+	}); err != nil {
+		t.Fatalf("SetFlagRuleOverride: %v", err)
+	}
 
 	eval, err = client.EvaluateRules(context.Background(), &arbiterv1.EvaluateRulesRequest{
 		BundleId: pub.BundleId,
@@ -273,6 +289,288 @@ func TestServerBundleHistoryAndRollbackByName(t *testing.T) {
 	}
 	if activate.Bundle.GetBundleId() != pub2.BundleId || !activate.Bundle.GetActive() {
 		t.Fatalf("unexpected activate response: %+v", activate)
+	}
+}
+
+func TestServerGetOverridesByIDAndName(t *testing.T) {
+	client, cleanup := newTestClient(t)
+	defer cleanup()
+
+	pub, err := client.PublishBundle(context.Background(), &arbiterv1.PublishBundleRequest{
+		Name:   "checkout",
+		Source: []byte(testSource),
+	})
+	if err != nil {
+		t.Fatalf("PublishBundle: %v", err)
+	}
+
+	if _, err := client.SetRuleOverride(context.Background(), &arbiterv1.SetRuleOverrideRequest{
+		BundleId:   pub.BundleId,
+		RuleName:   "HighValue",
+		KillSwitch: wrapperspb.Bool(true),
+	}); err != nil {
+		t.Fatalf("SetRuleOverride: %v", err)
+	}
+	if _, err := client.SetFlagOverride(context.Background(), &arbiterv1.SetFlagOverrideRequest{
+		BundleId:   pub.BundleId,
+		FlagKey:    "checkout_v2",
+		KillSwitch: wrapperspb.Bool(true),
+	}); err != nil {
+		t.Fatalf("SetFlagOverride: %v", err)
+	}
+	if _, err := client.SetFlagRuleOverride(context.Background(), &arbiterv1.SetFlagRuleOverrideRequest{
+		BundleId:  pub.BundleId,
+		FlagKey:   "checkout_v2",
+		RuleIndex: 0,
+		Rollout:   wrapperspb.UInt32(25),
+	}); err != nil {
+		t.Fatalf("SetFlagRuleOverride: %v", err)
+	}
+
+	byID, err := client.GetOverrides(context.Background(), &arbiterv1.GetOverridesRequest{BundleId: pub.BundleId})
+	if err != nil {
+		t.Fatalf("GetOverrides by id: %v", err)
+	}
+	assertOverrideSnapshot(t, byID.GetOverrides(), pub.BundleId)
+
+	byName, err := client.GetOverrides(context.Background(), &arbiterv1.GetOverridesRequest{BundleName: "checkout"})
+	if err != nil {
+		t.Fatalf("GetOverrides by name: %v", err)
+	}
+	assertOverrideSnapshot(t, byName.GetOverrides(), pub.BundleId)
+}
+
+func TestServerWatchOverridesStreamsSnapshotAndMutations(t *testing.T) {
+	client, cleanup := newTestClient(t)
+	defer cleanup()
+
+	pub, err := client.PublishBundle(context.Background(), &arbiterv1.PublishBundleRequest{
+		Name:   "checkout",
+		Source: []byte(testSource),
+	})
+	if err != nil {
+		t.Fatalf("PublishBundle: %v", err)
+	}
+
+	if _, err := client.SetRuleOverride(context.Background(), &arbiterv1.SetRuleOverrideRequest{
+		BundleId:   pub.BundleId,
+		RuleName:   "HighValue",
+		KillSwitch: wrapperspb.Bool(true),
+	}); err != nil {
+		t.Fatalf("SetRuleOverride: %v", err)
+	}
+	if _, err := client.SetFlagOverride(context.Background(), &arbiterv1.SetFlagOverrideRequest{
+		BundleId:   pub.BundleId,
+		FlagKey:    "checkout_v2",
+		KillSwitch: wrapperspb.Bool(true),
+	}); err != nil {
+		t.Fatalf("SetFlagOverride seed: %v", err)
+	}
+	if _, err := client.SetFlagRuleOverride(context.Background(), &arbiterv1.SetFlagRuleOverrideRequest{
+		BundleId:  pub.BundleId,
+		FlagKey:   "checkout_v2",
+		RuleIndex: 0,
+		Rollout:   wrapperspb.UInt32(25),
+	}); err != nil {
+		t.Fatalf("SetFlagRuleOverride seed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	stream, err := client.WatchOverrides(ctx, &arbiterv1.WatchOverridesRequest{BundleId: pub.BundleId})
+	if err != nil {
+		t.Fatalf("WatchOverrides: %v", err)
+	}
+
+	snapshot := mustRecvOverrideEvent(t, stream)
+	if snapshot.GetType() != arbiterv1.OverrideEventType_OVERRIDE_EVENT_TYPE_SNAPSHOT {
+		t.Fatalf("unexpected snapshot event: %+v", snapshot)
+	}
+	assertOverrideSnapshot(t, snapshot.GetSnapshot(), pub.BundleId)
+
+	if _, err := client.SetFlagOverride(context.Background(), &arbiterv1.SetFlagOverrideRequest{
+		BundleId:   pub.BundleId,
+		FlagKey:    "checkout_v2",
+		KillSwitch: wrapperspb.Bool(false),
+	}); err != nil {
+		t.Fatalf("SetFlagOverride: %v", err)
+	}
+
+	flagEvent := mustRecvOverrideEvent(t, stream)
+	if flagEvent.GetType() != arbiterv1.OverrideEventType_OVERRIDE_EVENT_TYPE_FLAG || flagEvent.GetFlagKey() != "checkout_v2" {
+		t.Fatalf("unexpected flag event: %+v", flagEvent)
+	}
+	if flagEvent.GetFlag().GetKillSwitch() != false {
+		t.Fatalf("unexpected flag payload: %+v", flagEvent.GetFlag())
+	}
+
+	if _, err := client.SetFlagRuleOverride(context.Background(), &arbiterv1.SetFlagRuleOverrideRequest{
+		BundleId:  pub.BundleId,
+		FlagKey:   "checkout_v2",
+		RuleIndex: 0,
+		Rollout:   wrapperspb.UInt32(55),
+	}); err != nil {
+		t.Fatalf("SetFlagRuleOverride: %v", err)
+	}
+
+	flagRuleEvent := mustRecvOverrideEvent(t, stream)
+	if flagRuleEvent.GetType() != arbiterv1.OverrideEventType_OVERRIDE_EVENT_TYPE_FLAG_RULE || flagRuleEvent.GetRuleIndex() != 0 {
+		t.Fatalf("unexpected flag rule event: %+v", flagRuleEvent)
+	}
+	if flagRuleEvent.GetFlagRule().GetRollout() != 55 {
+		t.Fatalf("unexpected flag rule payload: %+v", flagRuleEvent.GetFlagRule())
+	}
+}
+
+func TestServerGetBundleByIDAndName(t *testing.T) {
+	client, cleanup := newTestClient(t)
+	defer cleanup()
+
+	pub, err := client.PublishBundle(context.Background(), &arbiterv1.PublishBundleRequest{
+		Name:   "checkout",
+		Source: []byte(testSource),
+	})
+	if err != nil {
+		t.Fatalf("PublishBundle: %v", err)
+	}
+
+	gotByID, err := client.GetBundle(context.Background(), &arbiterv1.GetBundleRequest{
+		BundleId: pub.BundleId,
+	})
+	if err != nil {
+		t.Fatalf("GetBundle by id: %v", err)
+	}
+	if gotByID.Bundle.GetBundleId() != pub.BundleId || string(gotByID.Source) != testSource {
+		t.Fatalf("unexpected GetBundle by id response: %+v", gotByID)
+	}
+
+	gotByName, err := client.GetBundle(context.Background(), &arbiterv1.GetBundleRequest{
+		BundleName: "checkout",
+	})
+	if err != nil {
+		t.Fatalf("GetBundle by name: %v", err)
+	}
+	if gotByName.Bundle.GetBundleId() != pub.BundleId || !gotByName.Bundle.GetActive() {
+		t.Fatalf("unexpected GetBundle by name response: %+v", gotByName)
+	}
+}
+
+func TestServerWatchBundlesStreamsSnapshotsAndChanges(t *testing.T) {
+	client, cleanup := newTestClient(t)
+	defer cleanup()
+
+	pub1, err := client.PublishBundle(context.Background(), &arbiterv1.PublishBundleRequest{
+		Name:   "checkout",
+		Source: []byte(testSource),
+	})
+	if err != nil {
+		t.Fatalf("PublishBundle first: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	stream, err := client.WatchBundles(ctx, &arbiterv1.WatchBundlesRequest{
+		Names:      []string{"checkout"},
+		ActiveOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("WatchBundles: %v", err)
+	}
+
+	snapshot := mustRecvBundleEvent(t, stream)
+	if snapshot.GetType() != arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_SNAPSHOT || snapshot.GetBundle().GetBundleId() != pub1.BundleId {
+		t.Fatalf("unexpected snapshot event: %+v", snapshot)
+	}
+	if string(snapshot.GetSource()) != testSource {
+		t.Fatalf("unexpected snapshot source: %q", snapshot.GetSource())
+	}
+
+	activated, err := client.ActivateBundle(context.Background(), &arbiterv1.ActivateBundleRequest{
+		Name:     "checkout",
+		BundleId: pub1.BundleId,
+	})
+	if err != nil {
+		t.Fatalf("ActivateBundle: %v", err)
+	}
+	if activated.Bundle.GetBundleId() != pub1.BundleId {
+		t.Fatalf("unexpected activate response: %+v", activated)
+	}
+
+	activatedEvent := mustRecvBundleEvent(t, stream)
+	if activatedEvent.GetType() != arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_ACTIVATED || activatedEvent.GetBundle().GetBundleId() != pub1.BundleId {
+		t.Fatalf("unexpected activated event: %+v", activatedEvent)
+	}
+
+	pub2, err := client.PublishBundle(context.Background(), &arbiterv1.PublishBundleRequest{
+		Name:   "checkout",
+		Source: []byte(testSourceV2),
+	})
+	if err != nil {
+		t.Fatalf("PublishBundle second: %v", err)
+	}
+
+	published := mustRecvBundleEvent(t, stream)
+	if published.GetType() != arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_PUBLISHED || published.GetBundle().GetBundleId() != pub2.BundleId {
+		t.Fatalf("unexpected published event: %+v", published)
+	}
+
+	rollback, err := client.RollbackBundle(context.Background(), &arbiterv1.RollbackBundleRequest{
+		Name: "checkout",
+	})
+	if err != nil {
+		t.Fatalf("RollbackBundle: %v", err)
+	}
+	if rollback.Bundle.GetBundleId() != pub1.BundleId {
+		t.Fatalf("unexpected rollback response: %+v", rollback)
+	}
+
+	rolledBack := mustRecvBundleEvent(t, stream)
+	if rolledBack.GetType() != arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_ROLLED_BACK || rolledBack.GetBundle().GetBundleId() != pub1.BundleId || rolledBack.GetPreviousBundleId() != pub2.BundleId {
+		t.Fatalf("unexpected rolled back event: %+v", rolledBack)
+	}
+}
+
+func TestServerWatchBundlesCanSnapshotHistory(t *testing.T) {
+	client, cleanup := newTestClient(t)
+	defer cleanup()
+
+	pub1, err := client.PublishBundle(context.Background(), &arbiterv1.PublishBundleRequest{
+		Name:   "checkout",
+		Source: []byte(testSource),
+	})
+	if err != nil {
+		t.Fatalf("PublishBundle first: %v", err)
+	}
+	pub2, err := client.PublishBundle(context.Background(), &arbiterv1.PublishBundleRequest{
+		Name:   "checkout",
+		Source: []byte(testSourceV2),
+	})
+	if err != nil {
+		t.Fatalf("PublishBundle second: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	stream, err := client.WatchBundles(ctx, &arbiterv1.WatchBundlesRequest{
+		Names: []string{"checkout"},
+	})
+	if err != nil {
+		t.Fatalf("WatchBundles: %v", err)
+	}
+
+	first := mustRecvBundleEvent(t, stream)
+	second := mustRecvBundleEvent(t, stream)
+	if first.GetType() != arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_SNAPSHOT || second.GetType() != arbiterv1.BundleEventType_BUNDLE_EVENT_TYPE_SNAPSHOT {
+		t.Fatalf("expected snapshot events, got %+v and %+v", first, second)
+	}
+	if first.GetBundle().GetBundleId() != pub2.BundleId || !first.GetBundle().GetActive() {
+		t.Fatalf("expected newest active bundle first, got %+v", first)
+	}
+	if second.GetBundle().GetBundleId() != pub1.BundleId || second.GetBundle().GetActive() {
+		t.Fatalf("expected previous inactive bundle second, got %+v", second)
 	}
 }
 
@@ -481,6 +779,37 @@ func newTestClient(t *testing.T) (arbiterv1.ArbiterServiceClient, func()) {
 		_ = listener.Close()
 	}
 	return arbiterv1.NewArbiterServiceClient(conn), cleanup
+}
+
+func mustRecvBundleEvent(t *testing.T, stream arbiterv1.ArbiterService_WatchBundlesClient) *arbiterv1.BundleEvent {
+	t.Helper()
+	event, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("WatchBundles Recv: %v", err)
+	}
+	return event
+}
+
+func assertOverrideSnapshot(t *testing.T, snapshot *arbiterv1.BundleOverrides, bundleID string) {
+	t.Helper()
+	if snapshot == nil {
+		t.Fatal("expected override snapshot")
+	}
+	if snapshot.GetBundleId() != bundleID {
+		t.Fatalf("unexpected bundle id: %+v", snapshot)
+	}
+	if len(snapshot.GetRules()) != 1 || len(snapshot.GetFlags()) != 1 || len(snapshot.GetFlagRules()) != 1 {
+		t.Fatalf("unexpected override snapshot shape: %+v", snapshot)
+	}
+}
+
+func mustRecvOverrideEvent(t *testing.T, stream arbiterv1.ArbiterService_WatchOverridesClient) *arbiterv1.OverrideEvent {
+	t.Helper()
+	event, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("WatchOverrides Recv: %v", err)
+	}
+	return event
 }
 
 func mustStruct(t *testing.T, m map[string]any) *structpb.Struct {

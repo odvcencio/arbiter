@@ -12,6 +12,8 @@ Current SDKs:
 All three target the same control-plane surface:
 
 - bundle publish, list, activation, rollback
+- bundle fetch and watch for local-agent sync
+- override fetch and watch for local-agent sync
 - rule evaluation and flag resolution
 - expert session lifecycle
 - runtime override mutation

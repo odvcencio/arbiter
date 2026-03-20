@@ -219,6 +219,24 @@ func TestFlagAllFlags(t *testing.T) {
 	}
 }
 
+func TestFlagElseIfChain(t *testing.T) {
+	f, err := Load([]byte(`
+flag test type boolean default "false" {
+	when { user.role == "admin" } then "true"
+	else when { user.role == "mod" } then "true"
+}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v := f.Variant("test", map[string]any{
+		"user": map[string]any{"role": "mod"},
+	})
+	if v.Name != "true" {
+		t.Fatalf("variant: got %q, want true", v.Name)
+	}
+}
+
 func TestFlagExplainMatch(t *testing.T) {
 	f, err := Load([]byte(fullFlagSource))
 	if err != nil {

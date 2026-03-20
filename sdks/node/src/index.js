@@ -58,6 +58,22 @@ class ArbiterClient {
     return unary(this.client, "RollbackBundle", { name });
   }
 
+  getBundle({ bundleId = "", bundleName = "" } = {}) {
+    return unary(this.client, "GetBundle", { bundleId, bundleName });
+  }
+
+  watchBundles({ names = [], activeOnly = false } = {}) {
+    return this.client.WatchBundles({ names, activeOnly });
+  }
+
+  getOverrides({ bundleId = "", bundleName = "" } = {}) {
+    return unary(this.client, "GetOverrides", { bundleId, bundleName });
+  }
+
+  watchOverrides({ bundleId }) {
+    return this.client.WatchOverrides({ bundleId });
+  }
+
   evaluateRules({ bundleId = "", bundleName = "", context = {}, requestId = "" }) {
     return unary(this.client, "EvaluateRules", {
       bundleId,
