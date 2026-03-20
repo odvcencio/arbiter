@@ -98,6 +98,12 @@ type modifyRecord struct {
 	SetFields map[string]any
 }
 
+type activeRoundMutations struct {
+	asserts  map[string]struct{}
+	retracts map[string]struct{}
+	modifies map[string]struct{}
+}
+
 // Session runs an expert program against an envelope and working memory.
 type Session struct {
 	program            *Program
@@ -286,85 +292,14 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		mutated := false
-		activeAssertInstances := make(map[string]struct{})
-		activeRetractInstances := make(map[string]struct{})
-		activeModifyInstances := make(map[string]struct{})
-		for _, match := range matched {
-			if err := ctx.Err(); err != nil {
-				s.stopReason = StopContextCancelled
-				return s.snapshot(), err
-			}
-
-			rule, ok := s.program.lookupRule(match.Name)
-			if !ok {
-				return Result{}, fmt.Errorf("missing expert rule metadata for %q", match.Name)
-			}
-			if rule.Group != "" {
-				if _, blocked := firedGroups[rule.Group]; blocked {
-					continue
-				}
-			}
-
-			switch rule.Kind {
-			case ActionAssert:
-				changed, _, instance, err := s.applyAssert(round, rule, match)
-				if err != nil {
-					return Result{}, err
-				}
-				activeAssertInstances[instance] = struct{}{}
-				mutated = mutated || changed
-			case ActionEmit:
-				_, err := s.applyEmit(round, rule, match)
-				if err != nil {
-					return Result{}, err
-				}
-			case ActionRetract:
-				changed, _, instance, err := s.applyRetract(round, rule, match)
-				if err != nil {
-					return Result{}, err
-				}
-				activeRetractInstances[instance] = struct{}{}
-				mutated = mutated || changed
-			case ActionModify:
-				changed, _, instance, err := s.applyModify(round, rule, match)
-				if err != nil {
-					return Result{}, err
-				}
-				activeModifyInstances[instance] = struct{}{}
-				mutated = mutated || changed
-			default:
-				return Result{}, fmt.Errorf("unsupported expert action kind %q", rule.Kind)
-			}
-			if rule.Group != "" {
-				firedGroups[rule.Group] = struct{}{}
-			}
-
-			if s.mutations >= s.opts.MaxMutations {
-				s.stopReason = StopMaxMutations
-				return s.snapshot(), nil
-			}
+		mutated, active, stopped, err := s.applyRoundMatches(ctx, round, matched, firedGroups)
+		if err != nil {
+			return s.snapshot(), err
 		}
-		for ruleName := range evaluated {
-			rule, ok := s.program.lookupRule(ruleName)
-			if !ok {
-				continue
-			}
-			switch rule.Kind {
-			case ActionAssert:
-				if s.clearInactiveDerivedSupports(ruleName, activeAssertInstances) {
-					mutated = true
-				}
-			case ActionRetract:
-				if s.clearInactiveRetractions(ruleName, activeRetractInstances) {
-					mutated = true
-				}
-			case ActionModify:
-				if s.clearInactiveModifications(ruleName, activeModifyInstances) {
-					mutated = true
-				}
-			}
+		if stopped {
+			return s.snapshot(), nil
 		}
+		mutated = s.clearInactiveEvaluatedMutations(evaluated, active) || mutated
 
 		s.lastRoundMutations = s.mutations - roundMutationsStart
 
@@ -391,6 +326,96 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 
 	s.stopReason = StopMaxRounds
 	return s.snapshot(), nil
+}
+
+func (s *Session) applyRoundMatches(ctx context.Context, round int, matched []vm.MatchedRule, firedGroups map[string]struct{}) (bool, activeRoundMutations, bool, error) {
+	active := activeRoundMutations{
+		asserts:  make(map[string]struct{}),
+		retracts: make(map[string]struct{}),
+		modifies: make(map[string]struct{}),
+	}
+	mutated := false
+
+	for _, match := range matched {
+		if err := ctx.Err(); err != nil {
+			s.stopReason = StopContextCancelled
+			return false, active, true, err
+		}
+
+		rule, ok := s.program.lookupRule(match.Name)
+		if !ok {
+			return false, active, false, fmt.Errorf("missing expert rule metadata for %q", match.Name)
+		}
+		if rule.Group != "" {
+			if _, blocked := firedGroups[rule.Group]; blocked {
+				continue
+			}
+		}
+
+		switch rule.Kind {
+		case ActionAssert:
+			changed, _, instance, err := s.applyAssert(round, rule, match)
+			if err != nil {
+				return false, active, false, err
+			}
+			active.asserts[instance] = struct{}{}
+			mutated = mutated || changed
+		case ActionEmit:
+			if _, err := s.applyEmit(round, rule, match); err != nil {
+				return false, active, false, err
+			}
+		case ActionRetract:
+			changed, _, instance, err := s.applyRetract(round, rule, match)
+			if err != nil {
+				return false, active, false, err
+			}
+			active.retracts[instance] = struct{}{}
+			mutated = mutated || changed
+		case ActionModify:
+			changed, _, instance, err := s.applyModify(round, rule, match)
+			if err != nil {
+				return false, active, false, err
+			}
+			active.modifies[instance] = struct{}{}
+			mutated = mutated || changed
+		default:
+			return false, active, false, fmt.Errorf("unsupported expert action kind %q", rule.Kind)
+		}
+		if rule.Group != "" {
+			firedGroups[rule.Group] = struct{}{}
+		}
+		if s.mutations >= s.opts.MaxMutations {
+			s.stopReason = StopMaxMutations
+			return mutated, active, true, nil
+		}
+	}
+
+	return mutated, active, false, nil
+}
+
+func (s *Session) clearInactiveEvaluatedMutations(evaluated map[string]struct{}, active activeRoundMutations) bool {
+	mutated := false
+	for ruleName := range evaluated {
+		rule, ok := s.program.lookupRule(ruleName)
+		if !ok {
+			continue
+		}
+		switch rule.Kind {
+		case ActionAssert:
+			if s.clearInactiveDerivedSupports(ruleName, active.asserts) {
+				mutated = true
+			}
+		case ActionRetract:
+			if s.clearInactiveRetractions(ruleName, active.retracts) {
+				mutated = true
+			}
+		case ActionModify:
+			if s.clearInactiveModifications(ruleName, active.modifies) {
+				mutated = true
+			}
+		}
+	}
+	return mutated
 }
 
 func (s *Session) applyAssert(round int, rule Rule, match vm.MatchedRule) (bool, string, string, error) {

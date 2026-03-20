@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.4.1
+
+### Expert Runtime
+
+- **`per_fact` completed end to end** — the parser/compiler/VM/session path now carries `per_fact` all the way through. Quantifier bindings remain available to action params, and expert sessions track per-target mutation instances so one rule can support multiple fact keys without collapsing to the last firing.
+- **Session-loop cleanup** — `expert/session.go` now splits round application and inactive-mutation cleanup out of `Run`, cutting the file hotspot from `cog=77` to `cog=32` while keeping the inference behavior intact.
+
+### Fact Sources
+
+- **Google Sheets loader** — `expert/factsource` now supports `gsheet://SPREADSHEET_ID/SheetName` through the Sheets Values API, with API key, bearer token, or service-account auth from environment variables.
+- **Shared tabular mapping** — CSV and Google Sheets now share one header-to-fact mapping path, and the factsource adapters consistently expose `key` inside fact fields for rule access across CSV, HTTP, JSON, JSONL, and Sheets.
+
+---
+
 ## v0.4.0
 
 ### Continuous Arbiters

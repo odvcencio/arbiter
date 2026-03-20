@@ -189,6 +189,14 @@ The declaration surface is built around a few ideas:
 - `on Outcome where ... handler target` routes by outcome fields, not just outcome name
 - `checkpoint path` marks the arbiter as stateful across restarts
 
+The runtime-side fact adapters already ship separately in `expert/factsource`. Today that includes `.csv`, `.json`, `.jsonl`, `http(s)://`, and `gsheet://SPREADSHEET_ID/SheetName`, with Google Sheets read through the Sheets Values API and the same header-to-fact mapping used for CSV.
+
+```go
+facts, _ := factsource.Load("gsheet://1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms/Leads")
+```
+
+Sheets auth can come from `ARBITER_GSHEETS_API_KEY`, `ARBITER_GSHEETS_ACCESS_TOKEN`, or service-account JSON/file env vars. As with the other arbiter handlers, `gsheet://` targets inside `on ...` clauses remain part of the declaration surface today; concrete outcome write-back dispatch still lives in the runtime layer above `CompileFull`.
+
 Arbiters are always killable by default. There is no `kill_switch` keyword inside an `arbiter` block because the loop should run unless a runtime stop path is used. The exact stop path can vary by deployment, but the invariant is the same: every arbiter must be stoppable quickly. In practice that can be wired through several control paths, including a control-plane override, a local override file, parent-context cancellation, or ordinary process shutdown/signal handling.
 
 `CompileFull` extracts these declarations alongside rules and segments. In the current codebase, this is the language and compile surface for the always-on modality; transport adapters, persistence wiring, and chained delivery sit one runtime layer above it.

@@ -1,6 +1,7 @@
 package factsource
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -109,6 +110,77 @@ func TestHTTP(t *testing.T) {
 	}
 	if facts[0].Fields["key"] != "a@b.com" {
 		t.Errorf("key = %v", facts[0].Fields["key"])
+	}
+}
+
+func TestGoogleSheet(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/sheet123/values/Leads" {
+			t.Fatalf("path = %q", got)
+		}
+		if got := r.URL.Query().Get("majorDimension"); got != "ROWS" {
+			t.Fatalf("majorDimension = %q", got)
+		}
+		if got := r.URL.Query().Get("key"); got != "test-key" {
+			t.Fatalf("key query = %q", got)
+		}
+		_, _ = io.WriteString(w, `{"values":[["type","key","score","active"],["Lead","a@b.com",95,true],["Lead","b@c.com",80,false]]}`)
+	}))
+	defer server.Close()
+
+	origBaseURL := googleSheetsAPIBaseURL
+	origClient := googleSheetsHTTPClient
+	googleSheetsAPIBaseURL = server.URL
+	googleSheetsHTTPClient = server.Client()
+	t.Cleanup(func() {
+		googleSheetsAPIBaseURL = origBaseURL
+		googleSheetsHTTPClient = origClient
+	})
+	t.Setenv("ARBITER_GSHEETS_API_KEY", "test-key")
+
+	facts, err := Load("gsheet://sheet123/Leads")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("got %d, want 2", len(facts))
+	}
+	if facts[0].Fields["score"] != float64(95) {
+		t.Errorf("score = %v", facts[0].Fields["score"])
+	}
+	if facts[0].Fields["active"] != true {
+		t.Errorf("active = %v", facts[0].Fields["active"])
+	}
+	if facts[1].Fields["key"] != "b@c.com" {
+		t.Errorf("key = %v", facts[1].Fields["key"])
+	}
+}
+
+func TestGoogleSheetAccessToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer secret-token" {
+			t.Fatalf("authorization = %q", got)
+		}
+		_, _ = io.WriteString(w, `{"values":[["type","key"],["Lead","a@b.com"]]}`)
+	}))
+	defer server.Close()
+
+	origBaseURL := googleSheetsAPIBaseURL
+	origClient := googleSheetsHTTPClient
+	googleSheetsAPIBaseURL = server.URL
+	googleSheetsHTTPClient = server.Client()
+	t.Cleanup(func() {
+		googleSheetsAPIBaseURL = origBaseURL
+		googleSheetsHTTPClient = origClient
+	})
+	t.Setenv("ARBITER_GSHEETS_ACCESS_TOKEN", "secret-token")
+
+	facts, err := Load("gsheet://sheet123/Leads")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("got %d, want 1", len(facts))
 	}
 }
 
