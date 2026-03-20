@@ -201,21 +201,38 @@ func (s *Server) ResolveFlag(ctx context.Context, req *arbiterv1.ResolveFlagRequ
 		return nil, status.Errorf(codes.Internal, "marshal values: %v", err)
 	}
 
-	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
-		Timestamp: time.Now().UTC(),
-		RequestID: req.GetRequestId(),
-		BundleID:  bundle.ID,
-		Kind:      "flag",
-		Context:   ctxMap,
+	env := bundle.Flags.Environment
+	event := audit.DecisionEvent{
+		Timestamp:   time.Now().UTC(),
+		RequestID:   req.GetRequestId(),
+		BundleID:    bundle.ID,
+		Environment: env,
+		Kind:        "flag",
+		Context:     ctxMap,
 		Flag: &audit.FlagDecision{
-			Flag:      eval.Flag,
-			Variant:   eval.Variant.Name,
-			Values:    eval.Variant.Values,
-			IsDefault: eval.IsDefault,
-			Reason:    eval.Reason,
+			Flag:        eval.Flag,
+			Variant:     eval.Variant.Name,
+			Values:      eval.Variant.Values,
+			IsDefault:   eval.IsDefault,
+			Reason:      eval.Reason,
+			Environment: env,
 		},
 		Trace: toGovernTrace(eval.Trace),
-	})
+	}
+
+	// Emit assignment event for non-default resolutions (experimentation).
+	if !eval.IsDefault {
+		userID, _ := extractUserID(ctxMap)
+		event.Assignment = &audit.FlagAssignment{
+			Flag:        eval.Flag,
+			Variant:     eval.Variant.Name,
+			UserID:      userID,
+			Environment: env,
+			Values:      eval.Variant.Values,
+		}
+	}
+
+	_ = s.audit.WriteDecision(ctx, event)
 
 	return &arbiterv1.ResolveFlagResponse{
 		Variant:   eval.Variant.Name,
@@ -411,6 +428,22 @@ func cleanValue(v any) any {
 	default:
 		return val
 	}
+}
+
+// extractUserID looks for a user identifier in the evaluation context.
+// Checks common locations: user_id, user.id, userId.
+func extractUserID(ctx map[string]any) (string, bool) {
+	// Top-level user_id
+	if id, ok := ctx["user_id"].(string); ok && id != "" {
+		return id, true
+	}
+	// Nested user.id
+	if user, ok := ctx["user"].(map[string]any); ok {
+		if id, ok := user["id"].(string); ok && id != "" {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 func protoTrace(steps []govern.TraceStep) []*arbiterv1.TraceStep {

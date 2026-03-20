@@ -1,0 +1,161 @@
+# LaunchDarkly-equivalent Feature Flag Suite
+# Tests every flag capability: boolean, multivariate, segments, rollouts,
+# prerequisites, kill switches, payloads, metadata, and targeting combos.
+
+# ── Segments ─────────────────────────────────────────────────
+
+segment internal_users {
+    user.email ends_with "@m31labs.dev"
+}
+
+segment beta_cohort {
+    user.cohort starts_with "beta_"
+}
+
+segment enterprise_plan {
+    user.plan == "enterprise"
+}
+
+segment pro_plan {
+    user.plan == "pro"
+}
+
+segment high_value {
+    user.lifetime_spend > 1000
+}
+
+segment us_region {
+    user.country == "US"
+}
+
+segment eu_region {
+    user.country in ["DE", "FR", "GB", "NL", "ES", "IT"]
+}
+
+segment mobile_client {
+    client.platform in ["ios", "android"]
+}
+
+# ── Prerequisite Flag ────────────────────────────────────────
+
+# Base flag that gates other features
+flag payments_enabled type boolean default "false" {
+    owner: "platform"
+    ticket: "PLAT-100"
+
+    when enterprise_plan then "true"
+    when pro_plan then "true"
+}
+
+# ── Boolean Flags ────────────────────────────────────────────
+
+# Simple on/off with segment targeting
+flag dark_mode type boolean default "false" {
+    owner: "platform"
+    ticket: "PLAT-200"
+
+    when { true } rollout 100 then "true"
+}
+
+# Kill switch demo - starts disabled, can be flipped at runtime
+flag maintenance_mode type boolean default "false" kill_switch {
+    owner: "ops"
+    ticket: "OPS-001"
+
+    when { true } then "true"
+}
+
+# Progressive rollout
+flag new_dashboard type boolean default "false" {
+    owner: "frontend"
+    ticket: "FE-300"
+
+    when internal_users then "true"
+    when beta_cohort then "true"
+    when { user.plan == "enterprise" } rollout 50 then "true"
+    when { true } rollout 10 then "true"
+}
+
+# ── Multivariate Flags ───────────────────────────────────────
+
+# A/B/C test with typed payloads
+flag checkout_flow type multivariate default "control" {
+    owner: "growth"
+    ticket: "GRW-400"
+
+    requires payments_enabled
+
+    variant "single_page" {
+        layout: "single",
+        show_progress: false,
+        show_upsell: false,
+    }
+
+    variant "multi_step" {
+        layout: "wizard",
+        show_progress: true,
+        show_upsell: false,
+    }
+
+    variant "multi_step_upsell" {
+        layout: "wizard",
+        show_progress: true,
+        show_upsell: true,
+    }
+
+    when internal_users then "multi_step_upsell"
+    when beta_cohort then "multi_step"
+    when enterprise_plan { user.country == "US" } then "single_page"
+    when { user.lifetime_spend > 500 } rollout 30 then "multi_step"
+}
+
+# Pricing experiment with numeric payloads
+flag pricing_tier type multivariate default "standard" {
+    owner: "revenue"
+    ticket: "REV-500"
+
+    variant "aggressive" {
+        discount_pct: 20,
+        trial_days: 30,
+        show_annual: true,
+    }
+
+    variant "moderate" {
+        discount_pct: 10,
+        trial_days: 14,
+        show_annual: true,
+    }
+
+    variant "standard" {
+        discount_pct: 0,
+        trial_days: 7,
+        show_annual: false,
+    }
+
+    when high_value then "aggressive"
+    when enterprise_plan then "moderate"
+    when { user.signup_days < 7 } rollout 50 then "aggressive"
+}
+
+# Region-specific feature with platform targeting
+flag search_v2 type multivariate default "legacy" {
+    owner: "search"
+    ticket: "SRCH-600"
+
+    variant "ai_powered" {
+        engine: "vector",
+        rerank: true,
+        max_results: 50,
+    }
+
+    variant "hybrid" {
+        engine: "hybrid",
+        rerank: false,
+        max_results: 25,
+    }
+
+    when internal_users then "ai_powered"
+    when us_region { user.plan == "enterprise" } then "ai_powered"
+    when eu_region then "hybrid"
+    when mobile_client { user.plan != "free" } rollout 20 then "hybrid"
+}

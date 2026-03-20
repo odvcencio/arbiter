@@ -21,11 +21,23 @@ type RuleMatch struct {
 
 // FlagDecision captures one resolved flag for durable auditing.
 type FlagDecision struct {
-	Flag      string         `json:"flag"`
-	Variant   string         `json:"variant"`
-	Values    map[string]any `json:"values,omitempty"`
-	IsDefault bool           `json:"is_default"`
-	Reason    string         `json:"reason,omitempty"`
+	Flag        string         `json:"flag"`
+	Variant     string         `json:"variant"`
+	Values      map[string]any `json:"values,omitempty"`
+	IsDefault   bool           `json:"is_default"`
+	Reason      string         `json:"reason,omitempty"`
+	Environment string         `json:"environment,omitempty"`
+}
+
+// FlagAssignment is emitted for every non-default flag resolution.
+// Designed for experimentation pipelines: join on UserID in your
+// analytics warehouse to compute variant lift and significance.
+type FlagAssignment struct {
+	Flag        string         `json:"flag"`
+	Variant     string         `json:"variant"`
+	UserID      string         `json:"user_id,omitempty"`
+	Environment string         `json:"environment,omitempty"`
+	Values      map[string]any `json:"values,omitempty"`
 }
 
 // ExpertFact captures one expert working-memory fact.
@@ -85,17 +97,19 @@ type BundleChange struct {
 
 // DecisionEvent is the durable audit record for one governance request.
 type DecisionEvent struct {
-	Timestamp time.Time          `json:"timestamp"`
-	RequestID string             `json:"request_id,omitempty"`
-	BundleID  string             `json:"bundle_id"`
-	Kind      string             `json:"kind"`
-	Context   map[string]any     `json:"context,omitempty"`
-	Rules     []RuleMatch        `json:"rules,omitempty"`
-	Flag      *FlagDecision      `json:"flag,omitempty"`
-	Expert    *ExpertDecision    `json:"expert,omitempty"`
-	Override  *OverrideChange    `json:"override,omitempty"`
-	Bundle    *BundleChange      `json:"bundle,omitempty"`
-	Trace     []govern.TraceStep `json:"trace,omitempty"`
+	Timestamp   time.Time          `json:"timestamp"`
+	RequestID   string             `json:"request_id,omitempty"`
+	BundleID    string             `json:"bundle_id"`
+	Environment string             `json:"environment,omitempty"`
+	Kind        string             `json:"kind"`
+	Context     map[string]any     `json:"context,omitempty"`
+	Rules       []RuleMatch        `json:"rules,omitempty"`
+	Flag        *FlagDecision      `json:"flag,omitempty"`
+	Assignment  *FlagAssignment    `json:"assignment,omitempty"`
+	Expert      *ExpertDecision    `json:"expert,omitempty"`
+	Override    *OverrideChange    `json:"override,omitempty"`
+	Bundle      *BundleChange      `json:"bundle,omitempty"`
+	Trace       []govern.TraceStep `json:"trace,omitempty"`
 }
 
 // Sink persists governance decisions.

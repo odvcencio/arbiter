@@ -44,6 +44,18 @@ func (ss *SegmentSet) Add(seg *CompiledSegment) {
 	ss.segments[seg.Name] = seg
 }
 
+// All returns all compiled segments.
+func (ss *SegmentSet) All() []*CompiledSegment {
+	if ss == nil {
+		return nil
+	}
+	out := make([]*CompiledSegment, 0, len(ss.segments))
+	for _, seg := range ss.segments {
+		out = append(out, seg)
+	}
+	return out
+}
+
 // Get retrieves a segment by name.
 func (ss *SegmentSet) Get(name string) (*CompiledSegment, bool) {
 	if ss == nil {

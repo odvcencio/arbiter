@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,10 +21,11 @@ import (
 
 // Flags is a compiled flag ruleset with first-class flag concepts and rich explainability.
 type Flags struct {
-	mu       sync.RWMutex
-	defs     map[string]*FlagDef
-	segments *govern.SegmentSet
-	source   []byte
+	mu          sync.RWMutex
+	defs        map[string]*FlagDef
+	segments    *govern.SegmentSet
+	source      []byte
+	Environment string // set by LoadEnv; empty for non-environment loads
 }
 
 // Load parses .arb source, extracts flags + segments, and compiles segments.
@@ -65,10 +68,68 @@ func LoadFile(path string) (*Flags, error) {
 }
 
 // LoadEnv loads flags for a specific environment.
-// Looks for flags/<env>.arb at the given base directory.
+// Looks for <dir>/<env>.arb and loads it.
 func LoadEnv(dir, env string) (*Flags, error) {
 	path := dir + "/" + env + ".arb"
-	return LoadFile(path)
+	f, err := LoadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	f.Environment = env
+	return f, nil
+}
+
+// LoadFileWithEnv loads a base .arb file and merges an environment overlay:
+//
+//	flags.arb              → base definitions (always loaded)
+//	flags.production.arb   → environment overrides (merged on top)
+//
+// The environment file can redefine any flag from the base. Flags not
+// redefined in the environment file keep their base definitions.
+func LoadFileWithEnv(path, env string) (*Flags, error) {
+	base, err := LoadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	base.Environment = env
+
+	if env == "" {
+		return base, nil
+	}
+
+	// Derive environment file: flags.arb → flags.production.arb
+	envPath := envFilePath(path, env)
+	envSource, readErr := os.ReadFile(envPath)
+	if readErr != nil {
+		// No environment file — base only
+		return base, nil
+	}
+
+	envFlags, err := Load(envSource)
+	if err != nil {
+		return nil, fmt.Errorf("environment %s: %w", env, err)
+	}
+
+	// Merge: environment flags override base flags by key
+	base.mu.Lock()
+	for key, def := range envFlags.defs {
+		base.defs[key] = def
+	}
+	if envFlags.segments != nil {
+		for _, seg := range envFlags.segments.All() {
+			base.segments.Add(seg)
+		}
+	}
+	base.mu.Unlock()
+
+	return base, nil
+}
+
+// envFilePath converts "flags.arb" + "production" → "flags.production.arb"
+func envFilePath(base, env string) string {
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	return stem + "." + env + ext
 }
 
 // Reload atomically re-parses and swaps the flag definitions from new source.
