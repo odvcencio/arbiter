@@ -877,6 +877,29 @@ expert rule EmitDetermination priority 90 {
 }
 ```
 
+## Status
+
+Arbiter is in **private alpha**. The language, compiler, VM, and inference engine are stable and well-tested. The gRPC API, sidecar agent, and workflow runtime are functional and deployed in production for internal use. The API surface may evolve as early adopters provide feedback.
+
+What you can rely on today:
+
+- Stateless rule evaluation at sub-microsecond latency
+- Feature flag resolution with segments, rollouts, prerequisites, and kill switches
+- Expert inference with forward-chaining, truth maintenance, and reversible overlays
+- The `.arb` language syntax and governance keywords
+- gRPC bundle management with versioning, activation, and rollback
+- Audit trail on every decision
+- Decision diff and replay via CLI
+
+What is evolving:
+
+- Continuous arbiter runtime (poll-based execution is stable; streaming and scheduled triggers are defined in the language but not yet orchestrated by the hosted runtime)
+- Fact source and sink plugin ecosystem (CSV, JSON, JSONL, HTTP, Terraform, and Google Sheets are shipped; additional connectors are straightforward to add via the `Loader`/`Saver` interfaces)
+- SDK coverage (Node, Python, and Rust gRPC stubs are generated; idiomatic wrapper libraries are not yet built)
+- Multi-arbiter workflow chaining (functional and tested; production deployment patterns are still forming)
+
+Arbiter is maintained by a solo author. Contributions, feedback, and design-partner conversations are welcome.
+
 ## License
 
 Apache 2.0
