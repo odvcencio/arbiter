@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.4.0
+
+### Continuous Arbiters
+
+- **Fourth modality** — `arbiter Name { ... }` is now a first-class top-level declaration for continuously running decision loops. `CompileFull` extracts arbiters alongside rules and segments, with implicit killability and validation for duplicate names, invalid chain targets, zero poll intervals, and handler shape.
+- **Trigger and routing surface** — arbiters support `poll`, `schedule`, `stream`, `source`, `checkpoint`, `chain`, and handler `where` clauses directly in `.arb`. Slack channel targets are now a distinct lexical token, so `slack #alerts` works without regressing `#comment` syntax.
+- **Docs and examples** — the README and pipeline example now describe and exercise the continuous-arbiter declaration surface without pretending the whole transport stack is already runtime-wired.
+
+### Data Plane
+
+- **`arbiter-agent` sidecar** — a localhost-serving data plane that bootstraps active bundles from upstream, watches bundle and override streams, keeps local compiled snapshots hot, and exposes `/healthz`, `/readyz`, and `/status`.
+- **`dataplane` package** — the old package name `agent` has been retired in favor of `dataplane`, matching the code's actual role instead of overloading the language term `arbiter`.
+- **Fact source adapters** — expert sessions now have a pluggable `expert/factsource` package covering CSV, HTTP, JSON, and JSONL inputs.
+
+### Serving And SDKs
+
+- **Streaming bundle APIs** — gRPC now exposes `GetBundle`, `WatchBundles`, `GetOverrides`, and `WatchOverrides`, plus the corresponding server/runtime plumbing and SDK surface updates.
+- **Local test harness** — example suites no longer depend on a live cluster by default; they can spin up an in-memory gRPC path for deterministic local verification.
+
+### Quality
+
+- **Race-stable readiness tests** — dataplane and status tests now allow enough headroom to pass under full `go test -race ./...` contention instead of failing at the suite boundary.
+- **Include-aware arbiter diagnostics** — semantic errors for arbiters declared in included files now map back to the original source file consistently.
+
+---
+
 ## v0.3.0
 
 ### Language
