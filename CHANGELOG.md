@@ -1,0 +1,150 @@
+# Changelog
+
+## v0.2.0
+
+### Language
+
+- **`excludes` keyword** — negative rule gating. A rule with `excludes OtherRule` only fires if `OtherRule` did not match. Works in both stateless rules and expert inference. Enables patterns like "fertilize only when not in drought" without duplicating conditions.
+- **Flag segment+inline combo** — flag rules now support `when segment_name { condition }` to combine a segment gate with an inline condition. Previously flags required either a segment reference or an inline condition, not both.
+- **Order-independent `activation_group` and `requires`** — expert rules now accept `requires` and `activation_group` in any order. Previously `activation_group` before `requires` caused a parse error.
+- **UTF-8 comments** — `#` and `//` comments now support full Unicode including emoji, CJK, and extended Latin characters.
+
+### Flags
+
+- **Environment overlays** — `LoadFileWithEnv("flags.arb", "production")` loads a base file and merges `flags.production.arb` on top. Flags in the overlay replace base definitions by key. Flags only in the base are kept. Flags only in the overlay are added. Segments merge additively.
+- **Assignment events** — every non-default flag resolution emits a `FlagAssignment` audit event containing flag, variant, user ID, environment, and payload values. Designed for experimentation pipelines: join on user ID in your analytics warehouse to compute variant lift.
+- **Environment field** — `Flags.Environment` is set by `LoadEnv` and `LoadFileWithEnv`, propagated to all audit events (`DecisionEvent.Environment`, `FlagDecision.Environment`).
+
+### Compiler
+
+- **Fixed short-circuit jump backpatching** — `a and (b or c)` and `not (a and b)` previously evaluated incorrectly. The compiler's jump distance for `OpJumpIfFalse`/`OpJumpIfTrue` landed on the combining opcode instead of past it, causing stack corruption on short-circuit. Fixed by computing `len(code) - jumpPos` instead of `len(code) - jumpPos - InstrSize`.
+
+### Expert Inference
+
+- **`excludes` in expert rules** — expert rules support `excludes` with deferred evaluation. If an excluded rule hasn't been evaluated yet in the current round, the excluding rule is skipped until a later round when the result is known.
+
+### Governance
+
+- **`CheckExclusions`** — new governance cache method that verifies no excluded rules matched. Returns false if any exclusion matched or if an excluded rule hasn't been evaluated yet.
+- **`SegmentSet.All()`** — returns all compiled segments for environment overlay merging.
+
+### Deployment
+
+- **Kubernetes manifests** — `deploy/Dockerfile` and `deploy/k8s.yaml` for deploying Arbiter as an in-cluster gRPC service. 3 replicas at 1 core each delivers 41K evals/sec with sub-2ms p50 latency.
+- **Deploy script** — `scripts/deploy.sh` for the Orchard platform with pre-flight postgres checks.
+
+### Examples
+
+- **Greenhouse plant management** — 17 expert rules demonstrating sensor-driven inference with soil moisture, nutrition, humidity, temperature, CO2 monitoring, two-phase gating for all-clear detection, and `excludes` for conditional action suppression.
+- **LaunchDarkly-equivalent flag suite** — 7 flags across 9 segments covering boolean flags, multivariate flags, progressive rollouts, prerequisites, kill switches, variant payloads, segment+inline combos, runtime overrides, explain traces, and edge cases. 30 test scenarios.
+- **CI governance gateway** — webhook handler that evaluates `.arb` rules against GitHub Actions billing data to govern workflow runs by budget, branch, time, and rate limits.
+- **Fraud detection** — 8 stateless rules with segments for high-risk geo, trusted accounts, new accounts, velocity checks, and currency mismatch detection.
+
+### Highlights
+
+- **Syntax highlighting fixes** — `highlights.scm` updated for governance keywords (`kill_switch`, `requires`, `excludes`, `rollout`, `no_loop`, `activation_group`), expert blocks (`expert_when_block`, `expert_where_block`, `expert_binding`), and expert action kinds (`assert`, `emit`, `retract`, `modify`). Fixed node-level captures for named child nodes vs anonymous strings.
+
+---
+
+## v0.1.0
+
+Initial release.
+
+### Language
+
+- **Rules** — `rule Name priority N { when { condition } then Action { params } }` with `otherwise` fallback, `kill_switch`, `requires` prerequisites, `rollout` percentage gates, and `when segment name` segment gates.
+- **Expert rules** — `expert rule Name { when { condition } then assert/emit/retract/modify Target { params } }` with forward-chaining inference until quiescence. Truth maintenance via reversible overlays: assert creates priority-based supports, retract hides facts, modify overlays field updates. All three revert when the supporting rule stops matching.
+- **Feature flags** — `flag name type boolean/multivariate default "value" { variant "name" { payload } when condition then "variant" rollout N }` with segments, prerequisites, kill switches, typed variant payloads, schema validation, and secret references.
+- **Segments** — reusable named conditions shared across rules and flags.
+- **Constants** — compile-time inlined values (`const NAME = value`).
+- **Includes** — multi-file compilation with `include "path.arb"`, cycle detection, and error mapping to original source files.
+- **Features** — data source declarations with typed fields.
+- **Operators** — comparison, logical (short-circuit `and`/`or`/`not`), collection (`in`, `contains`, `retains`, `subset_of`, `superset_of`, `vague_contains`), string (`starts_with`, `ends_with`, `matches`), null checks, range (`between` with open/closed brackets), math (`+`, `-`, `*`, `/`, `%`), quantifiers (`any`, `all`, `none`).
+- **Expert bindings** — `bind var in facts.Type where { join condition }` compiles to nested existential quantifiers for cross-fact correlation.
+- **Expert controls** — `no_loop`, `activation_group`, `kill_switch`, `requires`, `rollout`.
+
+### Compiler
+
+- Bytecode compiler with 47 opcodes in a flat `[opcode(1B), flags(1B), arg(2B)]` encoding.
+- Constant pool (`intern.Pool`) deduplicates all strings and numbers. 10K rules referencing the same field names share one copy.
+- Two-pass compilation: collect constants, then emit bytecode with backpatched jump distances.
+
+### VM
+
+- Fixed 256-element stack machine. `96 B/op`, `3 allocs/op` per rule evaluation.
+- ~223ns single rule eval. 72MB for 10K compiled rules (vs 7.8GB for Arishem).
+- Iterator opcodes with nested depth tracking for quantifier evaluation.
+- Regex caching for `matches` expressions.
+
+### Expert Inference
+
+- Forward-chaining inference loop with configurable `MaxRounds` (default 32) and `MaxMutations` (default 1024).
+- Four action kinds: `assert` (priority-based supports), `emit` (deduplicated outcomes), `retract` (hide facts), `modify` (field overlays with `set { }` blocks).
+- Reversible overlays with truth maintenance. `desiredFact()` computes visible state from supports, retractions, and modifications. `recomputeFact()` propagates changes.
+- Selective re-evaluation via dirty tracking. `shouldEvaluate()` only wakes rules whose fact dependencies or prerequisites changed.
+- Evaluation context isolation: `evalContextIgnoringOwnMutation()` prevents rules from seeing their own effects when re-evaluating.
+- Activation groups for mutual exclusion within a round.
+- Provenance tracking via `DerivedBy` field on every fact.
+- Checkpoint and `DeltaSince()` for incremental result streaming.
+
+### Governance
+
+- Segments compiled to bytecode, evaluated once per request via `RequestCache` memoization.
+- Deterministic rollout bucketing: `SHA256(userID)[:4] % 100`.
+- Kill switches, prerequisites with cycle detection, explainability traces.
+- Runtime overrides for kill switches and rollout percentages without recompiling.
+
+### Flags
+
+- Boolean and multivariate flags with typed variant payloads.
+- Schema validation at load time (type consistency across variants).
+- Secret references (`secret("ref")`) preserved for core eval, redacted in explain/HTTP.
+- Hot reload via `fsnotify` file watcher across the include graph.
+- HTTP handler serving `/flags` and `/explain` endpoints.
+- `LoadEnv(dir, env)` for per-environment flag files.
+
+### Serving
+
+- gRPC API: `PublishBundle`, `ListBundles`, `ActivateBundle`, `RollbackBundle`, `EvaluateRules`, `ResolveFlag`, `StartSession`, `RunSession`, `AssertFacts`, `RetractFacts`, `GetSessionTrace`, `CloseSession`, `SetRuleOverride`, `SetFlagOverride`, `SetFlagRuleOverride`.
+- Bundle versioning with per-name history, activation, and rollback. SHA256 checksums. File-backed persistence.
+- Session store with 30-minute TTL, LRU eviction at 10K sessions, per-session mutexes.
+- Audit sink interface with JSONL default. Every decision logged with full context, trace, and timestamps.
+
+### Transpilation
+
+- Emit to Rego (OPA), CEL, and Drools DRL with target-idiomatic output.
+- Decompile bytecode back to Arishem JSON.
+- Arishem JSON import via `CompileJSONRules` for migration.
+
+### Authorization
+
+- Thin ABAC helper: `authz.EvaluateSource(source, Request{Actor, Action, Resource})` standardizes context and checks for `Allow` actions.
+
+### CLI
+
+- `arbiter compile`, `arbiter eval`, `arbiter check`, `arbiter emit`, `arbiter expert`, `arbiter serve`, `arbiter import`.
+- File-aware diagnostics with `path:line:column` error formatting across includes.
+
+### Editor Support
+
+- Tree-sitter grammar (`grammar.json`, `grammar.bin`) and highlight query (`highlights.scm`) for `.arb` files.
+- VS Code extension with syntax highlighting, snippets, and `arbiter check` diagnostics on open/save.
+
+### SDKs
+
+- Generated gRPC clients for Node.js, Python, and Rust in `sdks/`.
+
+### Performance
+
+| Metric | Arishem | Arbiter | Factor |
+|--------|---------|---------|--------|
+| 10K rule compile memory | 7.8 GB | 72 MB | 108x less |
+| 10K rule allocations | 153M | 940K | 163x fewer |
+| 5K rule eval memory | 3.9 GB | 160 KB | 24,375x less |
+| Single rule eval | ~1.4ms | ~223ns | ~6,300x faster |
+
+| Engine | ns/op | B/op | allocs/op |
+|--------|-------|------|-----------|
+| Arbiter | 223 | 96 | 3 |
+| CEL | 82 | 24 | 2 |
+| OPA/Rego | 5,680 | 6,444 | 114 |
