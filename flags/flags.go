@@ -446,6 +446,15 @@ func (f *Flags) ruleMatches(flagKey string, ruleIndex int, rule FlagRule, rc *go
 }
 
 func (f *Flags) ruleMatchDetail(rule FlagRule, rc *govern.RequestCache) (bool, string) {
+	if rule.SegmentName != "" && rule.CompiledInline != nil {
+		// Segment + inline combo: both must match
+		segOk, segDetail := rc.EvalSegment(rule.SegmentName)
+		if !segOk {
+			return false, segDetail
+		}
+		inlineOk := rule.CompiledInline.Eval(rc.NestedContext())
+		return inlineOk, fmt.Sprintf("segment %s (%s) and %s -> %v", rule.SegmentName, segDetail, rule.InlineExpr, inlineOk)
+	}
 	if rule.SegmentName != "" {
 		return rc.EvalSegment(rule.SegmentName)
 	}
@@ -751,9 +760,17 @@ func variantNames(variants map[string]*VariantDef) []string {
 func parseFlagRule(node *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (FlagRule, error) {
 	rule := FlagRule{}
 
-	// Condition: either identifier (segment ref) or inline { expr }
+	// Condition: segment ref, inline { expr }, or segment + inline { expr }
 	condNode := node.ChildByFieldName("condition", lang)
-	if condNode != nil && condNode.Type(lang) == "identifier" {
+
+	// Check for segment field (segment + inline combo).
+	// Fields from anonymous sequences inside Choice bubble up to the parent rule node.
+	if segNode := node.ChildByFieldName("segment", lang); segNode != nil {
+		rule.SegmentName = nodeText(segNode, source)
+	}
+
+	if condNode != nil && condNode.Type(lang) == "identifier" && rule.SegmentName == "" {
+		// Segment reference only
 		rule.SegmentName = nodeText(condNode, source)
 	} else {
 		// Inline condition: find the expression node between braces.
@@ -764,7 +781,7 @@ func parseFlagRule(node *gotreesitter.Node, source []byte, lang *gotreesitter.La
 				continue
 			}
 			childType := child.Type(lang)
-			if childType == "number_literal" {
+			if childType == "number_literal" || childType == "identifier" {
 				continue
 			}
 			rule.InlineExpr = strings.TrimSpace(nodeText(child, source))

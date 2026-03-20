@@ -40,6 +40,8 @@
 (no_loop) @keyword
 (rule_requires "requires" @keyword)
 (rule_requires name: (identifier) @function)
+(rule_excludes "excludes" @keyword)
+(rule_excludes name: (identifier) @function)
 (rule_rollout "rollout" @keyword)
 (expert_activation_group "activation_group" @keyword)
 (expert_activation_group name: (identifier) @type)

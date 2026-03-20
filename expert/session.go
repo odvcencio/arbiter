@@ -982,6 +982,9 @@ func (s *Session) evalRule(rule Rule, header compiler.RuleHeader, evaluator *vm.
 	if !rc.CheckPrerequisites(rule.Prereqs, nil) {
 		return false, vm.MatchedRule{}, nil
 	}
+	if !rc.CheckExclusions(rule.Excludes, nil) {
+		return false, vm.MatchedRule{}, nil
+	}
 	if header.HasSegment {
 		segName := evaluator.String(header.SegmentNameIdx)
 		segOK, _ := rc.EvalSegment(segName)

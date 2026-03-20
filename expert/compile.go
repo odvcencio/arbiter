@@ -31,6 +31,7 @@ type Rule struct {
 	Kind     ActionKind
 	Target   string
 	Prereqs  []string
+	Excludes []string
 	FactDeps []string
 	NoLoop   bool
 	Group    string
@@ -240,11 +241,17 @@ func parseExpertRule(n *gotreesitter.Node, source []byte, lang *gotreesitter.Lan
 	}
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		child := n.NamedChild(i)
-		if child.Type(lang) != "rule_requires" {
+		switch child.Type(lang) {
+		case "rule_requires":
+			if prereqNode := child.ChildByFieldName("name", lang); prereqNode != nil {
+				rule.Prereqs = append(rule.Prereqs, nodeText(prereqNode, source))
+			}
+		case "rule_excludes":
+			if exclNode := child.ChildByFieldName("name", lang); exclNode != nil {
+				rule.Excludes = append(rule.Excludes, nodeText(exclNode, source))
+			}
+		default:
 			continue
-		}
-		if prereqNode := child.ChildByFieldName("name", lang); prereqNode != nil {
-			rule.Prereqs = append(rule.Prereqs, nodeText(prereqNode, source))
 		}
 	}
 	rule.FactDeps = uniqueStrings(deps)

@@ -11,6 +11,7 @@ type CompiledRuleset struct {
 	Actions      []ActionEntry
 	Templates    []TemplateEntry
 	Prereqs      []uint16
+	Excludes     []uint16
 }
 
 // RuleHeader stores metadata for one rule within the compiled ruleset.
@@ -25,6 +26,8 @@ type RuleHeader struct {
 	Rollout        uint8
 	PrereqOff      uint16
 	PrereqLen      uint16
+	ExcludeOff     uint16
+	ExcludeLen     uint16
 	SegmentNameIdx uint16
 	HasSegment     bool
 }

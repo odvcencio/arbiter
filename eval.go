@@ -206,6 +206,11 @@ func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *v
 			continue
 		}
 
+		if !rc.CheckExclusions(resolveExcludes(rs, rule, evaluator), trace) {
+			rc.RecordRuleResult(ruleName, false)
+			continue
+		}
+
 		if rule.HasSegment {
 			segName := evaluator.String(rule.SegmentNameIdx)
 			segOK, detail := rc.EvalSegment(segName)
@@ -273,6 +278,25 @@ func resolvePrereqs(rs *compiler.CompiledRuleset, rule compiler.RuleHeader, eval
 
 	names := make([]string, 0, end-start)
 	for _, idx := range rs.Prereqs[start:end] {
+		names = append(names, evaluator.String(idx))
+	}
+	return names
+}
+
+func resolveExcludes(rs *compiler.CompiledRuleset, rule compiler.RuleHeader, evaluator *vm.Evaluator) []string {
+	if rule.ExcludeLen == 0 {
+		return nil
+	}
+	start := int(rule.ExcludeOff)
+	end := start + int(rule.ExcludeLen)
+	if start < 0 || start >= len(rs.Excludes) {
+		return nil
+	}
+	if end > len(rs.Excludes) {
+		end = len(rs.Excludes)
+	}
+	names := make([]string, 0, end-start)
+	for _, idx := range rs.Excludes[start:end] {
 		names = append(names, evaluator.String(idx))
 	}
 	return names

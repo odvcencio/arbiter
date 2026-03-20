@@ -155,18 +155,28 @@ func (c *cstCompiler) compileRule(n *gotreesitter.Node, rs *CompiledRuleset) (Ru
 
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		child := n.NamedChild(i)
-		if c.nodeType(child) != "rule_requires" {
-			continue
+		switch c.nodeType(child) {
+		case "rule_requires":
+			nameNode := c.childByField(child, "name")
+			if nameNode == nil {
+				continue
+			}
+			if rh.PrereqLen == 0 {
+				rh.PrereqOff = uint16(len(rs.Prereqs))
+			}
+			rs.Prereqs = append(rs.Prereqs, c.pool.String(c.text(nameNode)))
+			rh.PrereqLen++
+		case "rule_excludes":
+			nameNode := c.childByField(child, "name")
+			if nameNode == nil {
+				continue
+			}
+			if rh.ExcludeLen == 0 {
+				rh.ExcludeOff = uint16(len(rs.Excludes))
+			}
+			rs.Excludes = append(rs.Excludes, c.pool.String(c.text(nameNode)))
+			rh.ExcludeLen++
 		}
-		nameNode := c.childByField(child, "name")
-		if nameNode == nil {
-			continue
-		}
-		if rh.PrereqLen == 0 {
-			rh.PrereqOff = uint16(len(rs.Prereqs))
-		}
-		rs.Prereqs = append(rs.Prereqs, c.pool.String(c.text(nameNode)))
-		rh.PrereqLen++
 	}
 
 	// Condition

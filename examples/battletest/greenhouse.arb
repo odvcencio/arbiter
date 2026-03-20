@@ -1,0 +1,254 @@
+# Greenhouse Plant Management - Expert Inference
+# Sensor inputs drive watering, feeding, and climate decisions.
+# Forward-chains from raw readings through assessments to actions.
+
+# Phase 1: Assess soil conditions from probe readings
+
+expert rule AssessSoilMoisture priority 5 {
+    when {
+        soil.moisture_pct > 0
+        or soil.moisture_pct == 0
+    }
+    then assert SoilStatus {
+        key: "moisture",
+        level: soil.moisture_pct,
+        dry: soil.moisture_pct < 30,
+        wet: soil.moisture_pct > 70,
+        optimal: soil.moisture_pct >= 30 and soil.moisture_pct <= 70,
+    }
+}
+
+expert rule AssessSoilNutrition priority 5 {
+    when {
+        soil.nitrogen_ppm > 0
+        or soil.nitrogen_ppm == 0
+    }
+    then assert SoilStatus {
+        key: "nutrition",
+        nitrogen: soil.nitrogen_ppm,
+        phosphorus: soil.phosphorus_ppm,
+        potassium: soil.potassium_ppm,
+        deficient: soil.nitrogen_ppm < 20 or soil.phosphorus_ppm < 10 or soil.potassium_ppm < 15,
+    }
+}
+
+expert rule AssessClimate priority 5 {
+    when {
+        climate.humidity_pct > 0
+        or climate.humidity_pct == 0
+    }
+    then assert ClimateStatus {
+        key: "ambient",
+        humidity: climate.humidity_pct,
+        temp_c: climate.temp_c,
+        light_lux: climate.light_lux,
+        co2_ppm: climate.co2_ppm,
+        too_hot: climate.temp_c > 35,
+        too_cold: climate.temp_c < 10,
+        too_dry: climate.humidity_pct < 40,
+        too_humid: climate.humidity_pct > 85,
+        co2_low: climate.co2_ppm < 400,
+        co2_high: climate.co2_ppm > 1500,
+    }
+}
+
+# Phase 2: Determine plant stress from assessments
+
+expert rule DetectDroughtStress priority 15 {
+    requires AssessSoilMoisture
+    requires AssessClimate
+    when {
+        any sm in facts.SoilStatus { sm.dry == true }
+    }
+    then assert PlantStress {
+        key: "drought",
+        severity: "high",
+        source: "soil_moisture",
+    }
+}
+
+expert rule DetectHeatStress priority 15 {
+    requires AssessClimate
+    when {
+        any cs in facts.ClimateStatus { cs.too_hot == true }
+    }
+    then assert PlantStress {
+        key: "heat",
+        severity: "high",
+        source: "temperature",
+    }
+}
+
+expert rule DetectNutrientDeficiency priority 15 {
+    requires AssessSoilNutrition
+    when {
+        any sn in facts.SoilStatus { sn.deficient == true }
+    }
+    then assert PlantStress {
+        key: "nutrient",
+        severity: "medium",
+        source: "soil_nutrition",
+    }
+}
+
+expert rule DetectFungalRisk priority 15 {
+    requires AssessClimate
+    when {
+        any cs in facts.ClimateStatus { cs.too_humid == true }
+    }
+    then assert PlantStress {
+        key: "fungal_risk",
+        severity: "medium",
+        source: "humidity",
+    }
+}
+
+expert rule DetectCO2Deficit priority 15 {
+    requires AssessClimate
+    when {
+        any cs in facts.ClimateStatus { cs.co2_low == true }
+    }
+    then assert PlantStress {
+        key: "co2_deficit",
+        severity: "medium",
+        source: "co2_sensor",
+    }
+}
+
+expert rule DetectCO2Excess priority 15 {
+    requires AssessClimate
+    when {
+        any cs in facts.ClimateStatus { cs.co2_high == true }
+    }
+    then assert PlantStress {
+        key: "co2_excess",
+        severity: "high",
+        source: "co2_sensor",
+    }
+}
+
+# Phase 3: Prescribe actions based on stress
+
+expert rule PrescribeWatering priority 30 {
+    requires DetectDroughtStress
+    when {
+        any ps in facts.PlantStress { ps.key == "drought" }
+    }
+    then emit WaterAction {
+        command: "irrigate",
+        duration_minutes: 15,
+        zone: "all",
+    }
+}
+
+expert rule PrescribeMisting priority 30 {
+    requires AssessClimate
+    excludes DetectFungalRisk
+    when {
+        any cs in facts.ClimateStatus { cs.too_dry == true }
+    }
+    then emit MistAction {
+        command: "mist",
+        duration_minutes: 5,
+        intensity: "light",
+    }
+}
+
+expert rule PrescribeFertilizer priority 30 {
+    requires DetectNutrientDeficiency
+    excludes DetectDroughtStress
+    when {
+        any ps in facts.PlantStress { ps.key == "nutrient" }
+    }
+    then emit FeedAction {
+        command: "fertilize",
+        formula: "balanced_10_10_10",
+        amount_ml: 500,
+    }
+}
+
+expert rule PrescribeCooling priority 30 {
+    requires DetectHeatStress
+    when {
+        any ps in facts.PlantStress { ps.key == "heat" }
+    }
+    then emit ClimateAction {
+        command: "activate_fans",
+        target_temp_c: 28,
+    }
+}
+
+expert rule PrescribeVentilation priority 30 {
+    requires DetectFungalRisk
+    when {
+        any ps in facts.PlantStress { ps.key == "fungal_risk" }
+    }
+    then emit ClimateAction {
+        command: "open_vents",
+        target_humidity_pct: 65,
+    }
+}
+
+expert rule PrescribeCO2Injection priority 30 {
+    requires DetectCO2Deficit
+    when {
+        any ps in facts.PlantStress { ps.key == "co2_deficit" }
+    }
+    then emit CO2Action {
+        command: "inject_co2",
+        target_ppm: 800,
+    }
+}
+
+expert rule PrescribeCO2Ventilation priority 30 {
+    requires DetectCO2Excess
+    when {
+        any ps in facts.PlantStress { ps.key == "co2_excess" }
+    }
+    then emit ClimateAction {
+        command: "emergency_ventilation",
+        target_co2_ppm: 1000,
+    }
+}
+
+# Phase 4: Gate to ensure stress detection has run before all-clear check.
+# This fact is asserted in round N+1 after assessments commit, guaranteeing
+# that stress detection rules have had a chance to fire and assert PlantStress.
+
+# Two-phase gate ensures AllClear runs AFTER stress detection has committed.
+# Phase gate 1: fires in round 2 when assessed facts are visible.
+expert rule AssessmentComplete priority 20 {
+    no_loop
+    when {
+        any sm in facts.SoilStatus { sm.level >= 0 }
+    }
+    then assert PhaseGate {
+        key: "assessment",
+        step: 1,
+    }
+}
+
+# Phase gate 2: fires in round 3 when PhaseGate is visible.
+# By round 3, any PlantStress from round 2 is also visible.
+expert rule StressCheckComplete priority 35 {
+    no_loop
+    requires AssessmentComplete
+    when {
+        any pg in facts.PhaseGate { pg.step == 1 }
+    }
+    then assert PhaseGate {
+        key: "stress_done",
+        step: 2,
+    }
+}
+
+expert rule AllClear priority 50 {
+    requires StressCheckComplete
+    when {
+        none ps in facts.PlantStress { true }
+    }
+    then emit StatusReport {
+        status: "optimal",
+        message: "all readings within range",
+    }
+}

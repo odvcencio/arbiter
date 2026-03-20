@@ -119,6 +119,29 @@ func (rc *RequestCache) CheckPrerequisites(prereqs []string, trace *Trace) bool 
 	return true
 }
 
+// CheckExclusions verifies no excluded rules matched. Returns false if any
+// exclusion matched. Also returns false if an excluded rule hasn't been
+// evaluated yet — we can't safely proceed without knowing.
+func (rc *RequestCache) CheckExclusions(excludes []string, trace *Trace) bool {
+	if rc == nil {
+		return true
+	}
+	for _, excl := range excludes {
+		if _, evaluated := rc.ruleResults[excl]; !evaluated {
+			// Rule hasn't been evaluated yet — defer this rule until later
+			trace.Append("excludes "+excl, false, fmt.Sprintf("%s not yet evaluated", excl))
+			return false
+		}
+		matched := rc.ruleResults[excl]
+		ok := !matched
+		trace.Append("excludes "+excl, ok, fmt.Sprintf("%s matched=%v", excl, matched))
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // HasCycle reports whether the given key is already being evaluated.
 func (rc *RequestCache) HasCycle(name string) bool {
 	if rc == nil {

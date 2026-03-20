@@ -102,7 +102,7 @@ func ArbiterGrammar() *Grammar {
 		Optional(Seq(Str("priority"), Field("priority", Sym("number_literal")))),
 		Str("{"),
 		Optional(Field("kill_switch", Sym("kill_switch"))),
-		Repeat(Sym("rule_requires")),
+		Repeat(Choice(Sym("rule_requires"), Sym("rule_excludes"))),
 		Field("condition", Sym("when_block")),
 		Field("action", Sym("then_block")),
 		Optional(Field("fallback", Sym("otherwise_block"))),
@@ -112,6 +112,11 @@ func ArbiterGrammar() *Grammar {
 
 	g.Define("rule_requires", Seq(
 		Str("requires"),
+		Field("name", Sym("identifier")),
+	))
+
+	g.Define("rule_excludes", Seq(
+		Str("excludes"),
 		Field("name", Sym("identifier")),
 	))
 
@@ -128,9 +133,9 @@ func ArbiterGrammar() *Grammar {
 		Str("{"),
 		Optional(Field("kill_switch", Sym("kill_switch"))),
 		Optional(Field("no_loop", Sym("no_loop"))),
-		Repeat(Sym("rule_requires")),
+		Repeat(Choice(Sym("rule_requires"), Sym("rule_excludes"))),
 		Optional(Field("activation_group", Sym("expert_activation_group"))),
-		Repeat(Sym("rule_requires")),
+		Repeat(Choice(Sym("rule_requires"), Sym("rule_excludes"))),
 		Field("condition", Sym("expert_when_block")),
 		Field("action", Sym("expert_then_block")),
 		Optional(Field("rollout", Sym("rule_rollout"))),
@@ -287,12 +292,14 @@ func ArbiterGrammar() *Grammar {
 	))
 
 	// when segment_name [rollout N] then "variant"
-	// OR when { expr } [rollout N] then "variant"
+	// when { expr } [rollout N] then "variant"
+	// when segment_name { expr } [rollout N] then "variant"
 	g.Define("flag_rule", Seq(
 		Str("when"),
 		Field("condition", Choice(
-			Sym("identifier"),                     // segment reference
-			Seq(Str("{"), Sym("_expr"), Str("}")), // inline condition
+			Seq(Field("segment", Sym("identifier")), Str("{"), Sym("_expr"), Str("}")), // segment + inline
+			Sym("identifier"),                     // segment reference only
+			Seq(Str("{"), Sym("_expr"), Str("}")), // inline condition only
 		)),
 		Optional(Seq(Str("rollout"), Field("rollout", Sym("number_literal")))),
 		Str("then"),
