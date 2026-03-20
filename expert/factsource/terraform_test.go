@@ -164,6 +164,41 @@ func TestLoadTerraformPlanJSON(t *testing.T) {
 	}
 }
 
+func TestLoadTerraformPlanJSONWithoutPlannedValuesStillEmitsChanges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "changes-only.json")
+	payload, err := json.Marshal(terraformPlan{
+		ResourceChanges: []terraformPlanResourceChange{{
+			Address: "aws_instance.web",
+			Mode:    "managed",
+			Type:    "aws_instance",
+			Name:    "web",
+			Change: terraformPlanChange{
+				Actions: []string{"update"},
+				After: map[string]any{
+					"instance_type": "t3.small",
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	facts, err := Load("terraform:///" + filepath.ToSlash(path))
+	if err != nil {
+		t.Fatalf("Load plan: %v", err)
+	}
+
+	change := requireFact(t, facts, "ResourceChange", "aws_instance.web")
+	if change.Fields["action_summary"] != "update" {
+		t.Fatalf("change = %+v", change.Fields)
+	}
+}
+
 func TestLoadTerraformRejectsMalformedResourceBlock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.tf")

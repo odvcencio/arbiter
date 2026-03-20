@@ -117,14 +117,20 @@ func DefaultHTTPContext(r *http.Request) (map[string]any, error) {
 	if r == nil {
 		return map[string]any{}, nil
 	}
+	path := ""
+	var query map[string]any
+	if r.URL != nil {
+		path = r.URL.Path
+		query = normalizeHTTPValues(r.URL.Query())
+	}
 	return map[string]any{
 		"request": map[string]any{
 			"method":      r.Method,
 			"host":        r.Host,
-			"path":        r.URL.Path,
+			"path":        path,
 			"remote_addr": r.RemoteAddr,
 			"headers":     normalizeHTTPValues(r.Header),
-			"query":       normalizeHTTPValues(r.URL.Query()),
+			"query":       query,
 		},
 	}, nil
 }

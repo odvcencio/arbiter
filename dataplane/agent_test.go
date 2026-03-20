@@ -42,17 +42,6 @@ rule QuotePrice {
 }
 `
 
-const agentTestPricingUpdatedSource = `
-rule QuotePrice {
-	when {
-		cart.total > 0
-	}
-	then Quote {
-		tier: "vip",
-	}
-}
-`
-
 const agentTestInvalidSource = `
 rule Broken {
 	when {

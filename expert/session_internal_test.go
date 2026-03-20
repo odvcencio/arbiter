@@ -177,6 +177,53 @@ expert rule CheckAge {
 	}
 }
 
+func TestSetEnvelopeForcesReevaluationWithoutFactChanges(t *testing.T) {
+	program, err := Compile([]byte(`
+expert rule HaltOnSourceFailure {
+	when {
+		source.feed.available == false
+	}
+	then emit Halt {
+		reason: "source unavailable",
+	}
+}
+`))
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := NewSession(program, map[string]any{
+		"source": map[string]any{
+			"feed": map[string]any{
+				"available": true,
+			},
+		},
+	}, nil, Options{})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if len(first.Outcomes) != 0 {
+		t.Fatalf("expected no outcomes on first run, got %+v", first.Outcomes)
+	}
+
+	session.SetEnvelope(map[string]any{
+		"source": map[string]any{
+			"feed": map[string]any{
+				"available": false,
+			},
+		},
+	})
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if len(second.Outcomes) != 1 || second.Outcomes[0].Name != "Halt" {
+		t.Fatalf("expected one Halt outcome after envelope update, got %+v", second.Outcomes)
+	}
+}
+
 func TestSyncFactsAddsUpdatesAndRetractsExternalFacts(t *testing.T) {
 	program, err := Compile([]byte(`
 expert rule FlagHighScore {

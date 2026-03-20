@@ -76,16 +76,6 @@ func requireMatch(t *testing.T, resp *arbiterv1.EvaluateRulesResponse, action, r
 	t.Fatalf("no %s match, got: %v", action, names)
 }
 
-func requireNoMatch(t *testing.T, resp *arbiterv1.EvaluateRulesResponse, action string) {
-	t.Helper()
-	for _, m := range resp.Matched {
-		if m.Action == action {
-			r, _ := m.Params.AsMap()["reason"].(string)
-			t.Fatalf("unexpected %s: %s (%s)", action, m.Name, r)
-		}
-	}
-}
-
 // ═══════════════════════════════════════════════════════════════
 //  FRAUD DETECTION
 // ═══════════════════════════════════════════════════════════════

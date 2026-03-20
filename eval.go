@@ -125,17 +125,6 @@ func DataFromJSON(jsonStr string, rs *compiler.CompiledRuleset) (vm.DataContext,
 	return &evalContextWrapper{inner: dc, pool: pool}, nil
 }
 
-func parseSource(source []byte) (*gotreesitter.Language, *gotreesitter.Node, error) {
-	lang, root, err := parseTree(source)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := rejectIncludeDeclarations(root, source, lang); err != nil {
-		return nil, nil, err
-	}
-	return lang, root, nil
-}
-
 func compileSegments(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (*govern.SegmentSet, error) {
 	segments := govern.NewSegmentSet()
 

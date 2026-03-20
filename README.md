@@ -244,11 +244,41 @@ result, _ := w.Run(context.Background())
 _ = result.Arbiters["account_actions"].Delta.Outcomes
 ```
 
-`workflow` owns `chain://...` sources at runtime, validates that chain handlers and chain sources agree, and rejects cyclic arbiter graphs. Generic webhook/slack/exec/grpc/audit dispatch still remains a deployment-layer concern above `CompileFull`.
+For reliable external I/O, `workflow.NewRunner` wraps the compiled graph with source polling and sink delivery behavior. It retries source loads with backoff, keeps last-known-good facts when a source is unavailable, exposes runtime health under `source.<alias>` and `sink.<alias>`, and can persist pending sink deliveries to a local JSONL journal for catch-up after a restart.
+
+```go
+runner, _ := workflow.NewRunner(w, workflow.RunnerOptions{
+    DeliveryLog: "/var/lib/arbiter/deliveries.jsonl",
+    Handlers: map[arbiter.ArbiterHandlerKind]workflow.OutcomeHandler{
+        arbiter.ArbiterHandlerWebhook: workflow.OutcomeHandlerFunc(func(ctx context.Context, d workflow.Delivery) error {
+            return deliverWebhook(ctx, d.Handler.Target, d.Outcome)
+        }),
+    },
+})
+tick, _ := runner.Tick(context.Background())
+_ = tick.Sources["https://transactions.internal/feed"]
+_ = tick.Sinks["webhook\x00https://hooks.internal/reviews"]
+```
+
+Rule-visible source metadata is derived from the runtime alias, so an external source like `https://feed.internal/facts` becomes `source.feed_internal_facts`. That gives the arbiter block enough information to distinguish fresh data from stale-but-usable data:
+
+```arb
+expert rule HaltOnStaleFeed priority 0 {
+    when {
+        source.feed_internal_facts.available == false
+        and source.feed_internal_facts.__source_age_seconds > 300
+    }
+    then emit Halt {
+        reason: "feed is stale for 5+ minutes",
+    }
+}
+```
+
+`workflow` still owns `chain://...` sources, validates that chain handlers and chain sources agree, and rejects cyclic arbiter graphs. Built-in delivery implementations cover `audit` and `stdout`; `webhook`, `slack`, `exec`, and `grpc` stay pluggable through `RunnerOptions.Handlers` so deployments can supply their own transport behavior without forking the runtime.
 
 Arbiters are always killable by default. There is no `kill_switch` keyword inside an `arbiter` block because the loop should run unless a runtime stop path is used. The exact stop path can vary by deployment, but the invariant is the same: every arbiter must be stoppable quickly. In practice that can be wired through several control paths, including a control-plane override, a local override file, parent-context cancellation, or ordinary process shutdown/signal handling.
 
-`CompileFull` still extracts these declarations alongside rules and segments. In the current codebase, the language surface plus `workflow` cover chained orchestration, while transport adapters for webhook/slack/exec/grpc/audit remain one runtime layer above that.
+`CompileFull` still extracts these declarations alongside rules and segments. In the current codebase, the language surface plus `workflow` cover chained orchestration and reliable poll-driven runtime state, while streaming/scheduled trigger orchestration and fully built-in network transports remain one runtime layer above that.
 
 ### Explainability
 

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -41,11 +42,13 @@ type Workflow struct {
 	order      []string
 	arbiters   map[string]*runtimeArbiter
 	external   map[string][]expert.Fact
+	sources    map[string]struct{}
 	mapOutcome OutcomeFactMapper
 }
 
 type runtimeArbiter struct {
 	decl         arbiter.ArbiterDeclaration
+	baseEnvelope map[string]any
 	session      *expert.Session
 	checkpoint   expert.Checkpoint
 	chainSources map[string]struct{}
@@ -131,6 +134,9 @@ func (w *Workflow) SetSourceFacts(target string, facts []expert.Fact) error {
 	}
 	if strings.HasPrefix(target, "chain://") {
 		return fmt.Errorf("workflow source %q is runtime-owned", target)
+	}
+	if _, ok := w.sources[target]; !ok {
+		return fmt.Errorf("workflow source %q is not declared", target)
 	}
 	w.external[target] = cloneExpertFacts(facts)
 	return nil
@@ -218,6 +224,7 @@ func buildWorkflow(full *arbiter.CompileResult, program *expert.Program, opts Op
 		order:      order,
 		arbiters:   arbiters,
 		external:   make(map[string][]expert.Fact),
+		sources:    collectExternalSources(arbiters),
 		mapOutcome: mapper,
 	}, nil
 }
@@ -235,6 +242,7 @@ func instantiateArbiters(decls []arbiter.ArbiterDeclaration, program *expert.Pro
 		}
 		arbiters[decl.Name] = &runtimeArbiter{
 			decl:         decl,
+			baseEnvelope: cloneMap(envelope),
 			session:      expert.NewSession(program, cloneMap(envelope), nil, sessionOpts),
 			chainSources: make(map[string]struct{}),
 		}
@@ -256,6 +264,19 @@ func registerChainSources(arbiters map[string]*runtimeArbiter) error {
 		}
 	}
 	return nil
+}
+
+func collectExternalSources(arbiters map[string]*runtimeArbiter) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, arb := range arbiters {
+		for _, source := range arb.decl.Sources {
+			if strings.HasPrefix(source.Target, "chain://") {
+				continue
+			}
+			out[source.Target] = struct{}{}
+		}
+	}
+	return out
 }
 
 func compileChainHandlers(arbiters map[string]*runtimeArbiter) (map[string]map[string]struct{}, error) {
@@ -481,7 +502,64 @@ func cloneMap(src map[string]any) map[string]any {
 	}
 	out := make(map[string]any, len(src))
 	for key, value := range src {
-		out[key] = value
+		out[key] = cloneAnyValue(value)
 	}
 	return out
+}
+
+func cloneAnyValue(v any) any {
+	if v == nil {
+		return nil
+	}
+	return cloneReflectValue(reflect.ValueOf(v)).Interface()
+}
+
+func cloneReflectValue(v reflect.Value) reflect.Value {
+	if !v.IsValid() {
+		return reflect.Value{}
+	}
+	switch v.Kind() {
+	case reflect.Interface:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		cloned := cloneReflectValue(v.Elem())
+		out := reflect.New(v.Type()).Elem()
+		out.Set(cloned)
+		return out
+	case reflect.Map:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.MakeMapWithSize(v.Type(), v.Len())
+		iter := v.MapRange()
+		for iter.Next() {
+			out.SetMapIndex(iter.Key(), cloneReflectValue(iter.Value()))
+		}
+		return out
+	case reflect.Slice:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(cloneReflectValue(v.Index(i)))
+		}
+		return out
+	case reflect.Array:
+		out := reflect.New(v.Type()).Elem()
+		for i := 0; i < v.Len(); i++ {
+			out.Index(i).Set(cloneReflectValue(v.Index(i)))
+		}
+		return out
+	case reflect.Pointer:
+		if v.IsNil() {
+			return reflect.Zero(v.Type())
+		}
+		out := reflect.New(v.Elem().Type())
+		out.Elem().Set(cloneReflectValue(v.Elem()))
+		return out
+	default:
+		return v
+	}
 }

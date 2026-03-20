@@ -3,7 +3,9 @@ package govern
 import "testing"
 
 func TestBucketDeterministic(t *testing.T) {
-	if Bucket("user_123") != Bucket("user_123") {
+	first := Bucket("user_123")
+	second := Bucket("user_123")
+	if first != second {
 		t.Fatal("bucket should be deterministic")
 	}
 }

@@ -551,14 +551,7 @@ func protoTrace(steps []govern.TraceStep) []*arbiterv1.TraceStep {
 
 func toGovernTrace(steps []flags.TraceStep) []govern.TraceStep {
 	out := make([]govern.TraceStep, 0, len(steps))
-	for _, step := range steps {
-		out = append(out, govern.TraceStep{
-			Check:  step.Check,
-			Result: step.Result,
-			Detail: step.Detail,
-		})
-	}
-	return out
+	return append(out, steps...)
 }
 
 func (s *Server) protoBundleSummary(bundle *Bundle) *arbiterv1.BundleSummary {

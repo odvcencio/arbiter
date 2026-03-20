@@ -38,6 +38,9 @@
 - **`workflow` runtime package** — chained arbiter declarations now have a real execution layer: compile once, keep one long-lived expert session per arbiter, sync external sources, and run the graph in topological order.
 - **Delta-based chaining** — `on Outcome chain target` now forwards only newly emitted upstream outcomes into downstream `source chain://upstream` inputs, which keeps chained arbiters event-driven instead of replaying the entire upstream history on every pass.
 - **Runtime validation** — workflow compilation now rejects unknown chain endpoints, mismatched `chain` handlers versus `source chain://...` declarations, runtime writes to `chain://...` sources, and cyclic arbiter graphs.
+- **Reliable source polling** — `workflow.NewRunner` adds retry-with-backoff source loads, last-known-good retention when a source is unavailable, and per-source health exposed to rules as `source.<alias>.{available,__source_age_seconds,...}`.
+- **Durable sink catch-up** — the same runner can journal pending non-chain deliveries to a local JSONL log, retry failed handlers with backoff, and replay pending deliveries after restart instead of dropping them when a sink is unavailable.
+- **Mutable runtime metadata** — expert sessions now support envelope updates between runs, so long-lived arbiters can react to changing source and sink health even when the working-memory fact set itself has not changed.
 
 ---
 

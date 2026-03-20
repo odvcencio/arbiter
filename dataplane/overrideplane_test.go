@@ -251,13 +251,6 @@ func (s *fakeOverrideStream) Close() error {
 	return nil
 }
 
-func (s *fakeOverrideStream) send(event OverrideEvent) {
-	select {
-	case s.events <- &event:
-	case <-s.done:
-	}
-}
-
 var _ OverrideControlPlane = (*fakeOverrideControlPlane)(nil)
 var _ OverrideStream = (*fakeOverrideStream)(nil)
 

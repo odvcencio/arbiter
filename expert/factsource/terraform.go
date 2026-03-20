@@ -147,9 +147,6 @@ func loadTerraformPlan(path string) ([]Fact, error) {
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return nil, fmt.Errorf("terraform plan parse: %w", err)
 	}
-	if plan.PlannedValues.RootModule == nil {
-		return nil, nil
-	}
 	out := make([]Fact, 0)
 	collectTerraformPlanFacts(plan.PlannedValues.RootModule, path, &out)
 	collectTerraformPlanChangeFacts(plan.ResourceChanges, path, &out)

@@ -164,3 +164,27 @@ func TestDecisionFromContextAbsent(t *testing.T) {
 		t.Fatal("expected no decision on plain request")
 	}
 }
+
+func TestDefaultHTTPContextHandlesNilURL(t *testing.T) {
+	ctx, err := DefaultHTTPContext(&http.Request{
+		Method: http.MethodGet,
+		Header: http.Header{"X-Debug": []string{"true"}},
+	})
+	if err != nil {
+		t.Fatalf("DefaultHTTPContext: %v", err)
+	}
+	request, ok := ctx["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request = %#v", ctx["request"])
+	}
+	if got := request["path"]; got != "" {
+		t.Fatalf("path = %#v, want empty string", got)
+	}
+	if got, ok := request["query"].(map[string]any); ok && got != nil {
+		t.Fatalf("query = %#v, want nil", got)
+	}
+	headers, ok := request["headers"].(map[string]any)
+	if !ok || headers["x_debug"] != true {
+		t.Fatalf("headers = %#v", request["headers"])
+	}
+}

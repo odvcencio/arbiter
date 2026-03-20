@@ -146,6 +146,7 @@ type Session struct {
 	evaluator          *vm.Evaluator
 	now                func() time.Time
 	evalNow            int64
+	contextDirty       bool
 }
 
 // NewSession creates a new in-memory expert session.
@@ -183,6 +184,16 @@ func NewSession(p *Program, envelope map[string]any, facts []Fact, opts Options)
 		_, _ = s.upsertExternalFact(fact)
 	}
 	return s
+}
+
+// SetEnvelope replaces the top-level evaluation envelope used on future runs.
+// Existing working-memory facts remain intact.
+func (s *Session) SetEnvelope(envelope map[string]any) {
+	if s == nil {
+		return
+	}
+	s.envelope = cloneMap(envelope)
+	s.contextDirty = true
 }
 
 // Assert inserts or updates a fact in working memory.
@@ -372,7 +383,7 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 		return s.snapshot(), nil
 	}
 	nextNow := s.currentUnix()
-	forceFullEval := nextNow != s.evalNow
+	forceFullEval := nextNow != s.evalNow || s.contextDirty
 	s.evalNow = nextNow
 	if s.rounds > 0 && s.stopReason == StopQuiescent && len(s.dirtyFacts) == 0 && !forceFullEval {
 		return s.snapshot(), nil
@@ -415,6 +426,7 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 			if forceStableRound {
 				s.stablePending = false
 			}
+			s.contextDirty = false
 			s.stopReason = StopQuiescent
 			return s.snapshot(), nil
 		}
@@ -429,6 +441,7 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 	}
 
 	s.stopReason = StopMaxRounds
+	s.contextDirty = false
 	return s.snapshot(), nil
 }
 
@@ -882,10 +895,6 @@ func (s *Session) supporterNames(factType, factKey string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func (s *Session) applyModifications(factType, factKey string, fields map[string]any) map[string]any {
-	return s.applyModificationsExcludingRule(factType, factKey, fields, "", "")
 }
 
 func (s *Session) isRetractedExcludingRule(factType, factKey, ruleName string, kind ActionKind) bool {
@@ -1495,31 +1504,24 @@ func (s *Session) initEvalState() {
 	if s == nil {
 		return
 	}
-	s.evalCtx = cloneMap(s.envelope)
-	if s.evalCtx == nil {
-		s.evalCtx = make(map[string]any)
-	}
 	s.factsView = make(map[string]any)
-	s.evalCtx["facts"] = s.factsView
-	s.evalCtx["current_round"] = float64(s.rounds)
 	if s.evalNow == 0 {
 		s.evalNow = s.currentUnix()
 	}
-	s.evalCtx["__now"] = float64(s.evalNow)
 	if s.program == nil || s.program.ruleset == nil {
+		s.syncEnvelopeContext()
 		return
 	}
 	s.pool = vm.NewStringPool(s.program.ruleset.Constants.Strings())
-	s.dc = vm.DataFromMap(s.evalCtx, s.pool)
 	s.evaluator = vm.NewEvaluator(s.program.ruleset, s.pool)
+	s.syncEnvelopeContext()
 }
 
 func (s *Session) refreshContextView(firstPass bool, dirtyFacts map[string]struct{}) {
 	if s.evalCtx == nil || s.factsView == nil || s.dc == nil || s.evaluator == nil {
 		s.initEvalState()
 	}
-	s.evalCtx["current_round"] = float64(s.rounds)
-	s.evalCtx["__now"] = float64(s.evalNow)
+	s.syncEnvelopeContext()
 	if firstPass {
 		dirtyFacts = make(map[string]struct{}, len(s.facts))
 		for factType := range s.facts {
@@ -1537,6 +1539,25 @@ func (s *Session) refreshContextView(firstPass bool, dirtyFacts map[string]struc
 			items = append(items, factEvalFields(fact, s.evalNow))
 		}
 		s.factsView[factType] = items
+	}
+}
+
+func (s *Session) syncEnvelopeContext() {
+	if s == nil {
+		return
+	}
+	if s.evalCtx == nil || s.contextDirty {
+		s.evalCtx = cloneMap(s.envelope)
+		if s.evalCtx == nil {
+			s.evalCtx = make(map[string]any)
+		}
+		s.contextDirty = false
+	}
+	s.evalCtx["facts"] = s.factsView
+	s.evalCtx["current_round"] = float64(s.rounds)
+	s.evalCtx["__now"] = float64(s.evalNow)
+	if s.pool != nil {
+		s.dc = vm.DataFromMap(s.evalCtx, s.pool)
 	}
 }
 

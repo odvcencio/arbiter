@@ -145,3 +145,70 @@ arbiter upstream {
 		t.Fatalf("expected runtime-owned error, got %v", err)
 	}
 }
+
+func TestWorkflowRejectsUndeclaredExternalSourceUpdates(t *testing.T) {
+	w, err := Compile([]byte(`
+arbiter upstream {
+	poll 1s
+	source https://transactions.internal/feed
+}
+`), Options{})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	err = w.SetSourceFacts("https://transactions.internal/typo", nil)
+	if err == nil || !strings.Contains(err.Error(), "not declared") {
+		t.Fatalf("expected undeclared source error, got %v", err)
+	}
+}
+
+func TestWorkflowSetSourceFactsDeepClonesNestedValues(t *testing.T) {
+	src := []byte(`
+arbiter upstream {
+	poll 1s
+	source https://resources.internal/feed
+}
+
+expert rule EmitSeen priority 10 per_fact {
+	when {
+		any resource in facts.Resource { resource.tags.env == "prod" }
+	}
+	then emit Seen {
+		key: resource.key,
+		env: resource.tags.env,
+	}
+}
+`)
+
+	w, err := Compile(src, Options{})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	original := []expert.Fact{{
+		Type: "Resource",
+		Key:  "svc-1",
+		Fields: map[string]any{
+			"tags": map[string]any{
+				"env": "prod",
+			},
+		},
+	}}
+	if err := w.SetSourceFacts("https://resources.internal/feed", original); err != nil {
+		t.Fatalf("SetSourceFacts: %v", err)
+	}
+
+	original[0].Fields["tags"].(map[string]any)["env"] = "dev"
+
+	result, err := w.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	outcomes := result.Arbiters["upstream"].Delta.Outcomes
+	if len(outcomes) != 1 {
+		t.Fatalf("outcomes = %+v", outcomes)
+	}
+	if got := outcomes[0].Params["env"]; got != "prod" {
+		t.Fatalf("env = %#v, want prod", got)
+	}
+}
