@@ -1,0 +1,97 @@
+# Tax Computation - Expert Inference
+
+expert rule ComputeGrossIncome priority 5 {
+    when {
+        income.wages > 0
+        or income.interest > 0
+        or income.dividends > 0
+    }
+    then assert GrossIncome {
+        key: "total",
+        amount: income.wages + income.interest + income.dividends + income.capital_gains,
+    }
+}
+
+expert rule ApplyStandardDeduction priority 10 {
+    no_loop
+    requires ComputeGrossIncome
+    when {
+        any gi in facts.GrossIncome { gi.amount > 0 }
+    }
+    then assert Deduction {
+        key: "standard",
+        amount: 14600,
+        type: "standard",
+    }
+}
+
+expert rule ComputeAGI priority 20 {
+    requires ComputeGrossIncome
+    when {
+        any ded in facts.Deduction { ded.amount > 0 }
+    }
+    then assert AGI {
+        key: "total",
+        amount: income.wages + income.interest + income.dividends + income.capital_gains - deductions.student_loan - deductions.hsa,
+    }
+}
+
+expert rule ComputeTaxableIncome priority 30 {
+    requires ComputeAGI
+    when {
+        any agi in facts.AGI { agi.amount > 0 }
+    }
+    then assert TaxableIncome {
+        key: "total",
+        amount: income.wages + income.interest + income.dividends + income.capital_gains - deductions.student_loan - deductions.hsa - 14600,
+    }
+}
+
+expert rule BracketLow priority 40 {
+    requires ComputeTaxableIncome
+    activation_group TaxBracket
+    when {
+        any ti in facts.TaxableIncome { ti.amount <= 44725 }
+    }
+    then assert TaxLiability {
+        key: "federal",
+        bracket: "12pct",
+        rate: 12,
+    }
+}
+
+expert rule BracketMid priority 41 {
+    requires ComputeTaxableIncome
+    activation_group TaxBracket
+    when {
+        any ti in facts.TaxableIncome { ti.amount > 44725 and ti.amount <= 95375 }
+    }
+    then assert TaxLiability {
+        key: "federal",
+        bracket: "22pct",
+        rate: 22,
+    }
+}
+
+expert rule BracketHigh priority 42 {
+    requires ComputeTaxableIncome
+    activation_group TaxBracket
+    when {
+        any ti in facts.TaxableIncome { ti.amount > 95375 }
+    }
+    then assert TaxLiability {
+        key: "federal",
+        bracket: "24pct_plus",
+        rate: 24,
+    }
+}
+
+expert rule EmitReturn priority 90 {
+    requires ComputeTaxableIncome
+    when {
+        any tax in facts.TaxLiability { tax.rate > 0 }
+    }
+    then emit TaxReturn {
+        status: "complete",
+    }
+}

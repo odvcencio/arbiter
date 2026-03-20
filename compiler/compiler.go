@@ -338,27 +338,30 @@ func (c *cstCompiler) compileExpr(code []byte, n *gotreesitter.Node) []byte {
 	}
 }
 
-// compileAnd emits left, then short-circuits past the RHS if false.
+// compileAnd emits left, then short-circuits past the RHS + OpAnd if false.
+// The jump target must land PAST OpAnd so the LHS value remains on the stack
+// as the result without OpAnd popping an extra value.
 func (c *cstCompiler) compileAnd(code []byte, n *gotreesitter.Node) []byte {
 	code = c.compileExpr(code, c.childByField(n, "left"))
 	jumpPos := len(code)
 	code = Emit(code, OpJumpIfFalse, 0, 0)
 	code = c.compileExpr(code, c.childByField(n, "right"))
 	code = Emit(code, OpAnd, 0, 0)
-	dist := uint16(len(code) - jumpPos - InstrSize)
+	dist := uint16(len(code) - jumpPos)
 	code[jumpPos+2] = byte(dist)
 	code[jumpPos+3] = byte(dist >> 8)
 	return code
 }
 
-// compileOr emits left, then short-circuits past the RHS if true.
+// compileOr emits left, then short-circuits past the RHS + OpOr if true.
+// Same jump-past-combining-opcode logic as compileAnd.
 func (c *cstCompiler) compileOr(code []byte, n *gotreesitter.Node) []byte {
 	code = c.compileExpr(code, c.childByField(n, "left"))
 	jumpPos := len(code)
 	code = Emit(code, OpJumpIfTrue, 0, 0)
 	code = c.compileExpr(code, c.childByField(n, "right"))
 	code = Emit(code, OpOr, 0, 0)
-	dist := uint16(len(code) - jumpPos - InstrSize)
+	dist := uint16(len(code) - jumpPos)
 	code[jumpPos+2] = byte(dist)
 	code[jumpPos+3] = byte(dist >> 8)
 	return code

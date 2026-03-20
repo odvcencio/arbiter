@@ -1,0 +1,102 @@
+# Fraud Detection Rules
+# Multi-layered fraud scoring with segments, prerequisites, and fallbacks.
+
+segment high_risk_country {
+    tx.country in ["NG", "RU", "CN", "BR"]
+}
+
+segment trusted_account {
+    account.age_days > 365
+    and account.verified == true
+    and account.chargeback_count == 0
+}
+
+segment new_account {
+    account.age_days < 30
+}
+
+rule InstantBlock priority 0 {
+    when {
+        account.flagged == true
+        or model.risk_score > 0.95
+    }
+    then Block {
+        reason: "flagged account or extreme risk",
+        escalate: "fraud-ops",
+    }
+}
+
+rule VelocityCheck priority 1 {
+    when {
+        tx.count_last_hour > 10
+        or tx.total_last_hour > 5000
+    }
+    then Review {
+        reason: "velocity limit exceeded",
+        queue: "velocity",
+    }
+}
+
+rule LargeTransactionNewAccount priority 2 {
+    when segment new_account {
+        tx.amount > 500
+    }
+    then Review {
+        reason: "large transaction on new account",
+        queue: "onboarding",
+    }
+}
+
+# Split into two rules to avoid nested or-inside-and VM issue
+rule HighRiskGeoUnverified priority 3 {
+    when {
+        tx.country in ["NG", "RU", "CN", "BR"]
+        and tx.amount > 100
+        and account.verified != true
+    }
+    then Challenge {
+        type: "sms_otp",
+        timeout: "5m",
+    }
+}
+
+rule HighRiskGeoNewAccount priority 3 {
+    when {
+        tx.country in ["NG", "RU", "CN", "BR"]
+        and tx.amount > 100
+        and account.age_days <= 180
+    }
+    then Challenge {
+        type: "sms_otp",
+        timeout: "5m",
+    }
+}
+
+rule MismatchedCurrency priority 4 {
+    when {
+        tx.currency != account.home_currency
+        and tx.amount > 200
+    }
+    then Review {
+        reason: "currency mismatch on significant amount",
+        queue: "geo",
+    }
+}
+
+rule TrustedAccountFastPath priority 10 {
+    when segment trusted_account {
+        tx.amount <= 1000
+    }
+    then Allow {
+        reason: "trusted account under threshold",
+    }
+}
+
+rule DefaultAllow priority 99 {
+    when {
+        true
+    }
+    then Allow {
+        reason: "no fraud signals detected",
+    }
+}

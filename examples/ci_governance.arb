@@ -1,0 +1,108 @@
+# CI Governance Rules
+# Controls when GitHub Actions workflows are allowed to run
+# based on budget, time, branch policy, and workflow type.
+
+# ── Segments ─────────────────────────────────────────────────
+
+segment production_branch {
+    workflow.branch == "main"
+    or workflow.branch == "release"
+}
+
+segment feature_branch {
+    workflow.branch starts_with "feat/"
+    or workflow.branch starts_with "fix/"
+}
+
+segment expensive_workflow {
+    workflow.estimated_minutes > 10
+}
+
+segment off_hours {
+    context.hour >= 22 or context.hour < 6
+}
+
+segment budget_critical {
+    billing.used_minutes_pct >= 90
+}
+
+segment budget_warning {
+    billing.used_minutes_pct >= 75
+}
+
+# ── Rules ────────────────────────────────────────────────────
+
+# Production branches always run — these are non-negotiable
+rule AllowProduction priority 0 {
+    when segment production_branch {
+        true
+    }
+    then Allow {
+        reason: "production branch always runs",
+    }
+}
+
+# Kill switch for emergencies — flip at runtime to halt all CI
+rule EmergencyHalt priority 0 {
+    kill_switch
+    when {
+        true
+    }
+    then Deny {
+        reason: "emergency CI halt active",
+    }
+}
+
+# When budget is critical (>90%), only production runs
+rule DenyNonProdAtBudgetLimit priority 1 {
+    when segment budget_critical {
+        not (workflow.branch == "main" or workflow.branch == "release")
+    }
+    then Deny {
+        reason: "budget over 90%, non-production runs blocked",
+    }
+}
+
+# When budget is warning (>75%), block expensive workflows on feature branches
+rule DenyExpensiveAtBudgetWarning priority 2 {
+    when {
+        billing.used_minutes_pct >= 75
+        and workflow.estimated_minutes > 10
+        and not (workflow.branch == "main" or workflow.branch == "release")
+    }
+    then Deny {
+        reason: "budget over 75%, expensive feature branch runs blocked",
+    }
+}
+
+# Rate limit: block if same workflow ran in the last N minutes
+rule DenyRapidRerun priority 3 {
+    when {
+        workflow.minutes_since_last_run < 5
+        and not (workflow.branch == "main")
+    }
+    then Deny {
+        reason: "same workflow ran less than 5 minutes ago",
+    }
+}
+
+# Off-hours: only allow production and small workflows
+rule DenyExpensiveOffHours priority 4 {
+    when segment off_hours {
+        workflow.estimated_minutes > 15
+        and not (workflow.branch == "main" or workflow.branch == "release")
+    }
+    then Deny {
+        reason: "expensive non-production workflow during off-hours",
+    }
+}
+
+# Default: allow everything that wasn't denied
+rule AllowDefault priority 99 {
+    when {
+        true
+    }
+    then Allow {
+        reason: "default allow",
+    }
+}

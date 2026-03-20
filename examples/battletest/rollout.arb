@@ -1,0 +1,55 @@
+# Rollout test rules
+# Tests deterministic bucketing at various thresholds.
+
+segment premium {
+    user.plan == "premium"
+}
+
+rule Rollout20 priority 1 {
+    when segment premium {
+        true
+    }
+    then Match20 {
+        reason: "20pct rollout",
+    }
+    rollout 20
+}
+
+rule Rollout50 priority 2 {
+    when {
+        user.active == true
+    }
+    then Match50 {
+        reason: "50pct rollout",
+    }
+    rollout 50
+}
+
+rule Rollout80 priority 3 {
+    when {
+        user.active == true
+    }
+    then Match80 {
+        reason: "80pct rollout",
+    }
+    rollout 80
+}
+
+rule Rollout100 priority 4 {
+    when {
+        user.active == true
+    }
+    then Match100 {
+        reason: "100pct rollout",
+    }
+    rollout 100
+}
+
+rule NoRollout priority 5 {
+    when {
+        user.active == true
+    }
+    then MatchAll {
+        reason: "no rollout gate",
+    }
+}

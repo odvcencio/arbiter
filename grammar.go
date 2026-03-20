@@ -51,10 +51,10 @@ func ArbiterGrammar() *Grammar {
 		Sym("flag_declaration"),
 	))
 
-	// --- Comments (extras — auto-skipped) ---
+	// --- Comments (extras — auto-skipped, full Unicode support) ---
 	g.Define("comment", Token(Choice(
-		Pat(`#[^\n]*`),
-		Pat(`//[^\n]*`),
+		Pat(`#[^\n\x00]*`),
+		Pat(`//[^\n\x00]*`),
 		Pat(`/\*([^*]|\*+[^*/])*\*+/`),
 	)))
 
@@ -130,6 +130,7 @@ func ArbiterGrammar() *Grammar {
 		Optional(Field("no_loop", Sym("no_loop"))),
 		Repeat(Sym("rule_requires")),
 		Optional(Field("activation_group", Sym("expert_activation_group"))),
+		Repeat(Sym("rule_requires")),
 		Field("condition", Sym("expert_when_block")),
 		Field("action", Sym("expert_then_block")),
 		Optional(Field("rollout", Sym("rule_rollout"))),

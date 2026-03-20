@@ -1,0 +1,50 @@
+# Feature Flags
+# Checkout redesign with multi-segment targeting and a billing experiment.
+
+segment beta_users {
+    user.cohort starts_with "beta_"
+}
+
+segment enterprise {
+    user.plan == "enterprise"
+    and user.seat_count > 50
+}
+
+segment us_users {
+    user.country == "US"
+}
+
+flag checkout_v2 type multivariate default "control" {
+    owner: "growth"
+    ticket: "ENG-1234"
+
+    variant "treatment_a" {
+        layout: "single_page",
+        show_summary: true,
+    }
+
+    variant "treatment_b" {
+        layout: "multi_step",
+        show_summary: true,
+        show_upsell: true,
+    }
+
+    when beta_users then "treatment_b"
+    when { user.plan == "enterprise" } then "treatment_a"
+    when { user.country == "US" and user.lifetime_spend > 500 } rollout 50 then "treatment_a"
+}
+
+flag billing_annual type boolean default "false" {
+    owner: "revenue"
+    ticket: "REV-567"
+
+    when enterprise then "true"
+    when { user.plan == "pro" and user.months_active > 6 } rollout 30 then "true"
+}
+
+flag dark_mode type boolean default "false" {
+    owner: "platform"
+    ticket: "PLT-890"
+
+    when { true } rollout 100 then "true"
+}
