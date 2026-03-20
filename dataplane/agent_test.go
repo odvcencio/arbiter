@@ -163,6 +163,44 @@ func TestAgentSkipsBadUpdateAndKeepsLastGoodSnapshot(t *testing.T) {
 	}
 }
 
+func TestAgentSkipsDuplicateBootstrapSnapshot(t *testing.T) {
+	cp := newFakeControlPlane(t, Bundle{
+		Name:   "checkout",
+		Source: []byte(agentTestInitialSource),
+	})
+	agent := New(cp)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- agent.Run(ctx, BundleLocator{Name: "checkout"}, WatchRequest{Name: "checkout", ActiveOnly: true})
+	}()
+
+	first := waitForSnapshot(t, agent.Updates(), agentTestTimeout)
+	cp.send(BundleEvent{
+		Type: BundleEventSnapshot,
+		Bundle: Bundle{
+			Name:   "checkout",
+			ID:     first.Bundle.ID,
+			Source: []byte(agentTestInitialSource),
+			Active: true,
+		},
+	})
+
+	select {
+	case snapshot := <-agent.Updates():
+		t.Fatalf("expected duplicate bootstrap snapshot to be ignored, got %+v", snapshot)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	cancel()
+	if err := <-runErr; err != context.Canceled && err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 func TestAgentRunManyKeepsMultipleBundlesHot(t *testing.T) {
 	cp := newFakeMultiControlPlane(t, map[string]Bundle{
 		"checkout": {Name: "checkout", Source: []byte(agentTestInitialSource)},

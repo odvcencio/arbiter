@@ -382,6 +382,96 @@ expert rule SecondarySupport priority 10 {
 	}
 }
 
+func TestSessionPerFactMaintainsDistinctSupportsPerTargetKey(t *testing.T) {
+	src := []byte(`
+expert rule QualifyHighTier priority 10 per_fact {
+	when {
+		any lead in facts.Lead { lead.tier == "high" }
+	}
+	then assert QualifiedLead {
+		key: lead.key,
+		tier: lead.tier,
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, []expert.Fact{
+		{
+			Type: "Lead",
+			Key:  "sardine-eng",
+			Fields: map[string]any{
+				"tier": "high",
+			},
+		},
+		{
+			Type: "Lead",
+			Key:  "feedzai-eng",
+			Fields: map[string]any{
+				"tier": "high",
+			},
+		},
+		{
+			Type: "Lead",
+			Key:  "faire-eng",
+			Fields: map[string]any{
+				"tier": "high",
+			},
+		},
+	}, expert.Options{})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+	if !hasFact(first.Facts, "QualifiedLead", "sardine-eng") ||
+		!hasFact(first.Facts, "QualifiedLead", "feedzai-eng") ||
+		!hasFact(first.Facts, "QualifiedLead", "faire-eng") {
+		t.Fatalf("expected one QualifiedLead per high-tier lead, got %+v", first.Facts)
+	}
+	qualifiedCount := 0
+	for _, fact := range first.Facts {
+		if fact.Type != "QualifiedLead" {
+			continue
+		}
+		qualifiedCount++
+		if len(fact.DerivedBy) != 1 || fact.DerivedBy[0] != "QualifyHighTier" {
+			t.Fatalf("expected per-fact support provenance, got %+v", fact)
+		}
+	}
+	if qualifiedCount != 3 {
+		t.Fatalf("expected 3 qualified leads, got %d in %+v", qualifiedCount, first.Facts)
+	}
+
+	if err := session.Retract("Lead", "sardine-eng"); err != nil {
+		t.Fatalf("Retract: %v", err)
+	}
+
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	if hasFact(second.Facts, "QualifiedLead", "sardine-eng") {
+		t.Fatalf("expected retracted lead support to disappear, got %+v", second.Facts)
+	}
+	if !hasFact(second.Facts, "QualifiedLead", "feedzai-eng") || !hasFact(second.Facts, "QualifiedLead", "faire-eng") {
+		t.Fatalf("expected remaining qualified leads to persist, got %+v", second.Facts)
+	}
+	qualifiedCount = 0
+	for _, fact := range second.Facts {
+		if fact.Type == "QualifiedLead" {
+			qualifiedCount++
+		}
+	}
+	if qualifiedCount != 2 {
+		t.Fatalf("expected 2 qualified leads after retract, got %d in %+v", qualifiedCount, second.Facts)
+	}
+}
+
 func TestSessionExpertBindingsJoinFacts(t *testing.T) {
 	src := []byte(`
 expert rule RouteManualReview {

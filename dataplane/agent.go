@@ -14,6 +14,11 @@ import (
 	"github.com/odvcencio/arbiter/overrides"
 )
 
+const (
+	initialSyncBackoff = 100 * time.Millisecond
+	maxSyncBackoff     = 5 * time.Second
+)
+
 // Snapshot is the compiled local state for one active bundle.
 type Snapshot struct {
 	Bundle   Bundle
@@ -322,23 +327,31 @@ func (a *Agent) initTracking(targets []syncTarget) {
 }
 
 func (a *Agent) runOne(ctx context.Context, target syncTarget) error {
-	name := targetName(target)
-	backoff := 100 * time.Millisecond
+	if err := a.bootstrapTarget(ctx, target); err != nil {
+		return err
+	}
+	return a.watchBundleTarget(ctx, target)
+}
+
+func (a *Agent) bootstrapTarget(ctx context.Context, target syncTarget) error {
+	backoff := initialSyncBackoff
 	for {
 		if err := a.Bootstrap(ctx, target.locator); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if !sleepContext(ctx, backoff) {
-				return ctx.Err()
+			if err := sleepBackoff(ctx, &backoff); err != nil {
+				return err
 			}
-			backoff = nextBackoff(backoff)
 			continue
 		}
-		break
+		return nil
 	}
+}
 
-	backoff = 100 * time.Millisecond
+func (a *Agent) watchBundleTarget(ctx context.Context, target syncTarget) error {
+	name := targetName(target)
+	backoff := initialSyncBackoff
 	connected := false
 	for {
 		if ctx.Err() != nil {
@@ -348,10 +361,9 @@ func (a *Agent) runOne(ctx context.Context, target syncTarget) error {
 		stream, err := a.cp.WatchBundles(ctx, target.watch)
 		if err != nil {
 			a.recordBundleError(name, fmt.Errorf("watch bundles: %w", err))
-			if !sleepContext(ctx, backoff) {
-				return ctx.Err()
+			if err := sleepBackoff(ctx, &backoff); err != nil {
+				return err
 			}
-			backoff = nextBackoff(backoff)
 			continue
 		}
 
@@ -359,35 +371,41 @@ func (a *Agent) runOne(ctx context.Context, target syncTarget) error {
 			a.recordBundleReconnect(name)
 		}
 		connected = true
-		backoff = 100 * time.Millisecond
-		skipBootstrapSnapshot := true
+		backoff = initialSyncBackoff
 
-		for {
-			event, err := stream.Recv()
-			if err != nil {
-				_ = stream.Close()
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				a.recordBundleError(name, fmt.Errorf("watch bundles recv: %w", err))
-				if !sleepContext(ctx, backoff) {
-					return ctx.Err()
-				}
-				backoff = nextBackoff(backoff)
-				break
+		err = a.consumeBundleStream(ctx, name, stream)
+		_ = stream.Close()
+		if err == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		a.recordBundleError(name, err)
+		if err := sleepBackoff(ctx, &backoff); err != nil {
+			return err
+		}
+	}
+}
+
+func (a *Agent) consumeBundleStream(ctx context.Context, name string, stream BundleStream) error {
+	skipBootstrapSnapshot := true
+	for {
+		event, err := stream.Recv()
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
-			if event == nil {
-				continue
-			}
-			if skipBootstrapSnapshot && event.Type == BundleEventSnapshot && a.matchesCurrentForName(name, event.Bundle) {
-				skipBootstrapSnapshot = false
-				continue
-			}
-			skipBootstrapSnapshot = false
-			if err := a.applyBundle(ctx, event.Bundle); err != nil {
-				continue
-			}
-			backoff = 100 * time.Millisecond
+			return fmt.Errorf("watch bundles recv: %w", err)
+		}
+		if event == nil {
+			continue
+		}
+		if skipDuplicateBootstrapSnapshot(a, name, event, &skipBootstrapSnapshot) {
+			continue
+		}
+		if err := a.applyBundle(ctx, event.Bundle); err != nil {
+			continue
 		}
 	}
 }
@@ -537,7 +555,7 @@ func (a *Agent) activateOverrideSync(prepared *preparedOverrideSync) {
 }
 
 func (a *Agent) runOverrideWatch(ctx context.Context, locator OverrideLocator) {
-	backoff := 100 * time.Millisecond
+	backoff := initialSyncBackoff
 	connected := false
 	for {
 		if ctx.Err() != nil {
@@ -547,10 +565,9 @@ func (a *Agent) runOverrideWatch(ctx context.Context, locator OverrideLocator) {
 		stream, err := a.overrideCP.WatchOverrides(ctx, locator)
 		if err != nil {
 			a.recordOverrideError(locator.Name, locator.BundleID, fmt.Errorf("watch overrides: %w", err))
-			if !sleepContext(ctx, backoff) {
+			if err := sleepBackoff(ctx, &backoff); err != nil {
 				return
 			}
-			backoff = nextBackoff(backoff)
 			continue
 		}
 
@@ -558,33 +575,40 @@ func (a *Agent) runOverrideWatch(ctx context.Context, locator OverrideLocator) {
 			a.recordOverrideReconnect(locator.Name, locator.BundleID)
 		}
 		connected = true
-		backoff = 100 * time.Millisecond
+		backoff = initialSyncBackoff
 
-		for {
-			event, err := stream.Recv()
-			if err != nil {
-				_ = stream.Close()
-				if ctx.Err() != nil {
-					return
-				}
-				a.recordOverrideError(locator.Name, locator.BundleID, fmt.Errorf("watch overrides recv: %w", err))
-				if !sleepContext(ctx, backoff) {
-					return
-				}
-				backoff = nextBackoff(backoff)
-				break
-			}
-			if event == nil {
-				continue
-			}
-			bundleID := firstNonEmpty(event.BundleID, locator.BundleID)
-			if bundleID == "" || bundleID != locator.BundleID {
-				continue
-			}
-			a.overrideStore.RestoreBundle(bundleID, event.Snapshot)
-			a.recordOverrideStatus(locator.Name, bundleID, time.Now().UTC())
-			backoff = 100 * time.Millisecond
+		err = a.consumeOverrideStream(ctx, locator, stream)
+		_ = stream.Close()
+		if err == nil {
+			continue
 		}
+		if ctx.Err() != nil {
+			return
+		}
+		a.recordOverrideError(locator.Name, locator.BundleID, err)
+		if err := sleepBackoff(ctx, &backoff); err != nil {
+			return
+		}
+	}
+}
+
+func (a *Agent) consumeOverrideStream(ctx context.Context, locator OverrideLocator, stream OverrideStream) error {
+	for {
+		event, err := stream.Recv()
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("watch overrides recv: %w", err)
+		}
+		if event == nil {
+			continue
+		}
+		if !appliesToOverrideLocator(locator, event) {
+			continue
+		}
+		a.overrideStore.RestoreBundle(locator.BundleID, event.Snapshot)
+		a.recordOverrideStatus(locator.Name, locator.BundleID, time.Now().UTC())
 	}
 }
 
@@ -686,6 +710,19 @@ func cloneBundle(bundle Bundle) Bundle {
 	return bundle
 }
 
+func skipDuplicateBootstrapSnapshot(a *Agent, name string, event *BundleEvent, skipBootstrapSnapshot *bool) bool {
+	if !*skipBootstrapSnapshot {
+		return false
+	}
+	*skipBootstrapSnapshot = false
+	return event.Type == BundleEventSnapshot && a.matchesCurrentForName(name, event.Bundle)
+}
+
+func appliesToOverrideLocator(locator OverrideLocator, event *OverrideEvent) bool {
+	bundleID := firstNonEmpty(event.BundleID, locator.BundleID)
+	return bundleID != "" && bundleID == locator.BundleID
+}
+
 func (a *Agent) matchesCurrentForName(name string, bundle Bundle) bool {
 	if name != "" {
 		if current, ok := a.CurrentBundle(name); ok {
@@ -737,11 +774,25 @@ func sleepContext(ctx context.Context, d time.Duration) bool {
 
 func nextBackoff(current time.Duration) time.Duration {
 	if current <= 0 {
-		return 100 * time.Millisecond
+		return initialSyncBackoff
 	}
 	next := current * 2
-	if next > 5*time.Second {
-		return 5 * time.Second
+	if next > maxSyncBackoff {
+		return maxSyncBackoff
 	}
 	return next
+}
+
+func sleepBackoff(ctx context.Context, backoff *time.Duration) error {
+	if backoff == nil {
+		return nil
+	}
+	if !sleepContext(ctx, *backoff) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return context.Canceled
+	}
+	*backoff = nextBackoff(*backoff)
+	return nil
 }

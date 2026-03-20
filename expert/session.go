@@ -75,12 +75,14 @@ type Checkpoint struct {
 }
 
 type supportRecord struct {
+	Instance string
 	Rule     string
 	Priority int
 	Fact     Fact
 }
 
 type retractRecord struct {
+	Instance string
 	Rule     string
 	Priority int
 	FactType string
@@ -88,6 +90,7 @@ type retractRecord struct {
 }
 
 type modifyRecord struct {
+	Instance  string
 	Rule      string
 	Priority  int
 	FactType  string
@@ -113,11 +116,11 @@ type Session struct {
 	dirtySources       map[string]map[string]struct{}
 	lastRoundMutations int
 	stablePending      bool
-	supportsByRule     map[string]supportRecord
+	supportsByRule     map[string]map[string]supportRecord
 	factSupports       map[string]map[string]map[string]supportRecord
-	retractsByRule     map[string]retractRecord
+	retractsByRule     map[string]map[string]retractRecord
 	factRetracts       map[string]map[string]map[string]retractRecord
-	modifiesByRule     map[string]modifyRecord
+	modifiesByRule     map[string]map[string]modifyRecord
 	factModifies       map[string]map[string]map[string]modifyRecord
 	evalCtx            map[string]any
 	factsView          map[string]any
@@ -145,11 +148,11 @@ func NewSession(p *Program, envelope map[string]any, facts []Fact, opts Options)
 		ruleResults:    make(map[string]bool),
 		dirtyFacts:     make(map[string]struct{}),
 		dirtySources:   make(map[string]map[string]struct{}),
-		supportsByRule: make(map[string]supportRecord),
+		supportsByRule: make(map[string]map[string]supportRecord),
 		factSupports:   make(map[string]map[string]map[string]supportRecord),
-		retractsByRule: make(map[string]retractRecord),
+		retractsByRule: make(map[string]map[string]retractRecord),
 		factRetracts:   make(map[string]map[string]map[string]retractRecord),
-		modifiesByRule: make(map[string]modifyRecord),
+		modifiesByRule: make(map[string]map[string]modifyRecord),
 		factModifies:   make(map[string]map[string]map[string]modifyRecord),
 	}
 	s.initEvalState()
@@ -284,9 +287,9 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 			return Result{}, err
 		}
 		mutated := false
-		activeAssertRules := make(map[string]struct{})
-		activeRetractRules := make(map[string]struct{})
-		activeModifyRules := make(map[string]struct{})
+		activeAssertInstances := make(map[string]struct{})
+		activeRetractInstances := make(map[string]struct{})
+		activeModifyInstances := make(map[string]struct{})
 		for _, match := range matched {
 			if err := ctx.Err(); err != nil {
 				s.stopReason = StopContextCancelled
@@ -305,11 +308,11 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 
 			switch rule.Kind {
 			case ActionAssert:
-				changed, _, err := s.applyAssert(round, rule, match)
+				changed, _, instance, err := s.applyAssert(round, rule, match)
 				if err != nil {
 					return Result{}, err
 				}
-				activeAssertRules[rule.Name] = struct{}{}
+				activeAssertInstances[instance] = struct{}{}
 				mutated = mutated || changed
 			case ActionEmit:
 				_, err := s.applyEmit(round, rule, match)
@@ -317,18 +320,18 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 					return Result{}, err
 				}
 			case ActionRetract:
-				changed, _, err := s.applyRetract(round, rule, match)
+				changed, _, instance, err := s.applyRetract(round, rule, match)
 				if err != nil {
 					return Result{}, err
 				}
-				activeRetractRules[rule.Name] = struct{}{}
+				activeRetractInstances[instance] = struct{}{}
 				mutated = mutated || changed
 			case ActionModify:
-				changed, _, err := s.applyModify(round, rule, match)
+				changed, _, instance, err := s.applyModify(round, rule, match)
 				if err != nil {
 					return Result{}, err
 				}
-				activeModifyRules[rule.Name] = struct{}{}
+				activeModifyInstances[instance] = struct{}{}
 				mutated = mutated || changed
 			default:
 				return Result{}, fmt.Errorf("unsupported expert action kind %q", rule.Kind)
@@ -349,24 +352,15 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 			}
 			switch rule.Kind {
 			case ActionAssert:
-				if _, ok := activeAssertRules[ruleName]; ok {
-					continue
-				}
-				if s.clearDerivedSupport(ruleName) {
+				if s.clearInactiveDerivedSupports(ruleName, activeAssertInstances) {
 					mutated = true
 				}
 			case ActionRetract:
-				if _, ok := activeRetractRules[ruleName]; ok {
-					continue
-				}
-				if s.clearRetraction(ruleName) {
+				if s.clearInactiveRetractions(ruleName, activeRetractInstances) {
 					mutated = true
 				}
 			case ActionModify:
-				if _, ok := activeModifyRules[ruleName]; ok {
-					continue
-				}
-				if s.clearModification(ruleName) {
+				if s.clearInactiveModifications(ruleName, activeModifyInstances) {
 					mutated = true
 				}
 			}
@@ -399,15 +393,16 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 	return s.snapshot(), nil
 }
 
-func (s *Session) applyAssert(round int, rule Rule, match vm.MatchedRule) (bool, string, error) {
+func (s *Session) applyAssert(round int, rule Rule, match vm.MatchedRule) (bool, string, string, error) {
 	keyValue, ok := match.Params["key"]
 	if !ok {
-		return false, "", fmt.Errorf("expert rule %s assert %s: missing key param", rule.Name, rule.Target)
+		return false, "", "", fmt.Errorf("expert rule %s assert %s: missing key param", rule.Name, rule.Target)
 	}
 	key := factKeyString(keyValue)
 	if key == "" {
-		return false, "", fmt.Errorf("expert rule %s assert %s: empty key", rule.Name, rule.Target)
+		return false, "", "", fmt.Errorf("expert rule %s assert %s: empty key", rule.Name, rule.Target)
 	}
+	instance := mutationInstanceKey(rule.Name, key)
 
 	fact := Fact{
 		Type:   rule.Target,
@@ -435,7 +430,7 @@ func (s *Session) applyAssert(round int, rule Rule, match vm.MatchedRule) (bool,
 		Changed: changed,
 		Detail:  detail,
 	})
-	return changed, detail, nil
+	return changed, detail, instance, nil
 }
 
 func (s *Session) applyEmit(round int, rule Rule, match vm.MatchedRule) (bool, error) {
@@ -462,11 +457,12 @@ func (s *Session) applyEmit(round int, rule Rule, match vm.MatchedRule) (bool, e
 	return !existed, nil
 }
 
-func (s *Session) applyRetract(round int, rule Rule, match vm.MatchedRule) (bool, string, error) {
+func (s *Session) applyRetract(round int, rule Rule, match vm.MatchedRule) (bool, string, string, error) {
 	key, _, err := splitMutationParams(match.Params)
 	if err != nil {
-		return false, "", fmt.Errorf("expert rule %s retract %s: %w", rule.Name, rule.Target, err)
+		return false, "", "", fmt.Errorf("expert rule %s retract %s: %w", rule.Name, rule.Target, err)
 	}
+	instance := mutationInstanceKey(rule.Name, key)
 	changed := s.setRetraction(rule, rule.Target, key)
 	detail := fmt.Sprintf("retract %s/%s", rule.Target, key)
 	if changed {
@@ -484,14 +480,15 @@ func (s *Session) applyRetract(round int, rule Rule, match vm.MatchedRule) (bool
 		Changed: changed,
 		Detail:  detail,
 	})
-	return changed, detail, nil
+	return changed, detail, instance, nil
 }
 
-func (s *Session) applyModify(round int, rule Rule, match vm.MatchedRule) (bool, string, error) {
+func (s *Session) applyModify(round int, rule Rule, match vm.MatchedRule) (bool, string, string, error) {
 	key, setFields, err := splitMutationParams(match.Params)
 	if err != nil {
-		return false, "", fmt.Errorf("expert rule %s modify %s: %w", rule.Name, rule.Target, err)
+		return false, "", "", fmt.Errorf("expert rule %s modify %s: %w", rule.Name, rule.Target, err)
 	}
+	instance := mutationInstanceKey(rule.Name, key)
 	changed := s.setModification(rule, rule.Target, key, setFields)
 	detail := fmt.Sprintf("modify %s/%s", rule.Target, key)
 	if changed {
@@ -513,7 +510,7 @@ func (s *Session) applyModify(round int, rule Rule, match vm.MatchedRule) (bool,
 		Changed: changed,
 		Detail:  detail,
 	})
-	return changed, detail, nil
+	return changed, detail, instance, nil
 }
 
 func (s *Session) upsertExternalFact(f Fact) (bool, error) {
@@ -549,7 +546,9 @@ func (s *Session) upsertExternalFact(f Fact) (bool, error) {
 
 func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
 	fact.AssertedRound = s.rounds
+	instance := mutationInstanceKey(rule.Name, fact.Key)
 	next := supportRecord{
+		Instance: instance,
 		Rule:     rule.Name,
 		Priority: rule.Priority,
 		Fact: Fact{
@@ -560,7 +559,8 @@ func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
 		},
 	}
 
-	prev, hadPrev := s.supportsByRule[rule.Name]
+	byInstance := s.supportRecords(rule.Name)
+	prev, hadPrev := byInstance[instance]
 	changed := false
 	sameFact := hadPrev && prev.Fact.Type == next.Fact.Type && prev.Fact.Key == next.Fact.Key
 	if hadPrev {
@@ -568,6 +568,7 @@ func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
 		if !sameFact {
 			changed = s.recomputeFact(prev.Fact.Type, prev.Fact.Key, rule.Name) || changed
 		}
+		byInstance = s.supportRecords(rule.Name)
 	}
 
 	byKey, ok := s.factSupports[next.Fact.Type]
@@ -580,22 +581,34 @@ func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
 		supporters = make(map[string]supportRecord)
 		byKey[next.Fact.Key] = supporters
 	}
-	supporters[rule.Name] = next
-	s.supportsByRule[rule.Name] = next
+	supporters[instance] = next
+	byInstance[instance] = next
 	return s.recomputeFact(next.Fact.Type, next.Fact.Key, rule.Name) || changed
 }
 
-func (s *Session) clearDerivedSupport(ruleName string) bool {
-	prev, ok := s.supportsByRule[ruleName]
-	if !ok {
+func (s *Session) clearInactiveDerivedSupports(ruleName string, active map[string]struct{}) bool {
+	records := s.supportsByRule[ruleName]
+	if len(records) == 0 {
 		return false
 	}
-	s.removeSupportRecord(prev)
-	return s.recomputeFact(prev.Fact.Type, prev.Fact.Key, ruleName)
+	changed := false
+	for instance, record := range records {
+		if _, ok := active[instance]; ok {
+			continue
+		}
+		s.removeSupportRecord(record)
+		changed = s.recomputeFact(record.Fact.Type, record.Fact.Key, ruleName) || changed
+	}
+	return changed
 }
 
 func (s *Session) removeSupportRecord(record supportRecord) {
-	delete(s.supportsByRule, record.Rule)
+	if byInstance, ok := s.supportsByRule[record.Rule]; ok {
+		delete(byInstance, record.Instance)
+		if len(byInstance) == 0 {
+			delete(s.supportsByRule, record.Rule)
+		}
+	}
 	byKey, ok := s.factSupports[record.Fact.Type]
 	if !ok {
 		return
@@ -604,7 +617,7 @@ func (s *Session) removeSupportRecord(record supportRecord) {
 	if !ok {
 		return
 	}
-	delete(supporters, record.Rule)
+	delete(supporters, record.Instance)
 	if len(supporters) == 0 {
 		delete(byKey, record.Fact.Key)
 	}
@@ -696,7 +709,10 @@ func (s *Session) winningSupport(factType, factKey string) (supportRecord, bool)
 	var winner supportRecord
 	set := false
 	for _, record := range supporters {
-		if !set || record.Priority > winner.Priority || (record.Priority == winner.Priority && record.Rule < winner.Rule) {
+		if !set ||
+			record.Priority > winner.Priority ||
+			(record.Priority == winner.Priority && record.Rule < winner.Rule) ||
+			(record.Priority == winner.Priority && record.Rule == winner.Rule && record.Instance < winner.Instance) {
 			winner = record
 			set = true
 		}
@@ -713,9 +729,14 @@ func (s *Session) supporterNames(factType, factKey string) []string {
 	if !ok || len(supporters) == 0 {
 		return nil
 	}
+	seen := make(map[string]struct{}, len(supporters))
 	out := make([]string, 0, len(supporters))
-	for ruleName := range supporters {
-		out = append(out, ruleName)
+	for _, record := range supporters {
+		if _, ok := seen[record.Rule]; ok {
+			continue
+		}
+		seen[record.Rule] = struct{}{}
+		out = append(out, record.Rule)
 	}
 	sort.Strings(out)
 	return out
@@ -734,8 +755,8 @@ func (s *Session) isRetractedExcludingRule(factType, factKey, ruleName string, k
 	if !ok || len(records) == 0 {
 		return false
 	}
-	for currentRule := range records {
-		if kind == ActionRetract && currentRule == ruleName {
+	for _, record := range records {
+		if kind == ActionRetract && record.Rule == ruleName {
 			continue
 		}
 		return true
@@ -768,44 +789,31 @@ func (s *Session) applyModificationsExcludingRule(factType, factKey string, fiel
 }
 
 func (s *Session) evalContextIgnoringOwnMutation(rule Rule) (map[string]any, vm.DataContext, bool, error) {
-	var factType string
-	var factKey string
-	switch rule.Kind {
-	case ActionModify:
-		record, ok := s.modifiesByRule[rule.Name]
-		if !ok {
-			return nil, nil, false, nil
-		}
-		factType = record.FactType
-		factKey = record.FactKey
-	case ActionRetract:
-		record, ok := s.retractsByRule[rule.Name]
-		if !ok {
-			return nil, nil, false, nil
-		}
-		factType = record.FactType
-		factKey = record.FactKey
-	default:
+	targets := s.ownMutationTargets(rule)
+	if len(targets) == 0 {
 		return nil, nil, false, nil
 	}
-
-	tempFact, ok := s.desiredFactExcludingRule(factType, factKey, rule.Name, rule.Kind)
 	factsView := make(map[string]any, len(s.factsView))
 	for key, value := range s.factsView {
 		factsView[key] = value
 	}
-	replaced := make(map[string]Fact)
-	for key, fact := range s.facts[factType] {
-		replaced[key] = cloneFact(fact)
-	}
-	if ok {
-		replaced[factKey] = tempFact
-	} else {
-		delete(replaced, factKey)
-	}
-	if len(replaced) == 0 {
-		delete(factsView, factType)
-	} else {
+	for factType, factKeys := range targets {
+		replaced := make(map[string]Fact)
+		for key, fact := range s.facts[factType] {
+			replaced[key] = cloneFact(fact)
+		}
+		for factKey := range factKeys {
+			tempFact, ok := s.desiredFactExcludingRule(factType, factKey, rule.Name, rule.Kind)
+			if ok {
+				replaced[factKey] = tempFact
+			} else {
+				delete(replaced, factKey)
+			}
+		}
+		if len(replaced) == 0 {
+			delete(factsView, factType)
+			continue
+		}
 		items := make([]any, 0, len(replaced))
 		for _, fact := range replaced {
 			items = append(items, factEvalFields(fact))
@@ -818,14 +826,73 @@ func (s *Session) evalContextIgnoringOwnMutation(rule Rule) (map[string]any, vm.
 	return ctx, vm.DataFromMap(ctx, s.pool), true, nil
 }
 
+func (s *Session) ownMutationTargets(rule Rule) map[string]map[string]struct{} {
+	targets := make(map[string]map[string]struct{})
+	add := func(factType, factKey string) {
+		if factType == "" || factKey == "" {
+			return
+		}
+		byKey, ok := targets[factType]
+		if !ok {
+			byKey = make(map[string]struct{})
+			targets[factType] = byKey
+		}
+		byKey[factKey] = struct{}{}
+	}
+
+	switch rule.Kind {
+	case ActionAssert:
+		for _, record := range s.supportsByRule[rule.Name] {
+			add(record.Fact.Type, record.Fact.Key)
+		}
+	case ActionRetract:
+		for _, record := range s.retractsByRule[rule.Name] {
+			add(record.FactType, record.FactKey)
+		}
+	case ActionModify:
+		for _, record := range s.modifiesByRule[rule.Name] {
+			add(record.FactType, record.FactKey)
+		}
+	}
+
+	if len(targets) == 0 {
+		return nil
+	}
+	return targets
+}
+
+func (s *Session) supportRecords(ruleName string) map[string]supportRecord {
+	if s.supportsByRule[ruleName] == nil {
+		s.supportsByRule[ruleName] = make(map[string]supportRecord)
+	}
+	return s.supportsByRule[ruleName]
+}
+
+func (s *Session) retractionRecords(ruleName string) map[string]retractRecord {
+	if s.retractsByRule[ruleName] == nil {
+		s.retractsByRule[ruleName] = make(map[string]retractRecord)
+	}
+	return s.retractsByRule[ruleName]
+}
+
+func (s *Session) modificationRecords(ruleName string) map[string]modifyRecord {
+	if s.modifiesByRule[ruleName] == nil {
+		s.modifiesByRule[ruleName] = make(map[string]modifyRecord)
+	}
+	return s.modifiesByRule[ruleName]
+}
+
 func (s *Session) setRetraction(rule Rule, factType, factKey string) bool {
+	instance := mutationInstanceKey(rule.Name, factKey)
 	next := retractRecord{
+		Instance: instance,
 		Rule:     rule.Name,
 		Priority: rule.Priority,
 		FactType: factType,
 		FactKey:  factKey,
 	}
-	prev, hadPrev := s.retractsByRule[rule.Name]
+	byInstance := s.retractionRecords(rule.Name)
+	prev, hadPrev := byInstance[instance]
 	changed := false
 	sameFact := hadPrev && prev.FactType == factType && prev.FactKey == factKey
 	if hadPrev {
@@ -833,6 +900,7 @@ func (s *Session) setRetraction(rule Rule, factType, factKey string) bool {
 		if !sameFact {
 			changed = s.recomputeFact(prev.FactType, prev.FactKey, rule.Name) || changed
 		}
+		byInstance = s.retractionRecords(rule.Name)
 	}
 	byKey, ok := s.factRetracts[factType]
 	if !ok {
@@ -844,22 +912,34 @@ func (s *Session) setRetraction(rule Rule, factType, factKey string) bool {
 		records = make(map[string]retractRecord)
 		byKey[factKey] = records
 	}
-	records[rule.Name] = next
-	s.retractsByRule[rule.Name] = next
+	records[instance] = next
+	byInstance[instance] = next
 	return s.recomputeFact(factType, factKey, rule.Name) || changed
 }
 
-func (s *Session) clearRetraction(ruleName string) bool {
-	prev, ok := s.retractsByRule[ruleName]
-	if !ok {
+func (s *Session) clearInactiveRetractions(ruleName string, active map[string]struct{}) bool {
+	records := s.retractsByRule[ruleName]
+	if len(records) == 0 {
 		return false
 	}
-	s.removeRetraction(prev)
-	return s.recomputeFact(prev.FactType, prev.FactKey, ruleName)
+	changed := false
+	for instance, record := range records {
+		if _, ok := active[instance]; ok {
+			continue
+		}
+		s.removeRetraction(record)
+		changed = s.recomputeFact(record.FactType, record.FactKey, ruleName) || changed
+	}
+	return changed
 }
 
 func (s *Session) removeRetraction(record retractRecord) {
-	delete(s.retractsByRule, record.Rule)
+	if byInstance, ok := s.retractsByRule[record.Rule]; ok {
+		delete(byInstance, record.Instance)
+		if len(byInstance) == 0 {
+			delete(s.retractsByRule, record.Rule)
+		}
+	}
 	byKey, ok := s.factRetracts[record.FactType]
 	if !ok {
 		return
@@ -868,7 +948,7 @@ func (s *Session) removeRetraction(record retractRecord) {
 	if !ok {
 		return
 	}
-	delete(records, record.Rule)
+	delete(records, record.Instance)
 	if len(records) == 0 {
 		delete(byKey, record.FactKey)
 	}
@@ -878,14 +958,17 @@ func (s *Session) removeRetraction(record retractRecord) {
 }
 
 func (s *Session) setModification(rule Rule, factType, factKey string, setFields map[string]any) bool {
+	instance := mutationInstanceKey(rule.Name, factKey)
 	next := modifyRecord{
+		Instance:  instance,
 		Rule:      rule.Name,
 		Priority:  rule.Priority,
 		FactType:  factType,
 		FactKey:   factKey,
 		SetFields: cloneMap(setFields),
 	}
-	prev, hadPrev := s.modifiesByRule[rule.Name]
+	byInstance := s.modificationRecords(rule.Name)
+	prev, hadPrev := byInstance[instance]
 	changed := false
 	sameFact := hadPrev && prev.FactType == factType && prev.FactKey == factKey
 	if hadPrev {
@@ -893,6 +976,7 @@ func (s *Session) setModification(rule Rule, factType, factKey string, setFields
 		if !sameFact {
 			changed = s.recomputeFact(prev.FactType, prev.FactKey, rule.Name) || changed
 		}
+		byInstance = s.modificationRecords(rule.Name)
 	}
 	byKey, ok := s.factModifies[factType]
 	if !ok {
@@ -904,22 +988,34 @@ func (s *Session) setModification(rule Rule, factType, factKey string, setFields
 		records = make(map[string]modifyRecord)
 		byKey[factKey] = records
 	}
-	records[rule.Name] = next
-	s.modifiesByRule[rule.Name] = next
+	records[instance] = next
+	byInstance[instance] = next
 	return s.recomputeFact(factType, factKey, rule.Name) || changed
 }
 
-func (s *Session) clearModification(ruleName string) bool {
-	prev, ok := s.modifiesByRule[ruleName]
-	if !ok {
+func (s *Session) clearInactiveModifications(ruleName string, active map[string]struct{}) bool {
+	records := s.modifiesByRule[ruleName]
+	if len(records) == 0 {
 		return false
 	}
-	s.removeModification(prev)
-	return s.recomputeFact(prev.FactType, prev.FactKey, ruleName)
+	changed := false
+	for instance, record := range records {
+		if _, ok := active[instance]; ok {
+			continue
+		}
+		s.removeModification(record)
+		changed = s.recomputeFact(record.FactType, record.FactKey, ruleName) || changed
+	}
+	return changed
 }
 
 func (s *Session) removeModification(record modifyRecord) {
-	delete(s.modifiesByRule, record.Rule)
+	if byInstance, ok := s.modifiesByRule[record.Rule]; ok {
+		delete(byInstance, record.Instance)
+		if len(byInstance) == 0 {
+			delete(s.modifiesByRule, record.Rule)
+		}
+	}
 	byKey, ok := s.factModifies[record.FactType]
 	if !ok {
 		return
@@ -928,7 +1024,7 @@ func (s *Session) removeModification(record modifyRecord) {
 	if !ok {
 		return
 	}
-	delete(records, record.Rule)
+	delete(records, record.Instance)
 	if len(records) == 0 {
 		delete(byKey, record.FactKey)
 	}
@@ -994,13 +1090,78 @@ func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirty
 			ruleChanges[rule.Name] = struct{}{}
 		}
 		rc.RecordRuleResult(rule.Name, result)
-		if result {
+		if result && rule.PerFact {
+			// per_fact: collect all matching facts and emit one match per fact.
+			matches := s.evalPerFact(rule, header, s.evaluator, dc, ruleRC)
+			matched = append(matched, matches...)
+		} else if result {
 			matched = append(matched, mr)
 		}
 	}
 
 	s.ruleResults = current
 	return matched, ruleChanges, evaluated, stableDeferred, nil
+}
+
+// evalPerFact iterates all facts in the rule's first fact dependency and
+// evaluates the rule condition with each fact individually. Returns one
+// MatchedRule per matching fact, with the quantifier variable bound to that
+// fact so action params can reference its fields.
+func (s *Session) evalPerFact(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext, rc *govern.RequestCache) []vm.MatchedRule {
+	if len(rule.FactDeps) == 0 {
+		return nil
+	}
+	factType := rule.FactDeps[0]
+	factsOfType, ok := s.facts[factType]
+	if !ok {
+		// Also check external facts
+		factsOfType, ok = s.externalFacts[factType]
+		if !ok {
+			return nil
+		}
+	}
+
+	var results []vm.MatchedRule
+	for _, fact := range factsOfType {
+		// Build a temporary context with this single fact as the only fact of its type
+		tempCtx := s.buildSingleFactContext(factType, fact)
+		tempDC := vm.DataFromMap(tempCtx, s.pool)
+		ok, mr, err := s.evalRule(rule, header, evaluator, tempDC, rc)
+		if err != nil || !ok {
+			continue
+		}
+		results = append(results, mr)
+	}
+	return results
+}
+
+// buildSingleFactContext creates an evaluation context where only one fact of
+// the given type exists, allowing the quantifier to bind to exactly that fact.
+func (s *Session) buildSingleFactContext(factType string, fact Fact) map[string]any {
+	ctx := make(map[string]any, len(s.evalCtx))
+	for k, v := range s.evalCtx {
+		ctx[k] = v
+	}
+	// Override the facts for this type with just this one fact
+	factsMap, ok := ctx["facts"].(map[string]any)
+	if !ok {
+		factsMap = make(map[string]any)
+	}
+	// Clone the facts map so we don't mutate the shared one
+	newFacts := make(map[string]any, len(factsMap))
+	for k, v := range factsMap {
+		newFacts[k] = v
+	}
+	// Replace this fact type with a single-element list
+	fields := make(map[string]any, len(fact.Fields)+2)
+	fields["key"] = fact.Key
+	fields["type"] = fact.Type
+	for k, v := range fact.Fields {
+		fields[k] = v
+	}
+	newFacts[factType] = []any{fields}
+	ctx["facts"] = newFacts
+	return ctx
 }
 
 func (s *Session) evalRule(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext, rc *govern.RequestCache) (bool, vm.MatchedRule, error) {
@@ -1344,6 +1505,7 @@ func sortedModifications(records map[string]modifyRecord, ruleName string, kind 
 			continue
 		}
 		out = append(out, modifyRecord{
+			Instance:  record.Instance,
 			Rule:      record.Rule,
 			Priority:  record.Priority,
 			FactType:  record.FactType,
@@ -1355,9 +1517,17 @@ func sortedModifications(records map[string]modifyRecord, ruleName string, kind 
 		if out[i].Priority != out[j].Priority {
 			return out[i].Priority < out[j].Priority
 		}
-		return out[i].Rule < out[j].Rule
+		if out[i].Rule != out[j].Rule {
+			return out[i].Rule < out[j].Rule
+		}
+		return out[i].Instance < out[j].Instance
 	})
 	return out
+}
+
+// mutationInstanceKey distinguishes repeated firings of one rule across target facts.
+func mutationInstanceKey(ruleName, factKey string) string {
+	return ruleName + "\x00" + factKey
 }
 
 func cloneMap(src map[string]any) map[string]any {
