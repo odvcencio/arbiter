@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.3.0
+
+### Language
+
+- **Aggregate expressions** — `sum(expr for var in collection)`, `count(var in collection)`, and `avg(expr for var in collection)` as first-class expressions. Work anywhere a value is expected: conditions, action params, expert rules. Three new opcodes (`OpAggBegin`, `OpAggAccum`, `OpAggEnd`) with iterator-style accumulation on the bytecode VM's fixed stack.
+- **Let bindings** — `let name = expr` declarations inside `when { }` blocks. Bound names are available in subsequent condition expressions and in action parameter expressions. Compiles to `OpSetLocal` which stores the evaluated result in the VM's locals map, resolved by `OpLoadVar` before the data context.
+- **String concatenation** — the `+` operator now concatenates when either operand is a string. Mixed types are coerced to string. Enables `message: "User " + user.name + " exceeded limit"` in action params.
+- **Flag `else when` chains** — `else` keyword before `when` in flag rules for explicit intent. Pure syntax sugar — flag evaluation is already first-match-wins. Makes rule ordering intent readable.
+
+### Expert Inference
+
+- **`stable` keyword** — expert rules marked `stable` are deferred until the system reaches a local fixed point (no mutations in the previous round). Eliminates the need for manual two-phase gating when checking for absence of facts. The session forces an extra quiet-round evaluation pass before quiescence to give stable rules a chance to fire.
+- **Temporal fact conditions** — every fact now carries `AssertedRound` metadata tracking which round it was first asserted. Exposed as `__round` in the fact's fields and `current_round` in the top-level evaluation context. Enables rules like `any f in facts.Marker { f.__round < current_round - 3 }` for staleness checks.
+
+### Testing
+
+- Aggregate test coverage in `eval_language_features_test.go` for sum, count, and avg across nested object collections.
+- Let binding tests verifying local availability in both conditions and action params.
+- Stable rule tests in `expert/session_internal_test.go` verifying deferred scheduling across quiescent rounds.
+- String concatenation tests for string+string, string+number, and number+string coercion.
+- Flag else-when chain tests in `flags/flags_test.go`.
+- Temporal round tracking tests verifying `__round` and `current_round` in expert session evaluation.
+- Multi-quantifier `and` regression test in `grammar_test.go` locking in existing parser behavior.
+
+---
+
 ## v0.2.0
 
 ### Language
