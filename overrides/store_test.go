@@ -8,8 +8,8 @@ import (
 func TestStoreSnapshotRoundTripViaFile(t *testing.T) {
 	store := NewStore()
 	kill := true
-	rollout := uint8(25)
-	flagRollout := uint8(60)
+	rollout := uint16(2500)
+	flagRollout := uint16(6000)
 
 	if err := store.SetRule("bundle_a", "Approve", RuleOverride{
 		KillSwitch: &kill,
@@ -38,13 +38,13 @@ func TestStoreSnapshotRoundTripViaFile(t *testing.T) {
 		t.Fatalf("LoadFile: %v", err)
 	}
 
-	if got, ok := loaded.Rule("bundle_a", "Approve"); !ok || got.KillSwitch == nil || !*got.KillSwitch || got.Rollout == nil || *got.Rollout != 25 {
+	if got, ok := loaded.Rule("bundle_a", "Approve"); !ok || got.KillSwitch == nil || !*got.KillSwitch || got.Rollout == nil || *got.Rollout != 2500 {
 		t.Fatalf("unexpected rule override: %+v ok=%v", got, ok)
 	}
 	if got, ok := loaded.Flag("bundle_a", "checkout_v2"); !ok || got.KillSwitch == nil || !*got.KillSwitch {
 		t.Fatalf("unexpected flag override: %+v ok=%v", got, ok)
 	}
-	if got, ok := loaded.FlagRule("bundle_a", "checkout_v2", 1); !ok || got.Rollout == nil || *got.Rollout != 60 {
+	if got, ok := loaded.FlagRule("bundle_a", "checkout_v2", 1); !ok || got.Rollout == nil || *got.Rollout != 6000 {
 		t.Fatalf("unexpected flag rule override: %+v ok=%v", got, ok)
 	}
 }
@@ -93,7 +93,7 @@ func TestFileStorePersistsOnMutation(t *testing.T) {
 func TestStoreSnapshotForBundleReturnsDeepCopy(t *testing.T) {
 	store := NewStore()
 	kill := true
-	rollout := uint8(42)
+	rollout := uint16(4200)
 	if err := store.SetRule("bundle_a", "Approve", RuleOverride{KillSwitch: &kill, Rollout: &rollout}); err != nil {
 		t.Fatalf("SetRule: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestStoreSnapshotForBundleReturnsDeepCopy(t *testing.T) {
 
 func TestStoreSubscribeStreamsSnapshotAndMutations(t *testing.T) {
 	store := NewStore()
-	initialRollout := uint8(11)
+	initialRollout := uint16(1100)
 	if err := store.SetRule("bundle_a", "Approve", RuleOverride{Rollout: &initialRollout}); err != nil {
 		t.Fatalf("SetRule initial: %v", err)
 	}
@@ -126,11 +126,11 @@ func TestStoreSubscribeStreamsSnapshotAndMutations(t *testing.T) {
 	if snapshot.BundleID != "bundle_a" {
 		t.Fatalf("unexpected snapshot bundle id: %+v", snapshot)
 	}
-	if got := snapshot.Rules["Approve"]; got.Rollout == nil || *got.Rollout != 11 {
+	if got := snapshot.Rules["Approve"]; got.Rollout == nil || *got.Rollout != 1100 {
 		t.Fatalf("unexpected initial snapshot: %+v", got)
 	}
 
-	newRollout := uint8(44)
+	newRollout := uint16(4400)
 	if err := store.SetRule("bundle_a", "Approve", RuleOverride{Rollout: &newRollout}); err != nil {
 		t.Fatalf("SetRule update: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestStoreSubscribeStreamsSnapshotAndMutations(t *testing.T) {
 	if event.Type != OverrideEventRule || event.BundleID != "bundle_a" || event.RuleName != "Approve" {
 		t.Fatalf("unexpected rule event: %+v", event)
 	}
-	if event.Rule.Rollout == nil || *event.Rule.Rollout != 44 {
+	if event.Rule.Rollout == nil || *event.Rule.Rollout != 4400 {
 		t.Fatalf("unexpected rule payload: %+v", event.Rule)
 	}
 
@@ -155,7 +155,7 @@ func TestStoreSubscribeStreamsSnapshotAndMutations(t *testing.T) {
 		t.Fatalf("unexpected flag payload: %+v", event.Flag)
 	}
 
-	flagRollout := uint8(60)
+	flagRollout := uint16(6000)
 	if err := store.SetFlagRule("bundle_a", "checkout_v2", 1, FlagRuleOverride{Rollout: &flagRollout}); err != nil {
 		t.Fatalf("SetFlagRule: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestStoreSubscribeStreamsSnapshotAndMutations(t *testing.T) {
 	if event.Type != OverrideEventFlagRule || event.RuleIndex != 1 || event.FlagKey != "checkout_v2" {
 		t.Fatalf("unexpected flag rule event: %+v", event)
 	}
-	if event.FlagRule.Rollout == nil || *event.FlagRule.Rollout != 60 {
+	if event.FlagRule.Rollout == nil || *event.FlagRule.Rollout != 6000 {
 		t.Fatalf("unexpected flag rule payload: %+v", event.FlagRule)
 	}
 }
@@ -171,7 +171,7 @@ func TestStoreSubscribeStreamsSnapshotAndMutations(t *testing.T) {
 func TestStoreRestoreBundleReplacesOnlySelectedBundle(t *testing.T) {
 	store := NewStore()
 	kill := true
-	rollout := uint8(33)
+	rollout := uint16(3300)
 	if err := store.SetRule("bundle_a", "Approve", RuleOverride{KillSwitch: &kill}); err != nil {
 		t.Fatalf("SetRule bundle_a: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestStoreRestoreBundleReplacesOnlySelectedBundle(t *testing.T) {
 	if _, ok := store.Rule("bundle_a", "Approve"); ok {
 		t.Fatalf("expected old bundle_a rule override to be cleared")
 	}
-	if got, ok := store.Rule("bundle_a", "Deny"); !ok || got.Rollout == nil || *got.Rollout != 33 {
+	if got, ok := store.Rule("bundle_a", "Deny"); !ok || got.Rollout == nil || *got.Rollout != 3300 {
 		t.Fatalf("unexpected restored bundle_a rule: %+v ok=%v", got, ok)
 	}
 	if got, ok := store.Flag("bundle_b", "checkout_v2"); !ok || got.KillSwitch == nil || !*got.KillSwitch {

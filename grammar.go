@@ -195,7 +195,16 @@ func ArbiterGrammar() *Grammar {
 
 	g.Define("rule_rollout", Seq(
 		Str("rollout"),
+		Optional(Str("percent")),
 		Field("value", Sym("number_literal")),
+		Optional(Seq(
+			Str("by"),
+			Field("subject", Choice(Sym("member_expr"), Sym("identifier"))),
+		)),
+		Optional(Seq(
+			Str("namespace"),
+			Field("namespace", Sym("string_literal")),
+		)),
 	))
 
 	g.Define("expert_rule_declaration", Seq(
@@ -386,13 +395,40 @@ func ArbiterGrammar() *Grammar {
 		Optional(Str("else")),
 		Str("when"),
 		Field("condition", Choice(
-			Seq(Field("segment", Sym("identifier")), Str("{"), Sym("_expr"), Str("}")), // segment + inline
+			Seq(Field("segment", Sym("identifier")), Str("{"), Field("expr", Sym("_expr")), Str("}")), // segment + inline
 			Sym("identifier"),                     // segment reference only
-			Seq(Str("{"), Sym("_expr"), Str("}")), // inline condition only
+			Seq(Str("{"), Field("expr", Sym("_expr")), Str("}")), // inline condition only
 		)),
-		Optional(Seq(Str("rollout"), Field("rollout", Sym("number_literal")))),
-		Str("then"),
-		Field("variant", Sym("_primary")),
+		Optional(Field("rollout", Sym("rule_rollout"))),
+		Choice(
+			Seq(
+				Str("then"),
+				Field("variant", Sym("_primary")),
+			),
+			Field("split", Sym("flag_split_block")),
+		),
+	))
+
+	g.Define("flag_split_block", Seq(
+		Str("split"),
+		Optional(Seq(
+			Str("by"),
+			Field("subject", Choice(Sym("member_expr"), Sym("identifier"))),
+		)),
+		Optional(Seq(
+			Str("namespace"),
+			Field("namespace", Sym("string_literal")),
+		)),
+		Str("{"),
+		Repeat1(Sym("flag_split_weight")),
+		Str("}"),
+	))
+
+	g.Define("flag_split_weight", Seq(
+		Field("variant", Sym("string_literal")),
+		Str(":"),
+		Field("weight", Sym("number_literal")),
+		Optional(Str(",")),
 	))
 
 	// kill_switch as named node so it appears in the CST

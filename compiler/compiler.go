@@ -222,13 +222,22 @@ func (c *cstCompiler) compileRule(n *gotreesitter.Node, rs *CompiledRuleset) (Ru
 	}
 
 	if rolloutNode := c.childByField(n, "rollout"); rolloutNode != nil {
+		rh.HasRollout = true
 		valueNode := c.childByField(rolloutNode, "value")
 		if valueNode != nil {
-			rollout := parseutil.ParseInt(c.text(valueNode))
-			if rollout < 0 || rollout > 100 {
-				return rh, fmt.Errorf("rule %s: rollout must be between 0 and 100", c.text(c.childByField(n, "name")))
+			rolloutBps, err := parseutil.ParsePercentBps(c.text(valueNode))
+			if err != nil {
+				return rh, fmt.Errorf("rule %s: %w", c.text(c.childByField(n, "name")), err)
 			}
-			rh.Rollout = uint8(rollout)
+			rh.RolloutBps = rolloutBps
+		}
+		if subjectNode := c.childByField(rolloutNode, "subject"); subjectNode != nil {
+			rh.RolloutSubjectIdx = c.pool.String(c.text(subjectNode))
+			rh.HasRolloutSubject = true
+		}
+		if namespaceNode := c.childByField(rolloutNode, "namespace"); namespaceNode != nil {
+			rh.RolloutNamespaceIdx = c.pool.String(parseutil.StripQuotes(c.text(namespaceNode)))
+			rh.HasRolloutNamespace = true
 		}
 	}
 	if c.err != nil {

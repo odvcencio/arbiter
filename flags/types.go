@@ -64,7 +64,19 @@ type FlagRule struct {
 	InlineExpr     string                  // inline condition source (if no segment name)
 	CompiledInline *govern.CompiledSegment // precompiled inline condition (nil if segment ref)
 	Variant        string                  // variant name to serve if matched
-	Rollout        int                     // 0-100, 0 means no rollout (always match)
+	HasRollout     bool
+	RolloutBps     uint16 // 0..10000 basis points
+	RolloutSubject string
+	RolloutNamespace string
+	Split         []SplitBand
+	SplitSubject  string
+	SplitNamespace string
+}
+
+// SplitBand is one weighted variant assignment band.
+type SplitBand struct {
+	Variant string
+	WeightBps uint16
 }
 
 // FlagMetadata holds human-readable info about a flag.

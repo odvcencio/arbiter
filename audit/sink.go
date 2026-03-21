@@ -83,7 +83,7 @@ type OverrideChange struct {
 	Target     string `json:"target"`
 	RuleIndex  *int   `json:"rule_index,omitempty"`
 	KillSwitch *bool  `json:"kill_switch,omitempty"`
-	Rollout    *uint8 `json:"rollout,omitempty"`
+	Rollout    *uint16 `json:"rollout,omitempty"`
 }
 
 // BundleChange captures one bundle publish or activation mutation.

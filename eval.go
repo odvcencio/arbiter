@@ -174,14 +174,14 @@ func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *v
 	for _, rule := range rs.Rules {
 		ruleName := evaluator.String(rule.NameIdx)
 		killSwitch := rule.KillSwitch
-		rollout := rule.Rollout
+		var rolloutOverride *uint16
 		if view != nil {
 			if ov, ok := view.Rule(bundleID, ruleName); ok {
 				if ov.KillSwitch != nil {
 					killSwitch = *ov.KillSwitch
 				}
 				if ov.Rollout != nil {
-					rollout = *ov.Rollout
+					rolloutOverride = ov.Rollout
 				}
 			}
 		}
@@ -227,15 +227,10 @@ func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *v
 			continue
 		}
 
-		if rollout > 0 {
-			userID := govern.RolloutUserID(rc.Context())
-			allowed := govern.RolloutAllows(rollout, rc.Context())
-			trace.Append(
-				fmt.Sprintf("rollout %d%%", rollout),
-				allowed,
-				fmt.Sprintf("bucket(%q) = %d, threshold = %d", userID, govern.Bucket(userID), rollout),
-			)
-			if !allowed {
+		if spec := effectiveRuleRollout(rule, rs, ruleName, bundleID, rolloutOverride); spec != nil {
+			decision := govern.DecidePercentRollout(*spec, rc.Context())
+			trace.Append(spec.CheckLabel(), decision.Allowed, decision.Detail())
+			if !decision.Allowed {
 				rc.RecordRuleResult(ruleName, false)
 				continue
 			}
@@ -250,6 +245,34 @@ func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *v
 	}
 
 	return matched, trace, nil
+}
+
+func effectiveRuleRollout(rule compiler.RuleHeader, rs *compiler.CompiledRuleset, ruleName, bundleID string, override *uint16) *govern.PercentRollout {
+	hasRollout := rule.HasRollout
+	rolloutBps := rule.RolloutBps
+	if override != nil {
+		hasRollout = true
+		rolloutBps = *override
+	}
+	if !hasRollout {
+		return nil
+	}
+	subject := govern.DefaultRolloutSubject
+	if rule.HasRolloutSubject {
+		subject = rs.Constants.GetString(rule.RolloutSubjectIdx)
+	}
+	namespace := ""
+	if rule.HasRolloutNamespace {
+		namespace = rs.Constants.GetString(rule.RolloutNamespaceIdx)
+	}
+	if namespace == "" {
+		namespace = govern.AutoRolloutNamespace(bundleID, "rule:"+ruleName)
+	}
+	return &govern.PercentRollout{
+		PercentBps: rolloutBps,
+		SubjectKey: subject,
+		Namespace:  namespace,
+	}
 }
 
 func resolvePrereqs(rs *compiler.CompiledRuleset, rule compiler.RuleHeader, evaluator *vm.Evaluator) []string {

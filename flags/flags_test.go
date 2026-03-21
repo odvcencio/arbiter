@@ -6,8 +6,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/odvcencio/arbiter/govern"
 )
 
 const fullFlagSource = `
@@ -154,13 +157,14 @@ func TestFlagRollout(t *testing.T) {
 	// Test rollout: enterprise_us users with different user IDs
 	// Need to find a user whose bucket is < 20 and one whose bucket is >= 20
 	var lowBucketUser, highBucketUser string
+	namespace := govern.AutoRolloutNamespace("", "flag:checkout_v2:rule:1")
 	for i := 0; i < 1000; i++ {
 		uid := fmt.Sprintf("user_%d", i)
-		b := Bucket(uid)
-		if b < 20 && lowBucketUser == "" {
+		b := govern.RolloutBucket(namespace, uid)
+		if b < 2000 && lowBucketUser == "" {
 			lowBucketUser = uid
 		}
-		if b >= 20 && highBucketUser == "" {
+		if b >= 2000 && highBucketUser == "" {
 			highBucketUser = uid
 		}
 		if lowBucketUser != "" && highBucketUser != "" {
@@ -177,7 +181,7 @@ func TestFlagRollout(t *testing.T) {
 	}
 	v := f.Variant("checkout_v2", ctx)
 	if v.Name != "treatment" {
-		t.Errorf("expected treatment for low-bucket enterprise_us user (bucket=%d), got %q", Bucket(lowBucketUser), v.Name)
+		t.Errorf("expected treatment for low-bucket enterprise_us user (bucket=%d), got %q", govern.RolloutBucket(namespace, lowBucketUser), v.Name)
 	}
 
 	// High bucket user in enterprise_us (not internal, not beta) should NOT get treatment from rollout
@@ -190,7 +194,7 @@ func TestFlagRollout(t *testing.T) {
 	}
 	v = f.Variant("checkout_v2", ctx)
 	if v.Name != "control" {
-		t.Errorf("expected control for high-bucket enterprise_us user (bucket=%d), got %q", Bucket(highBucketUser), v.Name)
+		t.Errorf("expected control for high-bucket enterprise_us user (bucket=%d), got %q", govern.RolloutBucket(namespace, highBucketUser), v.Name)
 	}
 }
 
@@ -795,6 +799,79 @@ flag simple type boolean default false {
 	// Bool() helper
 	if !v.Bool() {
 		t.Error("Bool() should return true")
+	}
+}
+
+func TestFlagSplitAssignsVariantDeterministically(t *testing.T) {
+	f, err := Load([]byte(`
+flag pricing_page type multivariate default "control" {
+	variant "control" {}
+	variant "social_proof" {}
+	variant "comparison_table" {}
+
+	when { true } split by user.id namespace "pricing_page_oct_test" {
+		"control": 5000,
+		"social_proof": 3000,
+		"comparison_table": 2000,
+	}
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	namespace := "pricing_page_oct_test"
+	var controlUser, socialUser, comparisonUser string
+	for i := 0; i < 10000; i++ {
+		userID := fmt.Sprintf("split_user_%d", i)
+		bucket := govern.RolloutBucket(namespace, userID)
+		switch {
+		case bucket < 5000 && controlUser == "":
+			controlUser = userID
+		case bucket >= 5000 && bucket < 8000 && socialUser == "":
+			socialUser = userID
+		case bucket >= 8000 && comparisonUser == "":
+			comparisonUser = userID
+		}
+		if controlUser != "" && socialUser != "" && comparisonUser != "" {
+			break
+		}
+	}
+
+	cases := []struct {
+		name   string
+		userID string
+		want   string
+	}{
+		{name: "control", userID: controlUser, want: "control"},
+		{name: "social", userID: socialUser, want: "social_proof"},
+		{name: "comparison", userID: comparisonUser, want: "comparison_table"},
+	}
+	for _, tc := range cases {
+		if tc.userID == "" {
+			t.Fatalf("failed to find user for %s band", tc.name)
+		}
+		got := f.Variant("pricing_page", map[string]any{"user.id": tc.userID})
+		if got.Name != tc.want {
+			t.Fatalf("%s: got %q, want %q", tc.name, got.Name, tc.want)
+		}
+	}
+}
+
+func TestFlagSplitRequiresFullWeightSum(t *testing.T) {
+	_, err := Load([]byte(`
+flag pricing_page type multivariate default "control" {
+	variant "control" {}
+	variant "social_proof" {}
+
+	when { true } split by user.id namespace "pricing_page_oct_test" {
+		"control": 5000,
+		"social_proof": 4000,
+	}
+}
+`))
+	if err == nil || !strings.Contains(err.Error(), "split weights must sum to 10000") {
+		t.Fatalf("expected split weight validation error, got %v", err)
 	}
 }
 

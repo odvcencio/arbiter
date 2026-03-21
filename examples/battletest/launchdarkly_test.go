@@ -2,9 +2,11 @@ package battletest
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	arbiterv1 "github.com/odvcencio/arbiter/api/arbiter/v1"
+	"github.com/odvcencio/arbiter/govern"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -17,6 +19,23 @@ func publishLD(t *testing.T, client arbiterv1.ArbiterServiceClient) string {
 func resolve(t *testing.T, client arbiterv1.ArbiterServiceClient, bundleID, flag string, ctx map[string]any) *arbiterv1.ResolveFlagResponse {
 	t.Helper()
 	return resolveFlag(t, client, bundleID, flag, ctx)
+}
+
+func rolloutUser(t *testing.T, bundleID, flag string, ruleIndex int, thresholdBps uint16, inside bool) string {
+	t.Helper()
+	namespace := govern.AutoRolloutNamespace(bundleID, fmt.Sprintf("flag:%s:rule:%d", flag, ruleIndex))
+	for i := 0; i < 10000; i++ {
+		id := fmt.Sprintf("user_%03d", i)
+		bucket := govern.RolloutBucket(namespace, id)
+		if inside && bucket < thresholdBps {
+			return id
+		}
+		if !inside && bucket >= thresholdBps {
+			return id
+		}
+	}
+	t.Fatalf("failed to find rollout user for %s rule %d", flag, ruleIndex)
+	return ""
 }
 
 func requireVariant(t *testing.T, resp *arbiterv1.ResolveFlagResponse, want string) {
@@ -76,7 +95,8 @@ func TestLD_BooleanFlags(t *testing.T) {
 
 	t.Run("dark_mode on for everyone", func(t *testing.T) {
 		resp := resolve(t, client, bundle, "dark_mode", map[string]any{
-			"user": map[string]any{"email": "nobody@example.com"},
+			"user":    map[string]any{"email": "nobody@example.com"},
+			"user_id": "dark_mode_everyone",
 		})
 		requireVariant(t, resp, "true")
 	})
@@ -135,32 +155,30 @@ func TestLD_ProgressiveRollout(t *testing.T) {
 		requireVariant(t, resp, "true")
 	})
 
-	// user_003 has bucket 10, so 50% rollout includes them
 	t.Run("enterprise in 50pct rollout", func(t *testing.T) {
+		userID := rolloutUser(t, bundle, "new_dashboard", 2, 5000, true)
 		resp := resolve(t, client, bundle, "new_dashboard", map[string]any{
 			"user":    map[string]any{"email": "boss@bigcorp.com", "plan": "enterprise", "cohort": "stable"},
-			"user_id": "user_003",
+			"user_id": userID,
 		})
 		requireVariant(t, resp, "true")
 	})
 
-	// user_002 has bucket 90, so 10% rollout excludes them
 	t.Run("free user outside 10pct rollout", func(t *testing.T) {
+		userID := rolloutUser(t, bundle, "new_dashboard", 3, 1000, false)
 		resp := resolve(t, client, bundle, "new_dashboard", map[string]any{
 			"user":    map[string]any{"email": "casual@gmail.com", "plan": "free", "cohort": "stable"},
-			"user_id": "user_002",
+			"user_id": userID,
 		})
 		requireVariant(t, resp, "false")
 		requireDefault(t, resp)
 	})
 
-	// test_mid has bucket 15, outside 10% rollout. user_003 has bucket 10, also outside (10 < 10 is false).
-	// Use a user with bucket < 10 to be inside. None of our test IDs qualify at 10%.
-	// Instead test at 50% enterprise rollout with a bucket-37 user (user_001).
 	t.Run("enterprise in 50pct rollout (bucket 37)", func(t *testing.T) {
+		userID := rolloutUser(t, bundle, "new_dashboard", 2, 5000, true)
 		resp := resolve(t, client, bundle, "new_dashboard", map[string]any{
 			"user":    map[string]any{"email": "mgr@bigcorp.com", "plan": "enterprise", "cohort": "stable"},
-			"user_id": "user_001", // bucket 37, inside 50%
+			"user_id": userID,
 		})
 		requireVariant(t, resp, "true")
 	})
@@ -327,7 +345,8 @@ func TestLD_RuntimeOverrides(t *testing.T) {
 	t.Run("kill switch override disables flag", func(t *testing.T) {
 		// First verify it works
 		resp := resolve(t, client, bundle, "dark_mode", map[string]any{
-			"user": map[string]any{"email": "anyone@example.com"},
+			"user":    map[string]any{"email": "anyone@example.com"},
+			"user_id": "dark_mode_override",
 		})
 		requireVariant(t, resp, "true")
 
@@ -359,16 +378,17 @@ func TestLD_RuntimeOverrides(t *testing.T) {
 
 		// Should work again
 		resp = resolve(t, client, bundle, "dark_mode", map[string]any{
-			"user": map[string]any{"email": "anyone@example.com"},
+			"user":    map[string]any{"email": "anyone@example.com"},
+			"user_id": "dark_mode_override",
 		})
 		requireVariant(t, resp, "true")
 	})
 
 	t.Run("rollout override changes percentage", func(t *testing.T) {
-		// user_002 bucket=90, normally outside 10% rollout
+		userID := rolloutUser(t, bundle, "new_dashboard", 3, 1000, false)
 		resp := resolve(t, client, bundle, "new_dashboard", map[string]any{
 			"user":    map[string]any{"email": "casual@gmail.com", "plan": "free", "cohort": "stable"},
-			"user_id": "user_002",
+			"user_id": userID,
 		})
 		requireVariant(t, resp, "false")
 
@@ -386,7 +406,7 @@ func TestLD_RuntimeOverrides(t *testing.T) {
 		// Now user_002 should be included
 		resp = resolve(t, client, bundle, "new_dashboard", map[string]any{
 			"user":    map[string]any{"email": "casual@gmail.com", "plan": "free", "cohort": "stable"},
-			"user_id": "user_002",
+			"user_id": userID,
 		})
 		requireVariant(t, resp, "true")
 

@@ -1333,9 +1333,10 @@ func (s *Session) evalRule(rule Rule, header compiler.RuleHeader, evaluator *vm.
 	if !condOK {
 		return false, vm.MatchedRule{}, nil
 	}
-	rollout := effectiveRuleRollout(header, rule, s.opts.BundleID, s.opts.Overrides)
-	if rollout > 0 && !govern.RolloutAllows(rollout, rc.Context()) {
-		return false, vm.MatchedRule{}, nil
+	if spec := effectiveRuleRollout(header, rule, s.program.ruleset, s.opts.BundleID, s.opts.Overrides); spec != nil {
+		if !govern.RolloutAllows(*spec, rc.Context()) {
+			return false, vm.MatchedRule{}, nil
+		}
 	}
 	match, err := evaluator.BuildMatch(header, dc)
 	if err != nil {
@@ -1400,15 +1401,34 @@ func effectiveRuleKillSwitch(header compiler.RuleHeader, rule Rule, bundleID str
 	return killSwitch
 }
 
-func effectiveRuleRollout(header compiler.RuleHeader, rule Rule, bundleID string, view overrides.View) uint8 {
-	rollout := header.Rollout
-	if view == nil {
-		return rollout
+func effectiveRuleRollout(header compiler.RuleHeader, rule Rule, rs *compiler.CompiledRuleset, bundleID string, view overrides.View) *govern.PercentRollout {
+	hasRollout := header.HasRollout
+	rolloutBps := header.RolloutBps
+	if view != nil {
+		if ov, ok := view.Rule(bundleID, rule.Name); ok && ov.Rollout != nil {
+			hasRollout = true
+			rolloutBps = *ov.Rollout
+		}
 	}
-	if ov, ok := view.Rule(bundleID, rule.Name); ok && ov.Rollout != nil {
-		return *ov.Rollout
+	if !hasRollout {
+		return nil
 	}
-	return rollout
+	subject := govern.DefaultRolloutSubject
+	if header.HasRolloutSubject {
+		subject = rs.Constants.GetString(header.RolloutSubjectIdx)
+	}
+	namespace := ""
+	if header.HasRolloutNamespace {
+		namespace = rs.Constants.GetString(header.RolloutNamespaceIdx)
+	}
+	if namespace == "" {
+		namespace = govern.AutoRolloutNamespace(bundleID, "expert:"+rule.Name)
+	}
+	return &govern.PercentRollout{
+		PercentBps: rolloutBps,
+		SubjectKey: subject,
+		Namespace:  namespace,
+	}
 }
 
 func (s *Session) markDirtySource(factType, source string) {

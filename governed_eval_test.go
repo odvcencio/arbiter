@@ -161,9 +161,10 @@ rule SlowRoll {
 	}
 
 	blockedUser := ""
+	namespace := govern.AutoRolloutNamespace("", "rule:SlowRoll")
 	for i := 0; i < 2000; i++ {
 		id := fmt.Sprintf("user_%d", i)
-		if govern.Bucket(id) >= 1 {
+		if govern.RolloutBucket(namespace, id) >= 100 {
 			blockedUser = id
 			break
 		}
@@ -185,10 +186,10 @@ rule SlowRoll {
 		t.Fatal("expected rollout trace step")
 	}
 	last := trace.Steps[len(trace.Steps)-1]
-	if last.Check != "rollout 1%" || last.Result {
+	if !strings.Contains(last.Check, `rollout percent 1 by user.id namespace "arbiter:rule:SlowRoll"`) || last.Result {
 		t.Fatalf("unexpected rollout trace: %+v", last)
 	}
-	if !strings.Contains(last.Detail, blockedUser) {
-		t.Fatalf("expected rollout detail to mention user id, got %q", last.Detail)
+	if !strings.Contains(last.Detail, blockedUser) || !strings.Contains(last.Detail, "threshold=100") || !strings.Contains(last.Detail, "resolution=10000") {
+		t.Fatalf("expected rollout detail to mention subject and threshold, got %q", last.Detail)
 	}
 }

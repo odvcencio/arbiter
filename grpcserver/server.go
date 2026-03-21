@@ -2,6 +2,7 @@ package grpcserver
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	arbiter "github.com/odvcencio/arbiter"
@@ -345,10 +346,10 @@ func (s *Server) SetRuleOverride(ctx context.Context, req *arbiterv1.SetRuleOver
 		ov.KillSwitch = &v
 	}
 	if req.Rollout != nil {
-		if req.Rollout.GetValue() > 100 {
-			return nil, status.Error(codes.InvalidArgument, "rollout must be between 0 and 100")
+		v, err := normalizeOverrideRollout(req.Rollout.GetValue())
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
-		v := uint8(req.Rollout.GetValue())
 		ov.Rollout = &v
 	}
 	if err := s.overrides.SetRule(req.GetBundleId(), req.GetRuleName(), ov); err != nil {
@@ -412,10 +413,10 @@ func (s *Server) SetFlagRuleOverride(ctx context.Context, req *arbiterv1.SetFlag
 	}
 	ov := overrides.FlagRuleOverride{}
 	if req.Rollout != nil {
-		if req.Rollout.GetValue() > 100 {
-			return nil, status.Error(codes.InvalidArgument, "rollout must be between 0 and 100")
+		v, err := normalizeOverrideRollout(req.Rollout.GetValue())
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
-		v := uint8(req.Rollout.GetValue())
 		ov.Rollout = &v
 	}
 	if err := s.overrides.SetFlagRule(req.GetBundleId(), req.GetFlagKey(), int(req.GetRuleIndex()), ov); err != nil {
@@ -630,6 +631,17 @@ func protoRuleOverrideEntry(ruleName string, ov overrides.RuleOverride) *arbiter
 		out.Rollout = uint32(*ov.Rollout)
 	}
 	return out
+}
+
+func normalizeOverrideRollout(raw uint32) (uint16, error) {
+	switch {
+	case raw <= 100:
+		return uint16(raw * 100), nil
+	case raw <= uint32(govern.RolloutResolution):
+		return uint16(raw), nil
+	default:
+		return 0, fmt.Errorf("rollout must be between 0 and 100 percent or 0 and %d basis points", govern.RolloutResolution)
+	}
 }
 
 func protoFlagOverrideEntry(flagKey string, ov overrides.FlagOverride) *arbiterv1.FlagOverrideEntry {

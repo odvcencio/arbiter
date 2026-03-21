@@ -11,7 +11,7 @@ import (
 // RuleOverride overlays rule-level governance fields at runtime.
 type RuleOverride struct {
 	KillSwitch *bool
-	Rollout    *uint8
+	Rollout    *uint16
 }
 
 // FlagOverride overlays flag-level governance fields at runtime.
@@ -21,7 +21,7 @@ type FlagOverride struct {
 
 // FlagRuleOverride overlays flag rule targeting fields at runtime.
 type FlagRuleOverride struct {
-	Rollout *uint8
+	Rollout *uint16
 }
 
 // View exposes read-only access to runtime overrides.

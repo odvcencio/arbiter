@@ -458,7 +458,11 @@ func (f *Flags) evalVariantName(def *FlagDef, rc *govern.RequestCache, trace *go
 		if !f.rolloutAllows(def.Key, i, rule, rc, trace, bundleID, view) {
 			continue
 		}
-		result = rule.Variant
+		if variant, ok := f.assignVariant(def.Key, i, rule, rc, trace, bundleID); ok {
+			result = variant
+		} else {
+			result = rule.Variant
+		}
 		return result
 	}
 
@@ -498,9 +502,8 @@ func (f *Flags) ruleMatches(flagKey string, ruleIndex int, rule FlagRule, rc *go
 	if rule.SegmentName == "" {
 		checkName = "inline condition"
 	}
-	rollout := f.effectiveRuleRollout(flagKey, ruleIndex, rule, bundleID, view)
-	if rollout > 0 {
-		checkName += fmt.Sprintf(" rollout %d%%", rollout)
+	if spec := f.effectiveRuleRollout(flagKey, ruleIndex, rule, bundleID, view); spec != nil {
+		checkName += " " + spec.CheckLabel()
 	}
 	trace.Append(checkName, matched, detail)
 	return matched
@@ -527,19 +530,67 @@ func (f *Flags) ruleMatchDetail(rule FlagRule, rc *govern.RequestCache) (bool, s
 }
 
 func (f *Flags) rolloutAllows(flagKey string, ruleIndex int, rule FlagRule, rc *govern.RequestCache, trace *govern.Trace, bundleID string, view overrides.View) bool {
-	rollout := f.effectiveRuleRollout(flagKey, ruleIndex, rule, bundleID, view)
-	if rollout <= 0 {
+	spec := f.effectiveRuleRollout(flagKey, ruleIndex, rule, bundleID, view)
+	if spec == nil {
 		return true
 	}
-	userID := govern.RolloutUserID(rc.Context())
-	bucket := govern.Bucket(userID)
-	allowed := bucket < rollout
-	trace.Append(
-		fmt.Sprintf("rollout %d%%", rollout),
-		allowed,
-		fmt.Sprintf("bucket(%q) = %d, threshold = %d", userID, bucket, rollout),
+	decision := govern.DecidePercentRollout(*spec, rc.Context())
+	trace.Append(spec.CheckLabel(), decision.Allowed, decision.Detail())
+	return decision.Allowed
+}
+
+func (f *Flags) assignVariant(flagKey string, ruleIndex int, rule FlagRule, rc *govern.RequestCache, trace *govern.Trace, bundleID string) (string, bool) {
+	if len(rule.Split) == 0 {
+		return "", false
+	}
+	subject := rule.SplitSubject
+	if subject == "" {
+		subject = govern.DefaultRolloutSubject
+	}
+	namespace := rule.SplitNamespace
+	if namespace == "" {
+		namespace = govern.AutoRolloutNamespace(bundleID, fmt.Sprintf("flag:%s:rule:%d:split", flagKey, ruleIndex))
+	}
+	subjectValue, ok := govern.RolloutSubject(rc.Context(), subject)
+	if !ok {
+		trace.Append(
+			fmt.Sprintf(`split by %s namespace %q`, subject, namespace),
+			false,
+			fmt.Sprintf("subject_key=%s missing, resolution=%d", subject, govern.RolloutResolution),
+		)
+		return "", false
+	}
+	bucket := govern.RolloutBucket(namespace, subjectValue)
+	var (
+		assigned string
+		bands    strings.Builder
+		start    uint16
 	)
-	return allowed
+	for i, band := range rule.Split {
+		end := start + band.WeightBps - 1
+		if i > 0 {
+			bands.WriteString(",")
+		}
+		bands.WriteString(fmt.Sprintf("%s:%d-%d", band.Variant, start, end))
+		if assigned == "" && bucket < start+band.WeightBps {
+			assigned = band.Variant
+		}
+		start += band.WeightBps
+	}
+	trace.Append(
+		fmt.Sprintf(`split by %s namespace %q`, subject, namespace),
+		true,
+		fmt.Sprintf(
+			`subject_key=%s, subject=%q, namespace=%q, bucket=%d, assigned=%s, bands={%s}`,
+			subject,
+			subjectValue,
+			namespace,
+			bucket,
+			assigned,
+			bands.String(),
+		),
+	)
+	return assigned, true
 }
 
 func (f *Flags) effectiveFlagKillSwitch(def *FlagDef, bundleID string, view overrides.View) bool {
@@ -552,14 +603,34 @@ func (f *Flags) effectiveFlagKillSwitch(def *FlagDef, bundleID string, view over
 	return def.KillSwitch
 }
 
-func (f *Flags) effectiveRuleRollout(flagKey string, ruleIndex int, rule FlagRule, bundleID string, view overrides.View) int {
-	if view == nil {
-		return rule.Rollout
+func (f *Flags) effectiveRuleRollout(flagKey string, ruleIndex int, rule FlagRule, bundleID string, view overrides.View) *govern.PercentRollout {
+	var rolloutBps uint16
+	hasRollout := rule.HasRollout
+	if hasRollout {
+		rolloutBps = rule.RolloutBps
 	}
-	if ov, ok := view.FlagRule(bundleID, flagKey, ruleIndex); ok && ov.Rollout != nil {
-		return int(*ov.Rollout)
+	if view != nil {
+		if ov, ok := view.FlagRule(bundleID, flagKey, ruleIndex); ok && ov.Rollout != nil {
+			hasRollout = true
+			rolloutBps = *ov.Rollout
+		}
 	}
-	return rule.Rollout
+	if !hasRollout {
+		return nil
+	}
+	subject := rule.RolloutSubject
+	if subject == "" {
+		subject = govern.DefaultRolloutSubject
+	}
+	namespace := rule.RolloutNamespace
+	if namespace == "" {
+		namespace = govern.AutoRolloutNamespace(bundleID, fmt.Sprintf("flag:%s:rule:%d", flagKey, ruleIndex))
+	}
+	return &govern.PercentRollout{
+		PercentBps: rolloutBps,
+		SubjectKey: subject,
+		Namespace:  namespace,
+	}
 }
 
 func compileInlineSegment(conditionSource string) (*govern.CompiledSegment, error) {
@@ -718,6 +789,15 @@ func parseFlag(node *gotreesitter.Node, source []byte, lang *gotreesitter.Langua
 	// (only if variants are declared — undeclared-name flags skip this check)
 	if len(def.Variants) > 0 {
 		for _, rule := range def.Rules {
+			if len(rule.Split) > 0 {
+				for _, band := range rule.Split {
+					if _, ok := def.Variants[band.Variant]; !ok {
+						return nil, fmt.Errorf("flag %s: split references undeclared variant %q (declared: %v)",
+							def.Key, band.Variant, variantNames(def.Variants))
+					}
+				}
+				continue
+			}
 			if _, ok := def.Variants[rule.Variant]; !ok {
 				return nil, fmt.Errorf("flag %s: rule references undeclared variant %q (declared: %v)",
 					def.Key, rule.Variant, variantNames(def.Variants))
@@ -834,19 +914,8 @@ func parseFlagRule(node *gotreesitter.Node, source []byte, lang *gotreesitter.La
 		// Segment reference only
 		rule.SegmentName = nodeText(condNode, source)
 	} else {
-		// Inline condition: find the expression node between braces.
-		variantNode := node.ChildByFieldName("variant", lang)
-		for i := 0; i < int(node.NamedChildCount()); i++ {
-			child := node.NamedChild(i)
-			if variantNode != nil && child.StartByte() == variantNode.StartByte() && child.EndByte() == variantNode.EndByte() {
-				continue
-			}
-			childType := child.Type(lang)
-			if childType == "number_literal" || childType == "identifier" {
-				continue
-			}
-			rule.InlineExpr = strings.TrimSpace(nodeText(child, source))
-			break
+		if exprNode := node.ChildByFieldName("expr", lang); exprNode != nil {
+			rule.InlineExpr = strings.TrimSpace(nodeText(exprNode, source))
 		}
 		// Precompile inline condition at load time (not eval time)
 		if rule.InlineExpr != "" {
@@ -860,14 +929,56 @@ func parseFlagRule(node *gotreesitter.Node, source []byte, lang *gotreesitter.La
 
 	// Rollout
 	if rolloutNode := node.ChildByFieldName("rollout", lang); rolloutNode != nil {
-		rolloutText := nodeText(rolloutNode, source)
-		rule.Rollout = parseutil.ParseInt(rolloutText)
+		rule.HasRollout = true
+		if valueNode := rolloutNode.ChildByFieldName("value", lang); valueNode != nil {
+			rolloutBps, err := parseutil.ParsePercentBps(nodeText(valueNode, source))
+			if err != nil {
+				return rule, err
+			}
+			rule.RolloutBps = rolloutBps
+		}
+		if subjectNode := rolloutNode.ChildByFieldName("subject", lang); subjectNode != nil {
+			rule.RolloutSubject = nodeText(subjectNode, source)
+		}
+		if namespaceNode := rolloutNode.ChildByFieldName("namespace", lang); namespaceNode != nil {
+			rule.RolloutNamespace = parseutil.StripQuotes(nodeText(namespaceNode, source))
+		}
 	}
 
 	// Variant
 	if variantNode := node.ChildByFieldName("variant", lang); variantNode != nil {
 		variantText := nodeText(variantNode, source)
 		rule.Variant = parseutil.StripQuotes(variantText)
+	}
+	if splitNode := node.ChildByFieldName("split", lang); splitNode != nil {
+		if subjectNode := splitNode.ChildByFieldName("subject", lang); subjectNode != nil {
+			rule.SplitSubject = nodeText(subjectNode, source)
+		}
+		if namespaceNode := splitNode.ChildByFieldName("namespace", lang); namespaceNode != nil {
+			rule.SplitNamespace = parseutil.StripQuotes(nodeText(namespaceNode, source))
+		}
+		for i := 0; i < int(splitNode.NamedChildCount()); i++ {
+			child := splitNode.NamedChild(i)
+			if child.Type(lang) != "flag_split_weight" {
+				continue
+			}
+			variantNode := child.ChildByFieldName("variant", lang)
+			weightNode := child.ChildByFieldName("weight", lang)
+			if variantNode == nil || weightNode == nil {
+				continue
+			}
+			rule.Split = append(rule.Split, SplitBand{
+				Variant:   parseutil.StripQuotes(nodeText(variantNode, source)),
+				WeightBps: uint16(parseutil.ParseInt(nodeText(weightNode, source))),
+			})
+		}
+		total := 0
+		for _, band := range rule.Split {
+			total += int(band.WeightBps)
+		}
+		if total != int(govern.RolloutResolution) {
+			return rule, fmt.Errorf("split weights must sum to %d", govern.RolloutResolution)
+		}
 	}
 
 	return rule, nil
@@ -913,6 +1024,9 @@ func buildReason(def *FlagDef, variant string, trace []TraceStep) string {
 		return "no rules matched"
 	}
 	for _, step := range trace {
+		if strings.HasPrefix(step.Check, "split by ") && step.Result {
+			return "assigned by split"
+		}
 		if strings.HasPrefix(step.Check, "segment ") && step.Result {
 			return fmt.Sprintf("matched %s", step.Check)
 		}

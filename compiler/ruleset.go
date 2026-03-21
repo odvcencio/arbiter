@@ -23,7 +23,12 @@ type RuleHeader struct {
 	ActionIdx      uint16 // index into Actions table
 	FallbackIdx    uint16 // 0 = none
 	KillSwitch     bool
-	Rollout        uint8
+	HasRollout     bool
+	RolloutBps     uint16
+	RolloutSubjectIdx   uint16
+	RolloutNamespaceIdx uint16
+	HasRolloutSubject   bool
+	HasRolloutNamespace bool
 	PrereqOff      uint16
 	PrereqLen      uint16
 	ExcludeOff     uint16

@@ -207,7 +207,7 @@ func TestFlags(t *testing.T) {
 
 	t.Run("enterprise gets treatment_a", func(t *testing.T) {
 		resp := resolveFlag(t, client, bundle, "checkout_v2", map[string]any{
-			"user": map[string]any{"cohort": "stable", "plan": "enterprise", "country": "US", "lifetime_spend": float64(10000), "seat_count": float64(100), "months_active": float64(24)},
+			"user": map[string]any{"cohort": "stable", "plan": "enterprise", "country": "JP", "lifetime_spend": float64(0), "seat_count": float64(100), "months_active": float64(24)},
 		})
 		if resp.Variant != "treatment_a" {
 			t.Fatalf("variant = %q, want treatment_a", resp.Variant)
@@ -229,6 +229,7 @@ func TestFlags(t *testing.T) {
 	t.Run("dark mode enabled for everyone", func(t *testing.T) {
 		resp := resolveFlag(t, client, bundle, "dark_mode", map[string]any{
 			"user": map[string]any{"cohort": "anyone", "plan": "free", "country": "XX"},
+			"user_id": "dark_mode_anyone",
 		})
 		if resp.Variant != "true" {
 			t.Fatalf("variant = %q, want true", resp.Variant)

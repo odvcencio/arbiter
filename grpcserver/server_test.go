@@ -418,7 +418,7 @@ func TestServerWatchOverridesStreamsSnapshotAndMutations(t *testing.T) {
 	if flagRuleEvent.GetType() != arbiterv1.OverrideEventType_OVERRIDE_EVENT_TYPE_FLAG_RULE || flagRuleEvent.GetRuleIndex() != 0 {
 		t.Fatalf("unexpected flag rule event: %+v", flagRuleEvent)
 	}
-	if flagRuleEvent.GetFlagRule().GetRollout() != 55 {
+	if flagRuleEvent.GetFlagRule().GetRollout() != 5500 {
 		t.Fatalf("unexpected flag rule payload: %+v", flagRuleEvent.GetFlagRule())
 	}
 }

@@ -323,7 +323,7 @@ func ruleOverrideFromProto(entry *arbiterv1.RuleOverrideEntry) overrides.RuleOve
 		ov.KillSwitch = &v
 	}
 	if entry != nil && entry.GetRolloutSet() {
-		v := uint8(entry.GetRollout())
+		v := uint16(entry.GetRollout())
 		ov.Rollout = &v
 	}
 	return ov
@@ -341,7 +341,7 @@ func flagOverrideFromProto(entry *arbiterv1.FlagOverrideEntry) overrides.FlagOve
 func flagRuleOverrideFromProto(entry *arbiterv1.FlagRuleOverrideEntry) overrides.FlagRuleOverride {
 	ov := overrides.FlagRuleOverride{}
 	if entry != nil && entry.GetRolloutSet() {
-		v := uint8(entry.GetRollout())
+		v := uint16(entry.GetRollout())
 		ov.Rollout = &v
 	}
 	return ov

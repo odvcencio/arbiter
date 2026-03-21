@@ -1,5 +1,10 @@
 package parseutil
 
+import (
+	"fmt"
+	"math"
+)
+
 // StripQuotes removes matching double quotes from the ends of a string.
 func StripQuotes(s string) string {
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
@@ -48,4 +53,14 @@ func ParseFloat(s string) float64 {
 		result = -result
 	}
 	return result
+}
+
+// ParsePercentBps parses a percentage string into basis points (0..10000).
+// The input is expressed in percent units, so 25 -> 2500 and 0.25 -> 25.
+func ParsePercentBps(s string) (uint16, error) {
+	value := ParseFloat(s)
+	if value < 0 || value > 100 {
+		return 0, fmt.Errorf("rollout must be between 0 and 100")
+	}
+	return uint16(math.Round(value * 100)), nil
 }

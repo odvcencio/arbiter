@@ -298,11 +298,14 @@ rule EnhancedRiskCheck priority 1 {
 	if !rh.HasSegment {
 		t.Fatal("expected HasSegment to be set")
 	}
+	if !rh.HasRollout {
+		t.Fatal("expected HasRollout to be set")
+	}
 	if got := rs.Constants.GetString(rh.SegmentNameIdx); got != "high_risk" {
 		t.Fatalf("segment name = %q, want high_risk", got)
 	}
-	if rh.Rollout != 20 {
-		t.Fatalf("rollout = %d, want 20", rh.Rollout)
+	if rh.RolloutBps != 2000 {
+		t.Fatalf("rollout_bps = %d, want 2000", rh.RolloutBps)
 	}
 	if rh.PrereqLen != 2 {
 		t.Fatalf("prereq len = %d, want 2", rh.PrereqLen)
@@ -320,6 +323,36 @@ rule EnhancedRiskCheck priority 1 {
 		if gotPrereqs[i] != want {
 			t.Fatalf("prereq[%d] = %q, want %q", i, gotPrereqs[i], want)
 		}
+	}
+}
+
+func TestCompileRuleExplicitRolloutSpec(t *testing.T) {
+	src := `
+rule TargetedRollout {
+	when { true }
+	then Allow {}
+	rollout percent 0.25 by account.id namespace "launch_q2"
+}
+`
+	rs := compileSource(t, src)
+	rh := rs.Rules[0]
+	if !rh.HasRollout {
+		t.Fatal("expected HasRollout to be set")
+	}
+	if rh.RolloutBps != 25 {
+		t.Fatalf("rollout_bps = %d, want 25", rh.RolloutBps)
+	}
+	if !rh.HasRolloutSubject {
+		t.Fatal("expected rollout subject to be set")
+	}
+	if got := rs.Constants.GetString(rh.RolloutSubjectIdx); got != "account.id" {
+		t.Fatalf("rollout subject = %q, want account.id", got)
+	}
+	if !rh.HasRolloutNamespace {
+		t.Fatal("expected rollout namespace to be set")
+	}
+	if got := rs.Constants.GetString(rh.RolloutNamespaceIdx); got != "launch_q2" {
+		t.Fatalf("rollout namespace = %q, want launch_q2", got)
 	}
 }
 
