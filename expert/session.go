@@ -1,7 +1,6 @@
 package expert
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -373,241 +372,11 @@ func (s *Session) DeltaSince(mark Checkpoint) Result {
 	}
 }
 
-// Run evaluates the expert program until it reaches a fixed point or a guardrail.
-func (s *Session) Run(ctx context.Context) (Result, error) {
-	if err := s.validateRunState(); err != nil {
-		return Result{}, err
-	}
-	if s.hasNoRunnableRules() {
-		s.stopReason = StopQuiescent
-		return s.snapshot(), nil
-	}
-	forceFullEval := s.prepareRun()
-	if s.shouldReuseQuiescentSnapshot(forceFullEval) {
-		return s.snapshot(), nil
-	}
-
-	for round := 1; round <= s.opts.MaxRounds; round++ {
-		stopped, cancelled, err := s.runLoopRound(ctx, round, forceFullEval)
-		if err != nil {
-			if cancelled {
-				return s.snapshot(), err
-			}
-			return Result{}, err
-		}
-		if stopped {
-			return s.snapshot(), nil
-		}
-	}
-
-	s.stopReason = StopMaxRounds
-	s.contextDirty = false
-	return s.snapshot(), nil
-}
-
-func (s *Session) validateRunState() error {
-	if s == nil || s.program == nil {
-		return fmt.Errorf("nil expert program")
-	}
-	return nil
-}
-
-func (s *Session) hasNoRunnableRules() bool {
-	return s.program.ruleset == nil || len(s.program.rules) == 0
-}
-
-func (s *Session) prepareRun() bool {
-	nextNow := s.currentUnix()
-	forceFullEval := nextNow != s.evalNow || s.contextDirty
-	s.evalNow = nextNow
-	return forceFullEval
-}
-
-func (s *Session) shouldReuseQuiescentSnapshot(forceFullEval bool) bool {
-	return s.rounds > 0 && s.stopReason == StopQuiescent && len(s.dirtyFacts) == 0 && !forceFullEval
-}
-
-func (s *Session) runLoopRound(ctx context.Context, round int, forceFullEval bool) (bool, bool, error) {
-	if err := ctx.Err(); err != nil {
-		s.stopReason = StopContextCancelled
-		return true, true, err
-	}
-
-	s.rounds++
-	roundMutationsStart := s.mutations
-	forceStableRound := s.stablePending && s.rounds > 1 && s.lastRoundMutations == 0
-	firedGroups := make(map[string]struct{})
-	firstPass := s.rounds == 1 || (forceFullEval && round == 1)
-
-	roundResult, err := s.executeRound(ctx, round, firstPass, firedGroups)
-	if err != nil {
-		return false, false, err
-	}
-	if roundResult.stopped {
-		return true, false, nil
-	}
-
-	s.lastRoundMutations = s.mutations - roundMutationsStart
-	if s.shouldStopAfterRound(roundResult, forceStableRound) {
-		return true, false, nil
-	}
-	return false, false, nil
-}
-
 type roundExecution struct {
 	mutated        bool
 	stopped        bool
 	stableDeferred bool
 	ruleChanges    map[string]struct{}
-}
-
-func (s *Session) executeRound(ctx context.Context, round int, firstPass bool, firedGroups map[string]struct{}) (roundExecution, error) {
-	dirtyFacts := s.copyDirtyFacts()
-	dirtySources := s.copyDirtySources()
-	s.clearDirtyFacts()
-
-	matched, ruleChanges, evaluated, stableDeferred, err := s.runRound(firstPass, dirtyFacts, dirtySources)
-	if err != nil {
-		return roundExecution{}, err
-	}
-	mutated, active, stopped, err := s.applyRoundMatches(ctx, round, matched, firedGroups)
-	if err != nil {
-		return roundExecution{}, err
-	}
-	mutated = s.clearInactiveEvaluatedMutations(evaluated, active) || mutated
-
-	return roundExecution{
-		mutated:        mutated,
-		stopped:        stopped,
-		stableDeferred: stableDeferred,
-		ruleChanges:    ruleChanges,
-	}, nil
-}
-
-func (s *Session) shouldStopAfterRound(result roundExecution, forceStableRound bool) bool {
-	if !result.mutated {
-		if result.stableDeferred {
-			return false
-		}
-		if forceStableRound {
-			s.stablePending = false
-		}
-		s.contextDirty = false
-		s.stopReason = StopQuiescent
-		return true
-	}
-	if len(result.ruleChanges) == 0 && len(s.dirtyFacts) == 0 {
-		s.stopReason = StopQuiescent
-		return true
-	}
-	if !s.hasPendingWork(result.ruleChanges) {
-		s.stopReason = StopQuiescent
-		return true
-	}
-	return false
-}
-
-func (s *Session) applyRoundMatches(ctx context.Context, round int, matched []vm.MatchedRule, firedGroups map[string]struct{}) (bool, activeRoundMutations, bool, error) {
-	active := activeRoundMutations{
-		asserts:  make(map[string]struct{}),
-		retracts: make(map[string]struct{}),
-		modifies: make(map[string]struct{}),
-	}
-	mutated := false
-
-	for _, match := range matched {
-		if err := ctx.Err(); err != nil {
-			s.stopReason = StopContextCancelled
-			return false, active, true, err
-		}
-
-		rule, ok := s.program.lookupRule(match.Name)
-		if !ok {
-			return false, active, false, fmt.Errorf("missing expert rule metadata for %q", match.Name)
-		}
-		if s.groupAlreadyFired(rule, firedGroups) {
-			continue
-		}
-
-		changed, err := s.applyMatchedRule(round, rule, match, active)
-		if err != nil {
-			return false, active, false, err
-		}
-		mutated = mutated || changed
-		if rule.Group != "" {
-			firedGroups[rule.Group] = struct{}{}
-		}
-		if s.mutations >= s.opts.MaxMutations {
-			s.stopReason = StopMaxMutations
-			return mutated, active, true, nil
-		}
-	}
-
-	return mutated, active, false, nil
-}
-
-func (s *Session) groupAlreadyFired(rule Rule, firedGroups map[string]struct{}) bool {
-	if rule.Group == "" {
-		return false
-	}
-	_, blocked := firedGroups[rule.Group]
-	return blocked
-}
-
-func (s *Session) applyMatchedRule(round int, rule Rule, match vm.MatchedRule, active activeRoundMutations) (bool, error) {
-	switch rule.Kind {
-	case ActionAssert:
-		changed, _, instance, err := s.applyAssert(round, rule, match)
-		if err != nil {
-			return false, err
-		}
-		active.asserts[instance] = struct{}{}
-		return changed, nil
-	case ActionEmit:
-		_, err := s.applyEmit(round, rule, match)
-		return false, err
-	case ActionRetract:
-		changed, _, instance, err := s.applyRetract(round, rule, match)
-		if err != nil {
-			return false, err
-		}
-		active.retracts[instance] = struct{}{}
-		return changed, nil
-	case ActionModify:
-		changed, _, instance, err := s.applyModify(round, rule, match)
-		if err != nil {
-			return false, err
-		}
-		active.modifies[instance] = struct{}{}
-		return changed, nil
-	default:
-		return false, fmt.Errorf("unsupported expert action kind %q", rule.Kind)
-	}
-}
-
-func (s *Session) clearInactiveEvaluatedMutations(evaluated map[string]struct{}, active activeRoundMutations) bool {
-	mutated := false
-	for ruleName := range evaluated {
-		rule, ok := s.program.lookupRule(ruleName)
-		if !ok {
-			continue
-		}
-		switch rule.Kind {
-		case ActionAssert:
-			if s.clearInactiveDerivedSupports(ruleName, active.asserts) {
-				mutated = true
-			}
-		case ActionRetract:
-			if s.clearInactiveRetractions(ruleName, active.retracts) {
-				mutated = true
-			}
-		case ActionModify:
-			if s.clearInactiveModifications(ruleName, active.modifies) {
-				mutated = true
-			}
-		}
-	}
-	return mutated
 }
 
 func (s *Session) applyAssert(round int, rule Rule, match vm.MatchedRule) (bool, string, string, error) {
@@ -1436,39 +1205,70 @@ func (s *Session) buildSingleFactContext(factType string, fact Fact) map[string]
 }
 
 func (s *Session) evalRule(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext, rc *govern.RequestCache) (bool, vm.MatchedRule, error) {
-	if govern.IsKillSwitched(effectiveRuleKillSwitch(header, rule, s.opts.BundleID, s.opts.Overrides), nil) {
+	if !s.ruleAllowedByGovernance(rule, header, rc) {
 		return false, vm.MatchedRule{}, nil
 	}
-	if !rc.CheckPrerequisites(rule.Prereqs, nil) {
+	if !ruleMatchesSegment(header, evaluator, rc) {
 		return false, vm.MatchedRule{}, nil
 	}
-	if !rc.CheckExclusions(rule.Excludes, nil) {
-		return false, vm.MatchedRule{}, nil
-	}
-	if header.HasSegment {
-		segName := evaluator.String(header.SegmentNameIdx)
-		segOK, _ := rc.EvalSegment(segName)
-		if !segOK {
-			return false, vm.MatchedRule{}, nil
-		}
-	}
-	condOK, err := evaluator.EvalRuleCondition(header, dc)
+	condOK, err := s.ruleConditionMatches(rule, header, evaluator, dc)
 	if err != nil {
-		return false, vm.MatchedRule{}, fmt.Errorf("expert rule %s: %w", rule.Name, err)
+		return false, vm.MatchedRule{}, err
 	}
 	if !condOK {
 		return false, vm.MatchedRule{}, nil
 	}
-	if spec := effectiveRuleRollout(header, rule, s.program.ruleset, s.opts.BundleID, s.opts.Overrides); spec != nil {
-		if !govern.RolloutAllows(*spec, rc.Context()) {
-			return false, vm.MatchedRule{}, nil
-		}
+	if !s.ruleAllowedByRollout(rule, header, rc) {
+		return false, vm.MatchedRule{}, nil
 	}
-	match, err := evaluator.BuildMatch(header, dc)
+	match, err := s.buildRuleMatch(rule, header, evaluator, dc)
 	if err != nil {
-		return false, vm.MatchedRule{}, fmt.Errorf("expert rule %s action %s: %w", rule.Name, match.Action, err)
+		return false, vm.MatchedRule{}, err
 	}
 	return true, match, nil
+}
+
+func (s *Session) ruleAllowedByGovernance(rule Rule, header compiler.RuleHeader, rc *govern.RequestCache) bool {
+	if govern.IsKillSwitched(effectiveRuleKillSwitch(header, rule, s.opts.BundleID, s.opts.Overrides), nil) {
+		return false
+	}
+	if !rc.CheckPrerequisites(rule.Prereqs, nil) {
+		return false
+	}
+	return rc.CheckExclusions(rule.Excludes, nil)
+}
+
+func ruleMatchesSegment(header compiler.RuleHeader, evaluator *vm.Evaluator, rc *govern.RequestCache) bool {
+	if !header.HasSegment {
+		return true
+	}
+	segName := evaluator.String(header.SegmentNameIdx)
+	segOK, _ := rc.EvalSegment(segName)
+	return segOK
+}
+
+func (s *Session) ruleConditionMatches(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext) (bool, error) {
+	condOK, err := evaluator.EvalRuleCondition(header, dc)
+	if err != nil {
+		return false, fmt.Errorf("expert rule %s: %w", rule.Name, err)
+	}
+	return condOK, nil
+}
+
+func (s *Session) ruleAllowedByRollout(rule Rule, header compiler.RuleHeader, rc *govern.RequestCache) bool {
+	spec := effectiveRuleRollout(header, rule, s.program.ruleset, s.opts.BundleID, s.opts.Overrides)
+	if spec == nil {
+		return true
+	}
+	return govern.RolloutAllows(*spec, rc.Context())
+}
+
+func (s *Session) buildRuleMatch(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext) (vm.MatchedRule, error) {
+	match, err := evaluator.BuildMatch(header, dc)
+	if err != nil {
+		return vm.MatchedRule{}, fmt.Errorf("expert rule %s action %s: %w", rule.Name, match.Action, err)
+	}
+	return match, nil
 }
 
 func (s *Session) shouldEvaluate(rule Rule, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}, dirtyRules map[string]struct{}) bool {
@@ -1693,28 +1493,50 @@ func (s *Session) initEvalState() {
 }
 
 func (s *Session) refreshContextView(firstPass bool, dirtyFacts map[string]struct{}) {
+	s.ensureEvalRuntime()
+	s.syncEnvelopeContext()
+	dirtyFacts = factTypesToRefresh(firstPass, dirtyFacts, s.facts)
+	s.refreshFactViews(dirtyFacts)
+}
+
+func (s *Session) ensureEvalRuntime() {
 	if s.evalCtx == nil || s.factsView == nil || s.dc == nil || s.evaluator == nil {
 		s.initEvalState()
 	}
-	s.syncEnvelopeContext()
-	if firstPass {
-		dirtyFacts = make(map[string]struct{}, len(s.facts))
-		for factType := range s.facts {
-			dirtyFacts[factType] = struct{}{}
-		}
+}
+
+func factTypesToRefresh(firstPass bool, dirtyFacts map[string]struct{}, facts map[string]map[string]Fact) map[string]struct{} {
+	if !firstPass {
+		return dirtyFacts
 	}
+	out := make(map[string]struct{}, len(facts))
+	for factType := range facts {
+		out[factType] = struct{}{}
+	}
+	return out
+}
+
+func (s *Session) refreshFactViews(dirtyFacts map[string]struct{}) {
 	for factType := range dirtyFacts {
-		byKey, ok := s.facts[factType]
-		if !ok || len(byKey) == 0 {
-			delete(s.factsView, factType)
-			continue
-		}
-		items := make([]any, 0, len(byKey))
-		for _, fact := range byKey {
-			items = append(items, factEvalFields(fact, s.evalNow))
-		}
-		s.factsView[factType] = items
+		s.refreshFactView(factType)
 	}
+}
+
+func (s *Session) refreshFactView(factType string) {
+	byKey, ok := s.facts[factType]
+	if !ok || len(byKey) == 0 {
+		delete(s.factsView, factType)
+		return
+	}
+	s.factsView[factType] = factViewItems(byKey, s.evalNow)
+}
+
+func factViewItems(byKey map[string]Fact, now int64) []any {
+	items := make([]any, 0, len(byKey))
+	for _, fact := range byKey {
+		items = append(items, factEvalFields(fact, now))
+	}
+	return items
 }
 
 func (s *Session) syncEnvelopeContext() {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	arbiter "github.com/odvcencio/arbiter"
+	"github.com/odvcencio/arbiter/govern"
 )
 
 func TestStableRulesDeferUntilAfterAQuiescentRound(t *testing.T) {
@@ -483,6 +484,132 @@ func TestRecomputeFactUpdatesDerivedByWithoutResettingAssertionMetadata(t *testi
 	}
 }
 
+func TestRefreshContextViewFirstPassRebuildsAllFactTypes(t *testing.T) {
+	now := time.Unix(120, 0).UTC()
+	session := NewSession(&Program{}, map[string]any{"tenant": "acme"}, nil, Options{
+		Now: func() time.Time { return now },
+	})
+	session.rounds = 2
+	session.evalNow = now.Unix()
+	session.facts = map[string]map[string]Fact{
+		"Lead": {
+			"a": {
+				Type:          "Lead",
+				Key:           "a",
+				Fields:        map[string]any{"score": float64(95)},
+				AssertedRound: 1,
+				AssertedAt:    100,
+			},
+		},
+		"Marker": {
+			"m1": {
+				Type:          "Marker",
+				Key:           "m1",
+				Fields:        map[string]any{"kind": "high"},
+				AssertedRound: 2,
+				AssertedAt:    110,
+			},
+		},
+	}
+
+	session.refreshContextView(true, nil)
+
+	if _, ok := session.factsView["Lead"]; !ok {
+		t.Fatalf("expected Lead facts in view, got %+v", session.factsView)
+	}
+	if _, ok := session.factsView["Marker"]; !ok {
+		t.Fatalf("expected Marker facts in view, got %+v", session.factsView)
+	}
+	factsValue, ok := session.evalCtx["facts"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected facts map in eval context, got %+v", session.evalCtx["facts"])
+	}
+	if _, ok := factsValue["Lead"]; !ok {
+		t.Fatalf("expected Lead in eval context facts, got %+v", factsValue)
+	}
+	if got := session.evalCtx["current_round"]; got != float64(2) {
+		t.Fatalf("expected current_round 2, got %#v", got)
+	}
+	if got := session.evalCtx["__now"]; got != float64(120) {
+		t.Fatalf("expected __now 120, got %#v", got)
+	}
+}
+
+func TestRefreshContextViewDeletesMissingDirtyFactTypes(t *testing.T) {
+	session := NewSession(&Program{}, nil, nil, Options{})
+	session.factsView["Lead"] = []any{map[string]any{"key": "stale"}}
+	session.facts = map[string]map[string]Fact{}
+
+	session.refreshContextView(false, map[string]struct{}{"Lead": {}})
+
+	if _, ok := session.factsView["Lead"]; ok {
+		t.Fatalf("expected stale Lead view to be removed, got %+v", session.factsView)
+	}
+}
+
+func TestEvalRuleSkipsWhenSegmentDoesNotMatch(t *testing.T) {
+	program := mustCompiledProgram(t, []byte(`
+segment high_risk { applicant.score < 600 }
+
+expert rule RouteReview {
+	when segment high_risk { true }
+	then emit ManualReview {
+		queue: "risk",
+	}
+}
+`))
+
+	session := NewSession(program, map[string]any{
+		"applicant": map[string]any{
+			"score": float64(650),
+		},
+	}, nil, Options{})
+	session.refreshContextView(true, nil)
+
+	ok, match, err := session.evalRule(
+		program.rules[0],
+		program.ruleset.Rules[0],
+		session.evaluator,
+		session.dc,
+		govern.NewRequestCache(program.segments, session.evalCtx),
+	)
+	if err != nil {
+		t.Fatalf("evalRule: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected segment mismatch to skip rule, got match %+v", match)
+	}
+}
+
+func TestEvalRuleSkipsWhenRolloutSubjectMissing(t *testing.T) {
+	program := mustCompiledProgram(t, []byte(`
+expert rule RouteReview {
+	when { true }
+	then emit ManualReview {
+		queue: "risk",
+	}
+	rollout percent 100 by applicant.id namespace "expert.test"
+}
+`))
+
+	session := NewSession(program, nil, nil, Options{})
+	session.refreshContextView(true, nil)
+
+	ok, match, err := session.evalRule(
+		program.rules[0],
+		program.ruleset.Rules[0],
+		session.evaluator,
+		session.dc,
+		govern.NewRequestCache(program.segments, session.evalCtx),
+	)
+	if err != nil {
+		t.Fatalf("evalRule: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected missing rollout subject to skip rule, got match %+v", match)
+	}
+}
+
 func mustManualProgram(t *testing.T, source []byte, rules []Rule) *Program {
 	t.Helper()
 
@@ -508,4 +635,17 @@ func mustManualProgram(t *testing.T, source []byte, rules []Rule) *Program {
 		rules:      append([]Rule(nil), rules...),
 		ruleByName: byName,
 	}
+}
+
+func mustCompiledProgram(t *testing.T, source []byte) *Program {
+	t.Helper()
+
+	program, err := Compile(source)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if program == nil || program.ruleset == nil || len(program.rules) == 0 {
+		t.Fatalf("expected compiled expert program, got %+v", program)
+	}
+	return program
 }
