@@ -279,6 +279,8 @@ rule EnhancedRiskCheck priority 1 {
     kill_switch
     requires BasicRiskCheck
     requires prior_hold
+    excludes LegacyPath
+    excludes ManualReview
     when segment high_risk {
         tx.amount > 5000
     }
@@ -313,6 +315,12 @@ rule EnhancedRiskCheck priority 1 {
 	if len(rs.Prereqs) != 2 {
 		t.Fatalf("prereq table len = %d, want 2", len(rs.Prereqs))
 	}
+	if rh.ExcludeLen != 2 {
+		t.Fatalf("exclude len = %d, want 2", rh.ExcludeLen)
+	}
+	if len(rs.Excludes) != 2 {
+		t.Fatalf("exclude table len = %d, want 2", len(rs.Excludes))
+	}
 
 	gotPrereqs := []string{
 		rs.Constants.GetString(rs.Prereqs[rh.PrereqOff]),
@@ -322,6 +330,17 @@ rule EnhancedRiskCheck priority 1 {
 	for i, want := range wantPrereqs {
 		if gotPrereqs[i] != want {
 			t.Fatalf("prereq[%d] = %q, want %q", i, gotPrereqs[i], want)
+		}
+	}
+
+	gotExcludes := []string{
+		rs.Constants.GetString(rs.Excludes[rh.ExcludeOff]),
+		rs.Constants.GetString(rs.Excludes[rh.ExcludeOff+1]),
+	}
+	wantExcludes := []string{"LegacyPath", "ManualReview"}
+	for i, want := range wantExcludes {
+		if gotExcludes[i] != want {
+			t.Fatalf("exclude[%d] = %q, want %q", i, gotExcludes[i], want)
 		}
 	}
 }

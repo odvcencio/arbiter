@@ -400,42 +400,17 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 		firedGroups := make(map[string]struct{})
 
 		firstPass := s.rounds == 1 || (forceFullEval && round == 1)
-		dirtyFacts := s.copyDirtyFacts()
-		dirtySources := s.copyDirtySources()
-		s.clearDirtyFacts()
-		matched, ruleChanges, evaluated, stableDeferred, err := s.runRound(firstPass, dirtyFacts, dirtySources)
+		roundResult, err := s.executeRound(ctx, round, firstPass, firedGroups)
 		if err != nil {
 			return Result{}, err
 		}
-		mutated, active, stopped, err := s.applyRoundMatches(ctx, round, matched, firedGroups)
-		if err != nil {
-			return s.snapshot(), err
-		}
-		if stopped {
+		if roundResult.stopped {
 			return s.snapshot(), nil
 		}
-		mutated = s.clearInactiveEvaluatedMutations(evaluated, active) || mutated
 
 		s.lastRoundMutations = s.mutations - roundMutationsStart
 
-		if !mutated {
-			if stableDeferred {
-				s.lastRoundMutations = s.mutations - roundMutationsStart
-				continue
-			}
-			if forceStableRound {
-				s.stablePending = false
-			}
-			s.contextDirty = false
-			s.stopReason = StopQuiescent
-			return s.snapshot(), nil
-		}
-		if len(ruleChanges) == 0 && len(s.dirtyFacts) == 0 {
-			s.stopReason = StopQuiescent
-			return s.snapshot(), nil
-		}
-		if !s.hasPendingWork(ruleChanges) {
-			s.stopReason = StopQuiescent
+		if s.shouldStopAfterRound(roundResult, forceStableRound) {
 			return s.snapshot(), nil
 		}
 	}
@@ -443,6 +418,59 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 	s.stopReason = StopMaxRounds
 	s.contextDirty = false
 	return s.snapshot(), nil
+}
+
+type roundExecution struct {
+	mutated        bool
+	stopped        bool
+	stableDeferred bool
+	ruleChanges    map[string]struct{}
+}
+
+func (s *Session) executeRound(ctx context.Context, round int, firstPass bool, firedGroups map[string]struct{}) (roundExecution, error) {
+	dirtyFacts := s.copyDirtyFacts()
+	dirtySources := s.copyDirtySources()
+	s.clearDirtyFacts()
+
+	matched, ruleChanges, evaluated, stableDeferred, err := s.runRound(firstPass, dirtyFacts, dirtySources)
+	if err != nil {
+		return roundExecution{}, err
+	}
+	mutated, active, stopped, err := s.applyRoundMatches(ctx, round, matched, firedGroups)
+	if err != nil {
+		return roundExecution{}, err
+	}
+	mutated = s.clearInactiveEvaluatedMutations(evaluated, active) || mutated
+
+	return roundExecution{
+		mutated:        mutated,
+		stopped:        stopped,
+		stableDeferred: stableDeferred,
+		ruleChanges:    ruleChanges,
+	}, nil
+}
+
+func (s *Session) shouldStopAfterRound(result roundExecution, forceStableRound bool) bool {
+	if !result.mutated {
+		if result.stableDeferred {
+			return false
+		}
+		if forceStableRound {
+			s.stablePending = false
+		}
+		s.contextDirty = false
+		s.stopReason = StopQuiescent
+		return true
+	}
+	if len(result.ruleChanges) == 0 && len(s.dirtyFacts) == 0 {
+		s.stopReason = StopQuiescent
+		return true
+	}
+	if !s.hasPendingWork(result.ruleChanges) {
+		s.stopReason = StopQuiescent
+		return true
+	}
+	return false
 }
 
 func (s *Session) applyRoundMatches(ctx context.Context, round int, matched []vm.MatchedRule, firedGroups map[string]struct{}) (bool, activeRoundMutations, bool, error) {

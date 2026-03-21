@@ -144,107 +144,146 @@ func (c *cstCompiler) exprToPoolValue(n *gotreesitter.Node) intern.PoolValue {
 // compileRule compiles one rule_declaration into a RuleHeader.
 func (c *cstCompiler) compileRule(n *gotreesitter.Node, rs *CompiledRuleset) (RuleHeader, error) {
 	rh := RuleHeader{}
-
-	if nameNode := c.childByField(n, "name"); nameNode != nil {
-		rh.NameIdx = c.pool.String(c.text(nameNode))
-	}
-
-	if priNode := c.childByField(n, "priority"); priNode != nil {
-		rh.Priority = int32(parseutil.ParseInt(c.text(priNode)))
-	}
-
-	if c.childByField(n, "kill_switch") != nil {
-		rh.KillSwitch = true
-	}
-
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		child := n.NamedChild(i)
-		switch c.nodeType(child) {
-		case "rule_requires":
-			nameNode := c.childByField(child, "name")
-			if nameNode == nil {
-				continue
-			}
-			if rh.PrereqLen == 0 {
-				rh.PrereqOff = uint16(len(rs.Prereqs))
-			}
-			rs.Prereqs = append(rs.Prereqs, c.pool.String(c.text(nameNode)))
-			rh.PrereqLen++
-		case "rule_excludes":
-			nameNode := c.childByField(child, "name")
-			if nameNode == nil {
-				continue
-			}
-			if rh.ExcludeLen == 0 {
-				rh.ExcludeOff = uint16(len(rs.Excludes))
-			}
-			rs.Excludes = append(rs.Excludes, c.pool.String(c.text(nameNode)))
-			rh.ExcludeLen++
-		}
-	}
-
-	// Condition
-	if whenNode := c.childByField(n, "condition"); whenNode != nil {
-		if segNode := c.childByField(whenNode, "segment"); segNode != nil {
-			rh.SegmentNameIdx = c.pool.String(c.text(segNode))
-			rh.HasSegment = true
-		}
-		condOff := uint32(len(rs.Instructions))
-		var code []byte
-		for i := 0; i < int(whenNode.NamedChildCount()); i++ {
-			child := whenNode.NamedChild(i)
-			if c.nodeType(child) == "let_binding" {
-				code = c.compileLet(code, child)
-			}
-		}
-		if exprNode := c.childByField(whenNode, "expr"); exprNode != nil {
-			code = c.compileExpr(code, exprNode)
-		}
-		if len(code) > 0 {
-			rs.Instructions = append(rs.Instructions, code...)
-			rh.ConditionOff = condOff
-			rh.ConditionLen = uint32(len(code))
-		}
-	}
-
-	// Action
-	if thenNode := c.childByField(n, "action"); thenNode != nil {
-		actionIdx := uint16(len(rs.Actions))
-		rs.Actions = append(rs.Actions, c.compileAction(thenNode, rs))
-		rh.ActionIdx = actionIdx
-	}
-
-	// Fallback
-	if fallbackNode := c.childByField(n, "fallback"); fallbackNode != nil {
-		fbIdx := uint16(len(rs.Actions))
-		rs.Actions = append(rs.Actions, c.compileAction(fallbackNode, rs))
-		rh.FallbackIdx = fbIdx
-	}
-
-	if rolloutNode := c.childByField(n, "rollout"); rolloutNode != nil {
-		rh.HasRollout = true
-		valueNode := c.childByField(rolloutNode, "value")
-		if valueNode != nil {
-			rolloutBps, err := parseutil.ParsePercentBps(c.text(valueNode))
-			if err != nil {
-				return rh, fmt.Errorf("rule %s: %w", c.text(c.childByField(n, "name")), err)
-			}
-			rh.RolloutBps = rolloutBps
-		}
-		if subjectNode := c.childByField(rolloutNode, "subject"); subjectNode != nil {
-			rh.RolloutSubjectIdx = c.pool.String(c.text(subjectNode))
-			rh.HasRolloutSubject = true
-		}
-		if namespaceNode := c.childByField(rolloutNode, "namespace"); namespaceNode != nil {
-			rh.RolloutNamespaceIdx = c.pool.String(parseutil.StripQuotes(c.text(namespaceNode)))
-			rh.HasRolloutNamespace = true
-		}
+	c.populateRuleHeader(n, &rh)
+	c.collectRuleGovernance(n, rs, &rh)
+	c.compileRuleCondition(n, rs, &rh)
+	c.compileRuleActions(n, rs, &rh)
+	if err := c.compileRuleRollout(n, &rh); err != nil {
+		return rh, err
 	}
 	if c.err != nil {
 		return rh, c.err
 	}
 
 	return rh, nil
+}
+
+func (c *cstCompiler) populateRuleHeader(n *gotreesitter.Node, rh *RuleHeader) {
+	if n == nil || rh == nil {
+		return
+	}
+	if nameNode := c.childByField(n, "name"); nameNode != nil {
+		rh.NameIdx = c.pool.String(c.text(nameNode))
+	}
+	if priNode := c.childByField(n, "priority"); priNode != nil {
+		rh.Priority = int32(parseutil.ParseInt(c.text(priNode)))
+	}
+	rh.KillSwitch = c.childByField(n, "kill_switch") != nil
+}
+
+func (c *cstCompiler) collectRuleGovernance(n *gotreesitter.Node, rs *CompiledRuleset, rh *RuleHeader) {
+	if n == nil || rs == nil || rh == nil {
+		return
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		child := n.NamedChild(i)
+		switch c.nodeType(child) {
+		case "rule_requires":
+			c.appendRuleRef(child, "name", &rs.Prereqs, &rh.PrereqOff, &rh.PrereqLen)
+		case "rule_excludes":
+			c.appendRuleRef(child, "name", &rs.Excludes, &rh.ExcludeOff, &rh.ExcludeLen)
+		}
+	}
+}
+
+func (c *cstCompiler) appendRuleRef(n *gotreesitter.Node, field string, dst *[]uint16, off *uint16, length *uint16) {
+	if n == nil || dst == nil || off == nil || length == nil {
+		return
+	}
+	nameNode := c.childByField(n, field)
+	if nameNode == nil {
+		return
+	}
+	if *length == 0 {
+		*off = uint16(len(*dst))
+	}
+	*dst = append(*dst, c.pool.String(c.text(nameNode)))
+	*length = *length + 1
+}
+
+func (c *cstCompiler) compileRuleCondition(n *gotreesitter.Node, rs *CompiledRuleset, rh *RuleHeader) {
+	if n == nil || rs == nil || rh == nil {
+		return
+	}
+	whenNode := c.childByField(n, "condition")
+	if whenNode == nil {
+		return
+	}
+	if segNode := c.childByField(whenNode, "segment"); segNode != nil {
+		rh.SegmentNameIdx = c.pool.String(c.text(segNode))
+		rh.HasSegment = true
+	}
+	condOff := uint32(len(rs.Instructions))
+	var code []byte
+	for i := 0; i < int(whenNode.NamedChildCount()); i++ {
+		child := whenNode.NamedChild(i)
+		if c.nodeType(child) == "let_binding" {
+			code = c.compileLet(code, child)
+		}
+	}
+	if exprNode := c.childByField(whenNode, "expr"); exprNode != nil {
+		code = c.compileExpr(code, exprNode)
+	}
+	if len(code) == 0 {
+		return
+	}
+	rs.Instructions = append(rs.Instructions, code...)
+	rh.ConditionOff = condOff
+	rh.ConditionLen = uint32(len(code))
+}
+
+func (c *cstCompiler) compileRuleActions(n *gotreesitter.Node, rs *CompiledRuleset, rh *RuleHeader) {
+	if n == nil || rs == nil || rh == nil {
+		return
+	}
+	if thenNode := c.childByField(n, "action"); thenNode != nil {
+		actionIdx := uint16(len(rs.Actions))
+		rs.Actions = append(rs.Actions, c.compileAction(thenNode, rs))
+		rh.ActionIdx = actionIdx
+	}
+	if fallbackNode := c.childByField(n, "fallback"); fallbackNode != nil {
+		fallbackIdx := uint16(len(rs.Actions))
+		rs.Actions = append(rs.Actions, c.compileAction(fallbackNode, rs))
+		rh.FallbackIdx = fallbackIdx
+	}
+}
+
+func (c *cstCompiler) compileRuleRollout(n *gotreesitter.Node, rh *RuleHeader) error {
+	if n == nil || rh == nil {
+		return nil
+	}
+	rolloutNode := c.childByField(n, "rollout")
+	if rolloutNode == nil {
+		return nil
+	}
+	rh.HasRollout = true
+	if valueNode := c.childByField(rolloutNode, "value"); valueNode != nil {
+		rolloutBps, err := parseutil.ParsePercentBps(c.text(valueNode))
+		if err != nil {
+			return fmt.Errorf("rule %s: %w", c.ruleName(n), err)
+		}
+		rh.RolloutBps = rolloutBps
+	}
+	if subjectNode := c.childByField(rolloutNode, "subject"); subjectNode != nil {
+		rh.RolloutSubjectIdx = c.pool.String(c.text(subjectNode))
+		rh.HasRolloutSubject = true
+	}
+	if namespaceNode := c.childByField(rolloutNode, "namespace"); namespaceNode != nil {
+		rh.RolloutNamespaceIdx = c.pool.String(parseutil.StripQuotes(c.text(namespaceNode)))
+		rh.HasRolloutNamespace = true
+	}
+	return nil
+}
+
+func (c *cstCompiler) ruleName(n *gotreesitter.Node) string {
+	if n == nil {
+		return ""
+	}
+	nameNode := c.childByField(n, "name")
+	if nameNode == nil {
+		return ""
+	}
+	return c.text(nameNode)
 }
 
 // compileAction compiles a then_block or otherwise_block.

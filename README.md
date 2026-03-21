@@ -17,6 +17,11 @@ Four modalities, one language. **Stateless evaluation** for request-path decisio
 
 The parser is built on [gotreesitter](https://github.com/odvcencio/gotreesitter), a pure-Go reimplementation of the tree-sitter runtime — no CGo, no C toolchain, no generated files. Cross-compiles to any `GOOS`/`GOARCH` target Go supports, including WASM.
 
+Standalone reference material lives under [`docs/`](docs):
+
+- [`docs/language/grammar.ebnf`](docs/language/grammar.ebnf) is the tooling-facing language specification.
+- [`docs/architecture/compiler.md`](docs/architecture/compiler.md) explains the compiler pipeline, compiled ruleset layout, and the compile-time/runtime string-pool split.
+
 ## Performance
 
 Arbiter's numbers come from this repo's benchmarks. Cross-engine runtime comparisons against CEL and OPA are in [`benchmarks/runtime`](benchmarks/runtime).

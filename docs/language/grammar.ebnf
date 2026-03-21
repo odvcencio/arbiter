@@ -1,0 +1,253 @@
+# Arbiter Grammar (EBNF)
+
+This document is the standalone language reference for Arbiter's source format.
+The executable parser lives in [`grammar.go`](../../grammar.go); this file is the
+tooling-facing specification for editors, linters, and third-party compilers.
+
+The notation is conventional EBNF:
+
+- `A = B C ;` means concatenation.
+- `A = B | C ;` means alternation.
+- `{ A }` means zero or more repetitions.
+- `[ A ]` means optional.
+- terminals are in double quotes.
+
+## Top Level
+
+```ebnf
+source_file        = { top_level_declaration } ;
+
+top_level_declaration
+                   = const_declaration
+                   | segment_declaration
+                   | rule_declaration
+                   | flag_declaration
+                   | expert_rule_declaration
+                   | arbiter_declaration
+                   | include_declaration ;
+
+include_declaration = "include" string_literal ;
+
+const_declaration  = "const" identifier "=" literal ;
+
+segment_declaration
+                   = "segment" identifier block_expr ;
+```
+
+## Rules
+
+```ebnf
+rule_declaration   = "rule" identifier [ priority_clause ] rule_block ;
+
+rule_block         = "{"
+                       { rule_governance_clause }
+                       when_clause
+                       then_clause
+                       [ otherwise_clause ]
+                       [ rollout_clause ]
+                     "}" ;
+
+priority_clause    = "priority" integer_literal ;
+
+rule_governance_clause
+                   = kill_switch_clause
+                   | requires_clause
+                   | excludes_clause ;
+
+kill_switch_clause = "kill_switch" ;
+requires_clause    = "requires" identifier ;
+excludes_clause    = "excludes" identifier ;
+
+when_clause        = "when" ( segment_condition | block_expr ) ;
+segment_condition  = "segment" identifier block_expr ;
+
+then_clause        = "then" action_block ;
+otherwise_clause   = "otherwise" action_block ;
+
+action_block       = identifier "{" { param_assignment } "}" ;
+param_assignment   = identifier ":" expression "," ;
+```
+
+## Feature Flags
+
+```ebnf
+flag_declaration   = "flag" identifier "type" identifier "default" string_literal
+                     "{"
+                       { metadata_assignment | variant_declaration | flag_rule }
+                     "}" ;
+
+metadata_assignment = identifier ":" literal "," ;
+
+variant_declaration = "variant" string_literal "{" { param_assignment } "}" ;
+
+flag_rule          = "when" ( segment_reference | block_expr )
+                     [ rollout_clause ]
+                     "then" string_literal ;
+
+segment_reference  = identifier ;
+```
+
+## Expert Rules
+
+```ebnf
+expert_rule_declaration
+                   = "expert" "rule" identifier
+                     [ priority_clause ]
+                     { expert_modifier }
+                     expert_rule_block ;
+
+expert_modifier    = "per_fact"
+                   | "no_loop"
+                   | "kill_switch"
+                   | requires_clause
+                   | excludes_clause
+                   | activation_group_clause ;
+
+activation_group_clause
+                   = "activation_group" identifier ;
+
+expert_rule_block  = "{"
+                       when_clause
+                       expert_then_clause
+                       [ rollout_clause ]
+                     "}" ;
+
+expert_then_clause = "then" expert_action ;
+
+expert_action      = assert_action
+                   | emit_action
+                   | retract_action
+                   | modify_action ;
+
+assert_action      = "assert" identifier "{" { param_assignment } "}" ;
+emit_action        = "emit" identifier "{" { param_assignment } "}" ;
+retract_action     = "retract" identifier "{" "key" ":" expression "," "}" ;
+modify_action      = "modify" identifier "{"
+                       "key" ":" expression ","
+                       "set" "{" { param_assignment } "}"
+                     "}" ;
+```
+
+## Continuous Arbiters
+
+```ebnf
+arbiter_declaration
+                   = "arbiter" identifier "{"
+                       { arbiter_clause }
+                     "}" ;
+
+arbiter_clause     = poll_clause
+                   | stream_clause
+                   | source_clause
+                   | schedule_clause
+                   | checkpoint_clause
+                   | handler_clause ;
+
+poll_clause        = "poll" duration_literal ;
+stream_clause      = "stream" uri_literal ;
+source_clause      = "source" uri_literal ;
+checkpoint_clause  = "checkpoint" string_literal ;
+
+schedule_clause    = "schedule" string_literal "source" uri_literal ;
+
+handler_clause     = "on" outcome_selector
+                     [ "where" expression ]
+                     handler_target ;
+
+outcome_selector   = "*" | identifier ;
+
+handler_target     = "chain" identifier
+                   | "webhook" uri_literal
+                   | "slack" slack_channel
+                   | "exec" string_literal
+                   | "grpc" uri_literal
+                   | "audit" string_literal
+                   | "stdout" ;
+
+slack_channel      = "#" identifier ;
+```
+
+## Rollouts
+
+```ebnf
+rollout_clause     = "rollout" ( rollout_legacy | rollout_percent ) ;
+
+rollout_legacy     = percent_literal ;
+
+rollout_percent    = "percent" percent_literal
+                     [ "by" member_expression ]
+                     [ "namespace" string_literal ] ;
+```
+
+## Expressions
+
+```ebnf
+block_expr         = "{" { let_binding } expression "}" ;
+let_binding        = "let" identifier "=" expression ;
+
+expression         = or_expr ;
+or_expr            = and_expr { "or" and_expr } ;
+and_expr           = unary_expr { "and" unary_expr } ;
+unary_expr         = [ "not" ] comparison_expr ;
+
+comparison_expr    = additive_expr
+                     [ comparison_operator additive_expr ] ;
+
+comparison_operator = "==" | "!=" | ">" | ">=" | "<" | "<="
+                    | "in" | "not in"
+                    | "contains" | "not contains"
+                    | "retains" | "not retains"
+                    | "subset_of" | "superset_of"
+                    | "starts_with" | "ends_with"
+                    | "matches"
+                    | "is null" | "is not null"
+                    | "between" ;
+
+additive_expr      = multiplicative_expr
+                     { ( "+" | "-" ) multiplicative_expr } ;
+
+multiplicative_expr = primary_expr
+                      { ( "*" | "/" | "%" ) primary_expr } ;
+
+primary_expr       = literal
+                   | identifier
+                   | member_expression
+                   | list_literal
+                   | aggregate_expression
+                   | quantifier_expression
+                   | "(" expression ")" ;
+
+member_expression  = identifier "." identifier { "." identifier } ;
+
+aggregate_expression
+                   = ( "sum" | "count" | "avg" ) "(" expression ")" ;
+
+quantifier_expression
+                   = ( "any" | "all" | "none" ) identifier "in" expression block_expr ;
+```
+
+## Literals and Lexical Rules
+
+```ebnf
+literal            = number_literal
+                   | string_literal
+                   | bool_literal
+                   | list_literal ;
+
+list_literal       = "[" [ expression { "," expression } ] "]" ;
+bool_literal       = "true" | "false" ;
+
+identifier         = letter { letter | digit | "_" | "-" } ;
+number_literal     = integer_literal | float_literal ;
+string_literal     = "\"" { character } "\"" ;
+uri_literal        = string_literal | bare_uri ;
+duration_literal   = integer_literal ( "ms" | "s" | "m" | "h" ) ;
+percent_literal    = number_literal ;
+```
+
+Notes:
+
+- Comments may use `// ...` or bare `# ...` line comments.
+- `slack #channel` is parsed as a handler target, not as a comment.
+- The hosted/runtime surface may intentionally support only a subset of the full
+  declaration language at any given release; the language grammar is broader.
