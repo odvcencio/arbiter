@@ -732,13 +732,23 @@ func (s *Session) upsertExternalFact(f Fact) (bool, error) {
 }
 
 func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
+	next := s.newSupportRecord(rule, fact)
+	prev, hadPrev := s.supportRecords(rule.Name)[next.Instance]
+	changed := false
+	if hadPrev {
+		changed = s.replaceSupportRecord(prev, &next)
+	}
+	s.addSupportRecord(next)
+	return s.recomputeFact(next.Fact.Type, next.Fact.Key, rule.Name) || changed
+}
+
+func (s *Session) newSupportRecord(rule Rule, fact Fact) supportRecord {
 	fact.AssertedRound = s.rounds
 	if fact.AssertedAt == 0 {
 		fact.AssertedAt = s.evalNow
 	}
-	instance := mutationInstanceKey(rule.Name, fact.Key)
-	next := supportRecord{
-		Instance: instance,
+	return supportRecord{
+		Instance: mutationInstanceKey(rule.Name, fact.Key),
 		Rule:     rule.Name,
 		Priority: rule.Priority,
 		Fact: Fact{
@@ -749,36 +759,33 @@ func (s *Session) setDerivedSupport(rule Rule, fact Fact) bool {
 			AssertedAt:    fact.AssertedAt,
 		},
 	}
+}
 
-	byInstance := s.supportRecords(rule.Name)
-	prev, hadPrev := byInstance[instance]
-	changed := false
-	sameFact := hadPrev && prev.Fact.Type == next.Fact.Type && prev.Fact.Key == next.Fact.Key
-	if hadPrev && sameFact && stableKey(prev.Fact.Fields) == stableKey(next.Fact.Fields) {
-		next.Fact.AssertedRound = prev.Fact.AssertedRound
-		next.Fact.AssertedAt = prev.Fact.AssertedAt
+func (s *Session) replaceSupportRecord(prev supportRecord, next *supportRecord) bool {
+	sameFact := sameFactIdentity(prev.Fact, next.Fact)
+	if sameFact && sameFactFields(prev.Fact, next.Fact) {
+		preserveFactAssertion(&next.Fact, prev.Fact)
 	}
-	if hadPrev {
-		s.removeSupportRecord(prev)
-		if !sameFact {
-			changed = s.recomputeFact(prev.Fact.Type, prev.Fact.Key, rule.Name) || changed
-		}
-		byInstance = s.supportRecords(rule.Name)
+	s.removeSupportRecord(prev)
+	if sameFact {
+		return false
 	}
+	return s.recomputeFact(prev.Fact.Type, prev.Fact.Key, prev.Rule)
+}
 
-	byKey, ok := s.factSupports[next.Fact.Type]
+func (s *Session) addSupportRecord(record supportRecord) {
+	byKey, ok := s.factSupports[record.Fact.Type]
 	if !ok {
 		byKey = make(map[string]map[string]supportRecord)
-		s.factSupports[next.Fact.Type] = byKey
+		s.factSupports[record.Fact.Type] = byKey
 	}
-	supporters, ok := byKey[next.Fact.Key]
+	supporters, ok := byKey[record.Fact.Key]
 	if !ok {
 		supporters = make(map[string]supportRecord)
-		byKey[next.Fact.Key] = supporters
+		byKey[record.Fact.Key] = supporters
 	}
-	supporters[instance] = next
-	byInstance[instance] = next
-	return s.recomputeFact(next.Fact.Type, next.Fact.Key, rule.Name) || changed
+	supporters[record.Instance] = record
+	s.supportRecords(record.Rule)[record.Instance] = record
 }
 
 func (s *Session) clearInactiveDerivedSupports(ruleName string, active map[string]struct{}) bool {
@@ -825,35 +832,46 @@ func (s *Session) recomputeFact(factType, factKey, source string) bool {
 	next, ok := s.desiredFact(factType, factKey)
 	current, currentOK := s.currentFact(factType, factKey)
 	if !ok {
-		if !currentOK {
-			return false
-		}
-		byKey := s.facts[factType]
-		delete(byKey, factKey)
-		if len(byKey) == 0 {
-			delete(s.facts, factType)
-		}
-		s.markDirtySource(factType, source)
-		return true
+		return s.deleteCurrentFact(factType, factKey, source, currentOK)
 	}
 
-	if currentOK && stableKey(current.Fields) == stableKey(next.Fields) {
-		if !sameStrings(current.DerivedBy, next.DerivedBy) {
-			next.AssertedRound = current.AssertedRound
-			next.AssertedAt = current.AssertedAt
-			byKey := s.facts[factType]
-			byKey[factKey] = next
-		}
+	if currentOK && sameFactFields(current, next) {
+		return s.refreshCurrentFactMetadata(factType, factKey, current, next)
+	}
+
+	return s.storeCurrentFact(next, source)
+}
+
+func (s *Session) deleteCurrentFact(factType, factKey, source string, currentOK bool) bool {
+	if !currentOK {
 		return false
 	}
+	byKey := s.facts[factType]
+	delete(byKey, factKey)
+	if len(byKey) == 0 {
+		delete(s.facts, factType)
+	}
+	s.markDirtySource(factType, source)
+	return true
+}
 
-	byKey, ok := s.facts[factType]
+func (s *Session) refreshCurrentFactMetadata(factType, factKey string, current Fact, next Fact) bool {
+	if sameStrings(current.DerivedBy, next.DerivedBy) {
+		return false
+	}
+	preserveFactAssertion(&next, current)
+	s.facts[factType][factKey] = next
+	return false
+}
+
+func (s *Session) storeCurrentFact(next Fact, source string) bool {
+	byKey, ok := s.facts[next.Type]
 	if !ok {
 		byKey = make(map[string]Fact)
-		s.facts[factType] = byKey
+		s.facts[next.Type] = byKey
 	}
-	byKey[factKey] = next
-	s.markDirtySource(factType, source)
+	byKey[next.Key] = next
+	s.markDirtySource(next.Type, source)
 	return true
 }
 
@@ -1605,6 +1623,22 @@ func changedOnlyByRule(sources map[string]struct{}, ruleName string) bool {
 		}
 	}
 	return true
+}
+
+func sameFactIdentity(a, b Fact) bool {
+	return a.Type == b.Type && a.Key == b.Key
+}
+
+func sameFactFields(a, b Fact) bool {
+	return stableKey(a.Fields) == stableKey(b.Fields)
+}
+
+func preserveFactAssertion(next *Fact, prev Fact) {
+	if next == nil {
+		return
+	}
+	next.AssertedRound = prev.AssertedRound
+	next.AssertedAt = prev.AssertedAt
 }
 
 func (s *Session) initEvalState() {

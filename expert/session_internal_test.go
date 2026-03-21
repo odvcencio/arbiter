@@ -380,6 +380,109 @@ func TestShouldEvaluateAllowsDirtyPrereqsEvenForNoLoopRules(t *testing.T) {
 	}
 }
 
+func TestSetDerivedSupportPreservesAssertionMetadataForUnchangedFacts(t *testing.T) {
+	session := NewSession(&Program{}, nil, nil, Options{})
+	rule := Rule{Name: "PrimarySupport", Priority: 20}
+
+	session.rounds = 1
+	session.evalNow = 100
+	changed := session.setDerivedSupport(rule, Fact{
+		Type: "RiskFlag",
+		Key:  "shared",
+		Fields: map[string]any{
+			"level": "high",
+		},
+	})
+	if !changed {
+		t.Fatal("expected first support insertion to change working memory")
+	}
+	first, ok := session.currentFact("RiskFlag", "shared")
+	if !ok {
+		t.Fatal("expected derived fact after first support")
+	}
+	if first.AssertedRound != 1 || first.AssertedAt != 100 {
+		t.Fatalf("expected first assertion metadata to be recorded, got %+v", first)
+	}
+
+	session.clearDirtyFacts()
+	session.rounds = 2
+	session.evalNow = 200
+	changed = session.setDerivedSupport(rule, Fact{
+		Type: "RiskFlag",
+		Key:  "shared",
+		Fields: map[string]any{
+			"level": "high",
+		},
+	})
+	if changed {
+		t.Fatal("expected unchanged support update to avoid a working-memory mutation")
+	}
+	second, ok := session.currentFact("RiskFlag", "shared")
+	if !ok {
+		t.Fatal("expected derived fact after repeated support")
+	}
+	if second.AssertedRound != 1 || second.AssertedAt != 100 {
+		t.Fatalf("expected assertion metadata to be preserved, got %+v", second)
+	}
+}
+
+func TestRecomputeFactUpdatesDerivedByWithoutResettingAssertionMetadata(t *testing.T) {
+	session := NewSession(&Program{}, nil, nil, Options{})
+	session.facts["RiskFlag"] = map[string]Fact{
+		"shared": {
+			Type:          "RiskFlag",
+			Key:           "shared",
+			Fields:        map[string]any{"level": "high"},
+			DerivedBy:     []string{"AlphaSupport"},
+			AssertedRound: 3,
+			AssertedAt:    100,
+		},
+	}
+	session.addSupportRecord(supportRecord{
+		Instance: "alpha:shared",
+		Rule:     "AlphaSupport",
+		Priority: 20,
+		Fact: Fact{
+			Type:          "RiskFlag",
+			Key:           "shared",
+			Fields:        map[string]any{"level": "high"},
+			AssertedRound: 3,
+			AssertedAt:    100,
+		},
+	})
+	session.addSupportRecord(supportRecord{
+		Instance: "beta:shared",
+		Rule:     "BetaSupport",
+		Priority: 10,
+		Fact: Fact{
+			Type:          "RiskFlag",
+			Key:           "shared",
+			Fields:        map[string]any{"level": "high"},
+			AssertedRound: 4,
+			AssertedAt:    200,
+		},
+	})
+	session.clearDirtyFacts()
+
+	changed := session.recomputeFact("RiskFlag", "shared", "AlphaSupport")
+	if changed {
+		t.Fatal("expected provenance-only recompute to avoid a working-memory mutation")
+	}
+	current, ok := session.currentFact("RiskFlag", "shared")
+	if !ok {
+		t.Fatal("expected recomputed derived fact")
+	}
+	if current.AssertedRound != 3 || current.AssertedAt != 100 {
+		t.Fatalf("expected assertion metadata to be preserved, got %+v", current)
+	}
+	if len(current.DerivedBy) != 2 || current.DerivedBy[0] != "AlphaSupport" || current.DerivedBy[1] != "BetaSupport" {
+		t.Fatalf("expected updated support provenance, got %+v", current)
+	}
+	if len(session.dirtyFacts) != 0 {
+		t.Fatalf("expected provenance-only recompute to leave dirty facts empty, got %+v", session.dirtyFacts)
+	}
+}
+
 func mustManualProgram(t *testing.T, source []byte, rules []Rule) *Program {
 	t.Helper()
 
