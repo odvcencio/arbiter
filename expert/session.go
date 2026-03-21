@@ -375,42 +375,27 @@ func (s *Session) DeltaSince(mark Checkpoint) Result {
 
 // Run evaluates the expert program until it reaches a fixed point or a guardrail.
 func (s *Session) Run(ctx context.Context) (Result, error) {
-	if s == nil || s.program == nil {
-		return Result{}, fmt.Errorf("nil expert program")
+	if err := s.validateRunState(); err != nil {
+		return Result{}, err
 	}
-	if s.program.ruleset == nil || len(s.program.rules) == 0 {
+	if s.hasNoRunnableRules() {
 		s.stopReason = StopQuiescent
 		return s.snapshot(), nil
 	}
-	nextNow := s.currentUnix()
-	forceFullEval := nextNow != s.evalNow || s.contextDirty
-	s.evalNow = nextNow
-	if s.rounds > 0 && s.stopReason == StopQuiescent && len(s.dirtyFacts) == 0 && !forceFullEval {
+	forceFullEval := s.prepareRun()
+	if s.shouldReuseQuiescentSnapshot(forceFullEval) {
 		return s.snapshot(), nil
 	}
 
 	for round := 1; round <= s.opts.MaxRounds; round++ {
-		if err := ctx.Err(); err != nil {
-			s.stopReason = StopContextCancelled
-			return s.snapshot(), err
-		}
-		s.rounds++
-		roundMutationsStart := s.mutations
-		forceStableRound := s.stablePending && s.rounds > 1 && s.lastRoundMutations == 0
-		firedGroups := make(map[string]struct{})
-
-		firstPass := s.rounds == 1 || (forceFullEval && round == 1)
-		roundResult, err := s.executeRound(ctx, round, firstPass, firedGroups)
+		stopped, cancelled, err := s.runLoopRound(ctx, round, forceFullEval)
 		if err != nil {
+			if cancelled {
+				return s.snapshot(), err
+			}
 			return Result{}, err
 		}
-		if roundResult.stopped {
-			return s.snapshot(), nil
-		}
-
-		s.lastRoundMutations = s.mutations - roundMutationsStart
-
-		if s.shouldStopAfterRound(roundResult, forceStableRound) {
+		if stopped {
 			return s.snapshot(), nil
 		}
 	}
@@ -418,6 +403,55 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 	s.stopReason = StopMaxRounds
 	s.contextDirty = false
 	return s.snapshot(), nil
+}
+
+func (s *Session) validateRunState() error {
+	if s == nil || s.program == nil {
+		return fmt.Errorf("nil expert program")
+	}
+	return nil
+}
+
+func (s *Session) hasNoRunnableRules() bool {
+	return s.program.ruleset == nil || len(s.program.rules) == 0
+}
+
+func (s *Session) prepareRun() bool {
+	nextNow := s.currentUnix()
+	forceFullEval := nextNow != s.evalNow || s.contextDirty
+	s.evalNow = nextNow
+	return forceFullEval
+}
+
+func (s *Session) shouldReuseQuiescentSnapshot(forceFullEval bool) bool {
+	return s.rounds > 0 && s.stopReason == StopQuiescent && len(s.dirtyFacts) == 0 && !forceFullEval
+}
+
+func (s *Session) runLoopRound(ctx context.Context, round int, forceFullEval bool) (bool, bool, error) {
+	if err := ctx.Err(); err != nil {
+		s.stopReason = StopContextCancelled
+		return true, true, err
+	}
+
+	s.rounds++
+	roundMutationsStart := s.mutations
+	forceStableRound := s.stablePending && s.rounds > 1 && s.lastRoundMutations == 0
+	firedGroups := make(map[string]struct{})
+	firstPass := s.rounds == 1 || (forceFullEval && round == 1)
+
+	roundResult, err := s.executeRound(ctx, round, firstPass, firedGroups)
+	if err != nil {
+		return false, false, err
+	}
+	if roundResult.stopped {
+		return true, false, nil
+	}
+
+	s.lastRoundMutations = s.mutations - roundMutationsStart
+	if s.shouldStopAfterRound(roundResult, forceStableRound) {
+		return true, false, nil
+	}
+	return false, false, nil
 }
 
 type roundExecution struct {
