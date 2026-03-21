@@ -491,41 +491,15 @@ func (s *Session) applyRoundMatches(ctx context.Context, round int, matched []vm
 		if !ok {
 			return false, active, false, fmt.Errorf("missing expert rule metadata for %q", match.Name)
 		}
-		if rule.Group != "" {
-			if _, blocked := firedGroups[rule.Group]; blocked {
-				continue
-			}
+		if s.groupAlreadyFired(rule, firedGroups) {
+			continue
 		}
 
-		switch rule.Kind {
-		case ActionAssert:
-			changed, _, instance, err := s.applyAssert(round, rule, match)
-			if err != nil {
-				return false, active, false, err
-			}
-			active.asserts[instance] = struct{}{}
-			mutated = mutated || changed
-		case ActionEmit:
-			if _, err := s.applyEmit(round, rule, match); err != nil {
-				return false, active, false, err
-			}
-		case ActionRetract:
-			changed, _, instance, err := s.applyRetract(round, rule, match)
-			if err != nil {
-				return false, active, false, err
-			}
-			active.retracts[instance] = struct{}{}
-			mutated = mutated || changed
-		case ActionModify:
-			changed, _, instance, err := s.applyModify(round, rule, match)
-			if err != nil {
-				return false, active, false, err
-			}
-			active.modifies[instance] = struct{}{}
-			mutated = mutated || changed
-		default:
-			return false, active, false, fmt.Errorf("unsupported expert action kind %q", rule.Kind)
+		changed, err := s.applyMatchedRule(round, rule, match, active)
+		if err != nil {
+			return false, active, false, err
 		}
+		mutated = mutated || changed
 		if rule.Group != "" {
 			firedGroups[rule.Group] = struct{}{}
 		}
@@ -536,6 +510,45 @@ func (s *Session) applyRoundMatches(ctx context.Context, round int, matched []vm
 	}
 
 	return mutated, active, false, nil
+}
+
+func (s *Session) groupAlreadyFired(rule Rule, firedGroups map[string]struct{}) bool {
+	if rule.Group == "" {
+		return false
+	}
+	_, blocked := firedGroups[rule.Group]
+	return blocked
+}
+
+func (s *Session) applyMatchedRule(round int, rule Rule, match vm.MatchedRule, active activeRoundMutations) (bool, error) {
+	switch rule.Kind {
+	case ActionAssert:
+		changed, _, instance, err := s.applyAssert(round, rule, match)
+		if err != nil {
+			return false, err
+		}
+		active.asserts[instance] = struct{}{}
+		return changed, nil
+	case ActionEmit:
+		_, err := s.applyEmit(round, rule, match)
+		return false, err
+	case ActionRetract:
+		changed, _, instance, err := s.applyRetract(round, rule, match)
+		if err != nil {
+			return false, err
+		}
+		active.retracts[instance] = struct{}{}
+		return changed, nil
+	case ActionModify:
+		changed, _, instance, err := s.applyModify(round, rule, match)
+		if err != nil {
+			return false, err
+		}
+		active.modifies[instance] = struct{}{}
+		return changed, nil
+	default:
+		return false, fmt.Errorf("unsupported expert action kind %q", rule.Kind)
+	}
 }
 
 func (s *Session) clearInactiveEvaluatedMutations(evaluated map[string]struct{}, active activeRoundMutations) bool {
@@ -1214,72 +1227,105 @@ func (s *Session) removeModification(record modifyRecord) {
 
 func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}) ([]vm.MatchedRule, map[string]struct{}, map[string]struct{}, bool, error) {
 	s.refreshContextView(firstPass, dirtyFacts)
-	rc := govern.NewRequestCache(s.program.segments, s.evalCtx)
-	for name, matched := range s.ruleResults {
-		rc.RecordRuleResult(name, matched)
-	}
-
-	current := make(map[string]bool, len(s.ruleResults)+len(s.program.rules))
-	for name, matched := range s.ruleResults {
-		current[name] = matched
-	}
-	ruleChanges := make(map[string]struct{})
-	matched := make([]vm.MatchedRule, 0)
-	evaluated := make(map[string]struct{})
-	stableDeferred := s.stablePending && s.lastRoundMutations > 0
-	forceStableRound := s.stablePending && s.rounds > 1 && s.lastRoundMutations == 0
+	state := s.newRoundState()
 
 	for i, header := range s.program.ruleset.Rules {
 		rule := s.program.rules[i]
-		shouldEval := firstPass || s.shouldEvaluate(rule, dirtyFacts, dirtySources, ruleChanges)
-		if rule.Stable && forceStableRound {
-			shouldEval = true
-		}
-		if !shouldEval {
+		if !s.shouldRunRuleThisRound(rule, firstPass, dirtyFacts, dirtySources, state.ruleChanges, state.forceStableRound) {
 			continue
 		}
 		if rule.Stable && (s.rounds == 1 || s.lastRoundMutations > 0) {
 			s.stablePending = true
-			stableDeferred = true
+			state.stableDeferred = true
 			continue
 		}
-		evaluated[rule.Name] = struct{}{}
+		state.evaluated[rule.Name] = struct{}{}
 
-		dc := s.dc
-		ruleRC := rc
-		tempCtx, tempDC, ok, err := s.evalContextIgnoringOwnMutation(rule)
+		dc, ruleRC, err := s.ruleEvalInputs(rule, state.current, state.rc)
 		if err != nil {
 			return nil, nil, nil, false, err
 		}
-		if ok {
-			dc = tempDC
-			ruleRC = govern.NewRequestCache(s.program.segments, tempCtx)
-			for name, matched := range current {
-				ruleRC.RecordRuleResult(name, matched)
-			}
-		}
-
-		result, mr, err := s.evalRule(rule, header, s.evaluator, dc, ruleRC)
+		result, matches, err := s.evaluateRuleMatches(rule, header, dc, ruleRC)
 		if err != nil {
 			return nil, nil, nil, false, err
 		}
-		prev := current[rule.Name]
-		current[rule.Name] = result
+		prev := state.current[rule.Name]
+		state.current[rule.Name] = result
 		if prev != result || firstPass {
-			ruleChanges[rule.Name] = struct{}{}
+			state.ruleChanges[rule.Name] = struct{}{}
 		}
-		rc.RecordRuleResult(rule.Name, result)
-		if result && rule.PerFact {
-			// per_fact: collect all matching facts and emit one match per fact.
-			matches := s.evalPerFact(rule, header, s.evaluator, dc, ruleRC)
-			matched = append(matched, matches...)
-		} else if result {
-			matched = append(matched, mr)
-		}
+		state.rc.RecordRuleResult(rule.Name, result)
+		state.matched = append(state.matched, matches...)
 	}
 
-	s.ruleResults = current
-	return matched, ruleChanges, evaluated, stableDeferred, nil
+	s.ruleResults = state.current
+	return state.matched, state.ruleChanges, state.evaluated, state.stableDeferred, nil
+}
+
+type roundState struct {
+	rc               *govern.RequestCache
+	current          map[string]bool
+	ruleChanges      map[string]struct{}
+	matched          []vm.MatchedRule
+	evaluated        map[string]struct{}
+	stableDeferred   bool
+	forceStableRound bool
+}
+
+func (s *Session) newRoundState() roundState {
+	rc := govern.NewRequestCache(s.program.segments, s.evalCtx)
+	current := make(map[string]bool, len(s.ruleResults)+len(s.program.rules))
+	for name, matched := range s.ruleResults {
+		rc.RecordRuleResult(name, matched)
+		current[name] = matched
+	}
+	return roundState{
+		rc:               rc,
+		current:          current,
+		ruleChanges:      make(map[string]struct{}),
+		matched:          make([]vm.MatchedRule, 0),
+		evaluated:        make(map[string]struct{}),
+		stableDeferred:   s.stablePending && s.lastRoundMutations > 0,
+		forceStableRound: s.stablePending && s.rounds > 1 && s.lastRoundMutations == 0,
+	}
+}
+
+func (s *Session) shouldRunRuleThisRound(rule Rule, firstPass bool, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}, ruleChanges map[string]struct{}, forceStableRound bool) bool {
+	shouldEval := firstPass || s.shouldEvaluate(rule, dirtyFacts, dirtySources, ruleChanges)
+	if rule.Stable && forceStableRound {
+		shouldEval = true
+	}
+	return shouldEval
+}
+
+func (s *Session) ruleEvalInputs(rule Rule, current map[string]bool, rc *govern.RequestCache) (vm.DataContext, *govern.RequestCache, error) {
+	dc := s.dc
+	ruleRC := rc
+
+	tempCtx, tempDC, ok, err := s.evalContextIgnoringOwnMutation(rule)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !ok {
+		return dc, ruleRC, nil
+	}
+
+	ruleRC = govern.NewRequestCache(s.program.segments, tempCtx)
+	for name, matched := range current {
+		ruleRC.RecordRuleResult(name, matched)
+	}
+	return tempDC, ruleRC, nil
+}
+
+func (s *Session) evaluateRuleMatches(rule Rule, header compiler.RuleHeader, dc vm.DataContext, rc *govern.RequestCache) (bool, []vm.MatchedRule, error) {
+	result, mr, err := s.evalRule(rule, header, s.evaluator, dc, rc)
+	if err != nil || !result {
+		return result, nil, err
+	}
+	if rule.PerFact {
+		return true, s.evalPerFact(rule, header, s.evaluator, dc, rc), nil
+	}
+	return true, []vm.MatchedRule{mr}, nil
 }
 
 // evalPerFact iterates all facts in the rule's first fact dependency and
@@ -1374,26 +1420,11 @@ func (s *Session) evalRule(rule Rule, header compiler.RuleHeader, evaluator *vm.
 }
 
 func (s *Session) shouldEvaluate(rule Rule, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}, dirtyRules map[string]struct{}) bool {
-	if len(rule.Prereqs) == 0 && len(rule.FactDeps) == 0 {
+	if !ruleHasDependencies(rule) {
 		return false
 	}
-	prereqDirty := false
-	for _, prereq := range rule.Prereqs {
-		if _, ok := dirtyRules[prereq]; ok {
-			prereqDirty = true
-			break
-		}
-	}
-	factDirty := false
-	selfOnly := true
-	for _, factType := range rule.FactDeps {
-		if _, ok := dirtyFacts[factType]; ok {
-			factDirty = true
-			if !changedOnlyByRule(dirtySources[factType], rule.Name) {
-				selfOnly = false
-			}
-		}
-	}
+	prereqDirty := hasDirtyPrereq(rule.Prereqs, dirtyRules)
+	factDirty, selfOnly := dirtyFactDeps(rule, dirtyFacts, dirtySources)
 	if !prereqDirty && !factDirty {
 		return false
 	}
@@ -1404,6 +1435,34 @@ func (s *Session) shouldEvaluate(rule Rule, dirtyFacts map[string]struct{}, dirt
 		return true
 	}
 	return !selfOnly
+}
+
+func ruleHasDependencies(rule Rule) bool {
+	return len(rule.Prereqs) > 0 || len(rule.FactDeps) > 0
+}
+
+func hasDirtyPrereq(prereqs []string, dirtyRules map[string]struct{}) bool {
+	for _, prereq := range prereqs {
+		if _, ok := dirtyRules[prereq]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func dirtyFactDeps(rule Rule, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}) (bool, bool) {
+	factDirty := false
+	selfOnly := true
+	for _, factType := range rule.FactDeps {
+		if _, ok := dirtyFacts[factType]; !ok {
+			continue
+		}
+		factDirty = true
+		if !changedOnlyByRule(dirtySources[factType], rule.Name) {
+			selfOnly = false
+		}
+	}
+	return factDirty, selfOnly
 }
 
 func (s *Session) hasPendingWork(dirtyRules map[string]struct{}) bool {

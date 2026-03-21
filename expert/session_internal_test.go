@@ -315,6 +315,71 @@ func TestSyncFactsRejectsDuplicateInput(t *testing.T) {
 	}
 }
 
+func TestShouldEvaluateSkipsSelfOnlyNoLoopFactChanges(t *testing.T) {
+	session := &Session{}
+	rule := Rule{
+		Name:     "RefreshQualifiedLead",
+		FactDeps: []string{"Lead"},
+		NoLoop:   true,
+	}
+
+	shouldEval := session.shouldEvaluate(
+		rule,
+		map[string]struct{}{"Lead": {}},
+		map[string]map[string]struct{}{
+			"Lead": {"RefreshQualifiedLead": {}},
+		},
+		nil,
+	)
+	if shouldEval {
+		t.Fatal("expected no_loop rule to skip self-only fact changes")
+	}
+}
+
+func TestShouldEvaluateAllowsExternalFactChangesForNoLoopRules(t *testing.T) {
+	session := &Session{}
+	rule := Rule{
+		Name:     "RefreshQualifiedLead",
+		FactDeps: []string{"Lead"},
+		NoLoop:   true,
+	}
+
+	shouldEval := session.shouldEvaluate(
+		rule,
+		map[string]struct{}{"Lead": {}},
+		map[string]map[string]struct{}{
+			"Lead": {
+				"RefreshQualifiedLead": {},
+				"SyncFacts":            {},
+			},
+		},
+		nil,
+	)
+	if !shouldEval {
+		t.Fatal("expected no_loop rule to reevaluate when another source dirties the fact dependency")
+	}
+}
+
+func TestShouldEvaluateAllowsDirtyPrereqsEvenForNoLoopRules(t *testing.T) {
+	session := &Session{}
+	rule := Rule{
+		Name:     "EscalateLead",
+		Prereqs:  []string{"QualifiedLead"},
+		FactDeps: []string{"Lead"},
+		NoLoop:   true,
+	}
+
+	shouldEval := session.shouldEvaluate(
+		rule,
+		nil,
+		nil,
+		map[string]struct{}{"QualifiedLead": {}},
+	)
+	if !shouldEval {
+		t.Fatal("expected dirty prereq to force reevaluation for no_loop rule")
+	}
+}
+
 func mustManualProgram(t *testing.T, source []byte, rules []Rule) *Program {
 	t.Helper()
 
