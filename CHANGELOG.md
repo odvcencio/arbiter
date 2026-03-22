@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.6.0
+
+### Strategy
+
+- **Native `strategy` primitive** — Arbiter now supports `strategy` declarations for deterministic, stateless governed routing over recognized decision shapes in current facts and state.
+- **Recognition plus selection semantics** — strategies recognize one of a closed set of declared state shapes, require an explicit fallback, and select exactly one governed path with typed results and explainable traces.
+- **Shared runtime, not a parallel VM** — strategy candidates compile into synthetic governed rulesets so the primitive reuses the existing compiler, governance machinery, and evaluation runtime instead of introducing a separate execution model.
+
+### Language And Tooling
+
+- **End-to-end language support** — grammar, lowering, validation, syntax highlighting, and package APIs now understand strategies as a first-class language feature.
+- **Shared compile/eval surface** — strategy compilation is now integrated into the common compile path, with root helpers for loading and evaluating compiled strategies alongside the rest of the bundle.
+- **CLI and introspection support** — `arbiter strategy` evaluates a named strategy directly, and `arbiter explore` summaries now include strategy declarations and candidate structure.
+- **Semantics hardening** — validation and tests now lock in required `else` behavior, duplicate-label rejection, kill-switch handling, malformed `else` defense-in-depth checks, and stable trace structure.
+
+### Product Direction
+
+- **`emit` package removed** — the Rego, CEL, and Drools emitters are gone, and the `arbiter emit` CLI path has been removed to keep the system focused on native Arbiter execution rather than downstream emitter maintenance.
+- **Version bump to `0.6.0`** — the published SDK and editor package versions now align on `0.6.0` for the strategy release.
+
+---
+
 ## v0.5.0
 
 ### Scientific Rigor
