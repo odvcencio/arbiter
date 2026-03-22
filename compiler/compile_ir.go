@@ -2,9 +2,12 @@ package compiler
 
 import (
 	"fmt"
+	"time"
 
+	dec "github.com/odvcencio/arbiter/decimal"
 	"github.com/odvcencio/arbiter/intern"
 	"github.com/odvcencio/arbiter/ir"
+	"github.com/odvcencio/arbiter/units"
 )
 
 // CompileIR emits a CompiledRuleset from a lowered Arbiter IR program.
@@ -152,6 +155,33 @@ func (c *irCompiler) compileExpr(code []byte, exprID ir.ExprID) []byte {
 		return Emit(code, OpLoadStr, 0, c.pool.String(expr.String))
 	case ir.ExprNumberLit:
 		return Emit(code, OpLoadNum, 0, c.pool.Number(expr.Number))
+	case ir.ExprDecimalLit:
+		value, err := dec.Parse(expr.String, expr.Unit)
+		if err != nil {
+			if c.err == nil {
+				c.err = err
+			}
+			return Emit(code, OpLoadNull, 0, 0)
+		}
+		return Emit(code, OpLoadDec, 0, c.pool.Decimal(value))
+	case ir.ExprQuantityLit:
+		n, _, err := units.Normalize(expr.Number, expr.Unit)
+		if err != nil {
+			if c.err == nil {
+				c.err = err
+			}
+			return Emit(code, OpLoadNull, 0, 0)
+		}
+		return Emit(code, OpLoadNum, 0, c.pool.Number(n))
+	case ir.ExprTimestampLit:
+		n, err := compileTimestampLiteral(expr.String)
+		if err != nil {
+			if c.err == nil {
+				c.err = err
+			}
+			return Emit(code, OpLoadNull, 0, 0)
+		}
+		return Emit(code, OpLoadNum, 0, c.pool.Number(n))
 	case ir.ExprBoolLit:
 		arg := uint16(0)
 		if expr.Bool {
@@ -180,6 +210,8 @@ func (c *irCompiler) compileExpr(code []byte, exprID ir.ExprID) []byte {
 		return c.compileQuantifier(code, expr)
 	case ir.ExprAggregate:
 		return c.compileAggregate(code, expr)
+	case ir.ExprBuiltinCall:
+		return c.compileBuiltin(code, expr)
 	default:
 		return Emit(code, OpLoadNull, 0, 0)
 	}
@@ -224,6 +256,24 @@ func (c *irCompiler) exprToPoolValue(exprID ir.ExprID) intern.PoolValue {
 	switch expr.Kind {
 	case ir.ExprNumberLit:
 		return intern.PoolValue{Typ: intern.TypeNumber, Num: expr.Number}
+	case ir.ExprDecimalLit:
+		value, err := dec.Parse(expr.String, expr.Unit)
+		if err != nil {
+			return intern.PoolValue{Typ: intern.TypeNull}
+		}
+		return intern.PoolValue{Typ: intern.TypeDecimal, Dec: c.pool.Decimal(value)}
+	case ir.ExprQuantityLit:
+		n, _, err := units.Normalize(expr.Number, expr.Unit)
+		if err != nil {
+			return intern.PoolValue{Typ: intern.TypeNull}
+		}
+		return intern.PoolValue{Typ: intern.TypeNumber, Num: n}
+	case ir.ExprTimestampLit:
+		n, err := compileTimestampLiteral(expr.String)
+		if err != nil {
+			return intern.PoolValue{Typ: intern.TypeNull}
+		}
+		return intern.PoolValue{Typ: intern.TypeNumber, Num: n}
 	case ir.ExprStringLit:
 		return intern.PoolValue{Typ: intern.TypeString, Str: c.pool.String(expr.String)}
 	case ir.ExprBoolLit:
@@ -252,6 +302,61 @@ func (c *irCompiler) exprToPoolValue(exprID ir.ExprID) intern.PoolValue {
 	default:
 		return intern.PoolValue{Typ: intern.TypeNull}
 	}
+}
+
+func (c *irCompiler) compileBuiltin(code []byte, expr *ir.Expr) []byte {
+	switch expr.FuncName {
+	case "now":
+		return Emit(code, OpLoadVar, 0, c.pool.String("__now"))
+	case "abs":
+		if len(expr.Args) != 1 {
+			return Emit(code, OpLoadNull, 0, 0)
+		}
+		code = c.compileExpr(code, expr.Args[0])
+		return Emit(code, OpAbs, 0, 0)
+	case "min":
+		if len(expr.Args) != 2 {
+			return Emit(code, OpLoadNull, 0, 0)
+		}
+		code = c.compileExpr(code, expr.Args[0])
+		code = c.compileExpr(code, expr.Args[1])
+		return Emit(code, OpMin, 0, 0)
+	case "max":
+		if len(expr.Args) != 2 {
+			return Emit(code, OpLoadNull, 0, 0)
+		}
+		code = c.compileExpr(code, expr.Args[0])
+		code = c.compileExpr(code, expr.Args[1])
+		return Emit(code, OpMax, 0, 0)
+	case "round":
+		if len(expr.Args) != 1 {
+			return Emit(code, OpLoadNull, 0, 0)
+		}
+		code = c.compileExpr(code, expr.Args[0])
+		return Emit(code, OpRound, 0, 0)
+	case "floor":
+		if len(expr.Args) != 1 {
+			return Emit(code, OpLoadNull, 0, 0)
+		}
+		code = c.compileExpr(code, expr.Args[0])
+		return Emit(code, OpFloor, 0, 0)
+	case "ceil":
+		if len(expr.Args) != 1 {
+			return Emit(code, OpLoadNull, 0, 0)
+		}
+		code = c.compileExpr(code, expr.Args[0])
+		return Emit(code, OpCeil, 0, 0)
+	default:
+		return Emit(code, OpLoadNull, 0, 0)
+	}
+}
+
+func compileTimestampLiteral(text string) (float64, error) {
+	ts, err := time.Parse(time.RFC3339Nano, text)
+	if err != nil {
+		return 0, fmt.Errorf("invalid timestamp literal %q", text)
+	}
+	return float64(ts.UTC().Unix()), nil
 }
 
 func (c *irCompiler) compileBinary(code []byte, expr *ir.Expr) []byte {

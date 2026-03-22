@@ -3,12 +3,14 @@ package vm
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/odvcencio/arbiter/compiler"
+	dec "github.com/odvcencio/arbiter/decimal"
 	"github.com/odvcencio/arbiter/intern"
 )
 
@@ -291,8 +293,19 @@ func (vm *VM) valueToAny(v Value) any {
 		return vm.poolListToAny(v.ListIdx, v.ListLen)
 	case TypeObject:
 		return v.Any
+	case TypeDecimal:
+		if value, ok := v.Any.(dec.Value); ok {
+			return value
+		}
+		return nil
 	default:
 		return nil
+	}
+}
+
+func (vm *VM) setErr(err error) {
+	if err != nil && vm.err == nil {
+		vm.err = err
 	}
 }
 
@@ -313,6 +326,10 @@ func (vm *VM) valEqual(a, b Value) bool {
 			return true
 		}
 		return vm.strPool.Get(a.Str) == vm.strPool.Get(b.Str)
+	case TypeDecimal:
+		left, lok := decimalFromValue(a)
+		right, rok := decimalFromValue(b)
+		return lok && rok && left.Equal(right)
 	default:
 		return false
 	}
@@ -476,6 +493,8 @@ func (vm *VM) poolValueToAny(item intern.PoolValue) any {
 		return vm.strPool.Get(item.Str)
 	case intern.TypeList:
 		return vm.poolListToAny(item.ListIdx, item.ListLen)
+	case intern.TypeDecimal:
+		return vm.pool.GetDecimal(item.Dec)
 	default:
 		return nil
 	}
@@ -493,6 +512,8 @@ func (vm *VM) poolValueToValue(item intern.PoolValue) Value {
 		return StrVal(item.Str)
 	case intern.TypeList:
 		return ListVal(item.ListIdx, item.ListLen)
+	case intern.TypeDecimal:
+		return DecimalVal(vm.pool.GetDecimal(item.Dec))
 	default:
 		return NullVal()
 	}
@@ -554,6 +575,119 @@ func (vm *VM) valueToString(v Value) string {
 	default:
 		return fmt.Sprint(vm.valueToAny(v))
 	}
+}
+
+func decimalFromValue(v Value) (dec.Value, bool) {
+	if v.Typ != TypeDecimal {
+		return dec.Value{}, false
+	}
+	value, ok := v.Any.(dec.Value)
+	return value, ok
+}
+
+func (vm *VM) orderedCompare(a, b Value) (int, error) {
+	switch {
+	case a.Typ == TypeDecimal || b.Typ == TypeDecimal:
+		left, lok := decimalFromValue(a)
+		right, rok := decimalFromValue(b)
+		if !lok || !rok {
+			return 0, fmt.Errorf("ordered comparison requires matching decimal operands")
+		}
+		return left.Cmp(right)
+	case a.Typ == TypeString && b.Typ == TypeString:
+		return strings.Compare(vm.toStr(a), vm.toStr(b)), nil
+	default:
+		switch {
+		case vm.toNum(a) < vm.toNum(b):
+			return -1, nil
+		case vm.toNum(a) > vm.toNum(b):
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	}
+}
+
+func (vm *VM) addValues(a, b Value) (Value, error) {
+	if a.Typ == TypeString || b.Typ == TypeString {
+		return StrVal(vm.strPool.Intern(vm.valueToString(a) + vm.valueToString(b))), nil
+	}
+	if a.Typ == TypeDecimal || b.Typ == TypeDecimal {
+		left, lok := decimalFromValue(a)
+		right, rok := decimalFromValue(b)
+		if !lok || !rok {
+			return NullVal(), fmt.Errorf("operator + expects matching decimal operands")
+		}
+		sum, err := left.Add(right)
+		if err != nil {
+			return NullVal(), err
+		}
+		return DecimalVal(sum), nil
+	}
+	return NumVal(vm.toNum(a) + vm.toNum(b)), nil
+}
+
+func (vm *VM) subValues(a, b Value) (Value, error) {
+	if a.Typ == TypeDecimal || b.Typ == TypeDecimal {
+		left, lok := decimalFromValue(a)
+		right, rok := decimalFromValue(b)
+		if !lok || !rok {
+			return NullVal(), fmt.Errorf("operator - expects matching decimal operands")
+		}
+		diff, err := left.Sub(right)
+		if err != nil {
+			return NullVal(), err
+		}
+		return DecimalVal(diff), nil
+	}
+	return NumVal(vm.toNum(a) - vm.toNum(b)), nil
+}
+
+func (vm *VM) absValue(v Value) (Value, error) {
+	if v.Typ == TypeDecimal {
+		value, ok := decimalFromValue(v)
+		if !ok {
+			return NullVal(), fmt.Errorf("builtin abs expects a decimal operand")
+		}
+		return DecimalVal(value.Abs()), nil
+	}
+	return NumVal(math.Abs(vm.toNum(v))), nil
+}
+
+func (vm *VM) minValue(a, b Value) (Value, error) {
+	cmp, err := vm.orderedCompare(a, b)
+	if err != nil {
+		return NullVal(), err
+	}
+	if cmp <= 0 {
+		return a, nil
+	}
+	return b, nil
+}
+
+func (vm *VM) maxValue(a, b Value) (Value, error) {
+	cmp, err := vm.orderedCompare(a, b)
+	if err != nil {
+		return NullVal(), err
+	}
+	if cmp >= 0 {
+		return a, nil
+	}
+	return b, nil
+}
+
+func (vm *VM) betweenValues(val, low, high Value, includeLow, includeHigh bool) (bool, error) {
+	lowCmp, err := vm.orderedCompare(val, low)
+	if err != nil {
+		return false, err
+	}
+	highCmp, err := vm.orderedCompare(val, high)
+	if err != nil {
+		return false, err
+	}
+	lowOK := lowCmp > 0 || (includeLow && lowCmp == 0)
+	highOK := highCmp < 0 || (includeHigh && highCmp == 0)
+	return lowOK && highOK, nil
 }
 
 func cloneLocals(src map[string]any) map[string]any {

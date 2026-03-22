@@ -139,3 +139,122 @@ rule Shadowed {
 		t.Fatal("expected floor to lower as a local ref")
 	}
 }
+
+func TestLowerCollectsSchemas(t *testing.T) {
+	program := lowerSource(t, `
+fact PlantStress {
+		temperature: number<temperature>
+		note?: string
+}
+
+outcome WaterAction {
+		zone: string
+		liters: number
+}
+`)
+
+	if got := len(program.FactSchemas); got != 1 {
+		t.Fatalf("len(FactSchemas) = %d, want 1", got)
+	}
+	if got := len(program.OutcomeSchemas); got != 1 {
+		t.Fatalf("len(OutcomeSchemas) = %d, want 1", got)
+	}
+
+	fact := program.FactSchemas[0]
+	if fact.Name != "PlantStress" {
+		t.Fatalf("fact.Name = %q, want PlantStress", fact.Name)
+	}
+	if len(fact.Fields) != 2 {
+		t.Fatalf("len(fact.Fields) = %d, want 2", len(fact.Fields))
+	}
+	if fact.Fields[0].Name != "temperature" || fact.Fields[0].Type.Base != "number" || fact.Fields[0].Type.Dimension != "temperature" || !fact.Fields[0].Required {
+		t.Fatalf("unexpected first fact field: %+v", fact.Fields[0])
+	}
+	if fact.Fields[1].Name != "note" || fact.Fields[1].Type.Base != "string" || fact.Fields[1].Required {
+		t.Fatalf("unexpected optional fact field: %+v", fact.Fields[1])
+	}
+
+	outcome := program.OutcomeSchemas[0]
+	if outcome.Name != "WaterAction" {
+		t.Fatalf("outcome.Name = %q, want WaterAction", outcome.Name)
+	}
+	if len(outcome.Fields) != 2 {
+		t.Fatalf("len(outcome.Fields) = %d, want 2", len(outcome.Fields))
+	}
+	if outcome.Fields[1].Name != "liters" || outcome.Fields[1].Type.Base != "number" {
+		t.Fatalf("unexpected outcome field: %+v", outcome.Fields[1])
+	}
+}
+
+func TestLowerQuantityLiteral(t *testing.T) {
+	program := lowerSource(t, `rule HeatStress { when { reading.temperature > 28 C } then Alert {} }`)
+	found := false
+	for _, expr := range program.Exprs {
+		if expr.Kind == ir.ExprQuantityLit {
+			found = true
+			if expr.Number != 28 || expr.Unit != "C" {
+				t.Fatalf("unexpected quantity literal: %+v", expr)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected quantity literal in lowered expressions")
+	}
+}
+
+func TestLowerBuiltinCallAndTimestampLiteral(t *testing.T) {
+	program := lowerSource(t, `rule T { when { now() > 2026-01-01T00:00:00Z and abs(sensor.delta) > 5 } then A {} }`)
+	var sawNow, sawAbs, sawTimestamp bool
+	for _, expr := range program.Exprs {
+		switch expr.Kind {
+		case ir.ExprBuiltinCall:
+			if expr.FuncName == "now" {
+				sawNow = true
+			}
+			if expr.FuncName == "abs" {
+				sawAbs = true
+			}
+		case ir.ExprTimestampLit:
+			if expr.String == "2026-01-01T00:00:00Z" {
+				sawTimestamp = true
+			}
+		}
+	}
+	if !sawNow || !sawAbs || !sawTimestamp {
+		t.Fatalf("expected now, abs, and timestamp literal in lowered expressions, got %+v", program.Exprs)
+	}
+}
+
+func TestLowerTemporalDurationLiteralInExpr(t *testing.T) {
+	program := lowerSource(t, `rule T { when { recorded + 5m > now() } then A {} }`)
+	for _, expr := range program.Exprs {
+		if expr.Kind == ir.ExprQuantityLit && expr.Unit == "min" && expr.Number == 5 {
+			return
+		}
+	}
+	t.Fatal("expected 5m to lower into a time quantity literal")
+}
+
+func TestLowerJoinExprDesugarsToNestedQuantifiers(t *testing.T) {
+	program := lowerSource(t, `expert rule T { when { join a: Sensor, b: Sensor on .zone { abs(a.temperature - b.temperature) > 5 C } } then emit Alert {} }`)
+	quantifiers := 0
+	selfExclusion := false
+	for _, expr := range program.Exprs {
+		if expr.Kind == ir.ExprQuantifier {
+			quantifiers++
+		}
+		if expr.Kind == ir.ExprBinary && expr.BinaryOp == ir.BinaryNeq {
+			left := program.Expr(expr.Left)
+			right := program.Expr(expr.Right)
+			if left != nil && right != nil && left.Path == "a.key" && right.Path == "b.key" {
+				selfExclusion = true
+			}
+		}
+	}
+	if quantifiers < 2 {
+		t.Fatalf("expected nested quantifiers from join lowering, got %d in %+v", quantifiers, program.Exprs)
+	}
+	if !selfExclusion {
+		t.Fatalf("expected self-join exclusion in lowered expressions, got %+v", program.Exprs)
+	}
+}

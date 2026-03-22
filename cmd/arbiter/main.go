@@ -13,6 +13,7 @@
 //	arbiter diff <base.arb> <candidate.arb> [--data '{...}' | --data-file contexts.json] [--key path] [--json] — compare governed outcomes
 //	arbiter replay <rules.arb> --audit decisions.jsonl [--request-id id] [--limit N] [--json] — replay audited rule decisions
 //	arbiter expert <file.arb> --envelope '{...}' [--facts '[...]'] — run one expert session
+//	arbiter test [file.test.arb] [--verbose] — run executable bundle specs
 //	arbiter import <file.json> [-o output.arb] — decompile Arishem JSON to .arb
 //	arbiter serve [--grpc :8081] [--audit-file decisions.jsonl] [--bundle-file bundles.json] [--overrides-file overrides.json] — start gRPC API
 package main
@@ -24,15 +25,18 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/odvcencio/arbiter"
 	arbiterv1 "github.com/odvcencio/arbiter/api/arbiter/v1"
+	"github.com/odvcencio/arbiter/arbtest"
 	"github.com/odvcencio/arbiter/audit"
 	"github.com/odvcencio/arbiter/decompile"
 	"github.com/odvcencio/arbiter/emit"
 	"github.com/odvcencio/arbiter/expert"
+	explorepkg "github.com/odvcencio/arbiter/explore"
 	"github.com/odvcencio/arbiter/flags"
 	"github.com/odvcencio/arbiter/grpcserver"
 	"github.com/odvcencio/arbiter/overrides"
@@ -40,7 +44,7 @@ import (
 )
 
 const (
-	commandList = "emit, check, compile, eval, diff, replay, expert, import, serve"
+	commandList = "emit, check, compile, eval, diff, replay, expert, test, explore, import, serve"
 	rootUsage   = "Usage: arbiter <command> <file>\nCommands: " + commandList
 )
 
@@ -56,6 +60,8 @@ var commandHandlers = map[string]func([]string) error{
 	"diff":    runDiff,
 	"replay":  runReplay,
 	"expert":  runExpert,
+	"test":    runTest,
+	"explore": runExplore,
 	"import":  runImport,
 	"serve":   runServe,
 }
@@ -223,6 +229,24 @@ func runExpert(args []string) error {
 	return expertCmd(args[0], envelopeJSON, factsJSON)
 }
 
+func runTest(args []string) error {
+	path := ""
+	verbose := false
+	for _, arg := range args {
+		switch arg {
+		case "--verbose":
+			verbose = true
+		default:
+			if path == "" {
+				path = arg
+				continue
+			}
+			return usageError("Usage: arbiter test [file.test.arb] [--verbose]")
+		}
+	}
+	return testCmd(path, verbose)
+}
+
 func runImport(args []string) error {
 	if len(args) < 1 {
 		return usageError("Usage: arbiter import <file.json> [-o output.arb]")
@@ -235,6 +259,14 @@ func runImport(args []string) error {
 		}
 	}
 	return importCmd(args[0], outPath)
+}
+
+func runExplore(args []string) error {
+	path := ""
+	if len(args) > 0 {
+		path = args[0]
+	}
+	return exploreCmd(path)
 }
 
 func runServe(args []string) error {
@@ -465,6 +497,91 @@ func expertCmd(path, envelopeJSON, factsJSON string) error {
 	blob, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal session result: %w", err)
+	}
+	fmt.Println(string(blob))
+	return nil
+}
+
+func testCmd(path string, verbose bool) error {
+	paths := []string(nil)
+	if path == "" {
+		files, err := filepath.Glob("*.test.arb")
+		if err != nil {
+			return fmt.Errorf("resolve tests: %w", err)
+		}
+		if len(files) == 0 {
+			return fmt.Errorf("test requires a .test.arb path when the current directory has no *.test.arb files")
+		}
+		paths = files
+	} else {
+		paths = append(paths, path)
+	}
+
+	totalPassed := 0
+	totalFailed := 0
+	for _, item := range paths {
+		result, err := arbtest.RunFile(item, arbtest.Options{Verbose: verbose})
+		if err != nil {
+			return fmt.Errorf("test %s: %w", item, err)
+		}
+		printTestResult(result)
+		totalPassed += result.Passed
+		totalFailed += result.Failed
+	}
+
+	fmt.Printf("test summary: %d passed, %d failed\n", totalPassed, totalFailed)
+	if totalFailed > 0 {
+		return fmt.Errorf("%d test cases failed", totalFailed)
+	}
+	return nil
+}
+
+func printTestResult(result *arbtest.FileResult) {
+	if result == nil {
+		return
+	}
+	fmt.Printf("%s: %d passed, %d failed\n", result.File, result.Passed, result.Failed)
+	for _, item := range result.Cases {
+		if !result.Verbose && item.Passed {
+			continue
+		}
+		status := "PASS"
+		if !item.Passed {
+			status = "FAIL"
+		}
+		fmt.Printf("  [%s] %s %q\n", status, item.Kind, item.Name)
+		for _, detail := range item.Details {
+			fmt.Printf("    %s\n", detail)
+		}
+		if item.Error != "" {
+			fmt.Printf("    error: %s\n", item.Error)
+		}
+	}
+}
+
+func exploreCmd(path string) error {
+	if path == "" {
+		files, err := filepath.Glob("*.arb")
+		if err != nil {
+			return fmt.Errorf("resolve bundle: %w", err)
+		}
+		switch len(files) {
+		case 0:
+			return fmt.Errorf("explore requires a bundle path when the current directory has no .arb files")
+		case 1:
+			path = files[0]
+		default:
+			return fmt.Errorf("explore requires a bundle path when the current directory has multiple .arb files")
+		}
+	}
+
+	summary, err := explorepkg.BuildSummaryFile(path)
+	if err != nil {
+		return fmt.Errorf("explore %s: %w", path, err)
+	}
+	blob, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal explore summary: %w", err)
 	}
 	fmt.Println(string(blob))
 	return nil

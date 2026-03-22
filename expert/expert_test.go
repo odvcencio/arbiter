@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	arbiter "github.com/odvcencio/arbiter"
+	dec "github.com/odvcencio/arbiter/decimal"
 	"github.com/odvcencio/arbiter/expert"
 )
 
@@ -68,6 +70,225 @@ expert rule BadModify {
 
 	if _, err := expert.Compile(src); err == nil {
 		t.Fatal("expected compile to reject modify without set block")
+	}
+}
+
+func TestSessionAssertRejectsSchemaTypeMismatch(t *testing.T) {
+	src := []byte(`
+fact RiskFlag {
+	level: string
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, nil, expert.Options{})
+	err = session.Assert(expert.Fact{
+		Type: "RiskFlag",
+		Key:  "risk-1",
+		Fields: map[string]any{
+			"level": 42,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected schema mismatch from Assert")
+	}
+	if !strings.Contains(err.Error(), `field "level": expected string`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSessionRuntimeRejectsDynamicOutcomeSchemaMismatch(t *testing.T) {
+	src := []byte(`
+outcome ManualReview {
+	queue: string
+}
+
+expert rule RouteManualReview {
+	when { true }
+	then emit ManualReview {
+		queue: review.queue,
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, map[string]any{
+		"review": map[string]any{
+			"queue": 42,
+		},
+	}, nil, expert.Options{})
+
+	_, err = session.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected runtime schema mismatch from emit")
+	}
+	if !strings.Contains(err.Error(), `outcome ManualReview field "queue": expected string`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSessionQuantitySchemaNormalizesUnits(t *testing.T) {
+	src := []byte(`
+fact SensorReading {
+	temperature: number<temperature>
+}
+
+outcome HeatWarning {
+	zone: string
+}
+
+expert rule HeatStress {
+	when {
+		any reading in facts.SensorReading {
+			reading.temperature > 28 C
+		}
+	}
+	then emit HeatWarning {
+		zone: "zone-A",
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, nil, expert.Options{})
+	if err := session.Assert(expert.Fact{
+		Type: "SensorReading",
+		Key:  "zone-A",
+		Fields: map[string]any{
+			"temperature": expert.Q(86, "F"),
+		},
+	}); err != nil {
+		t.Fatalf("Assert: %v", err)
+	}
+
+	result, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.Outcomes) != 1 || result.Outcomes[0].Name != "HeatWarning" {
+		t.Fatalf("expected HeatWarning outcome, got %+v", result.Outcomes)
+	}
+}
+
+func TestSessionQuantitySchemaRejectsWrongDimension(t *testing.T) {
+	src := []byte(`
+fact SensorReading {
+	temperature: number<temperature>
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, nil, expert.Options{})
+	err = session.Assert(expert.Fact{
+		Type: "SensorReading",
+		Key:  "zone-A",
+		Fields: map[string]any{
+			"temperature": expert.Q(1200, "ppm"),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected wrong-dimension quantity to fail")
+	}
+	if !strings.Contains(err.Error(), `expected number<temperature>, got concentration`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSessionDecimalSchemaPreservesExactValues(t *testing.T) {
+	src := []byte(`
+fact Transaction {
+	amount: decimal<currency>
+}
+
+outcome ManualReview {
+	amount: decimal<currency>
+}
+
+expert rule LargeTransfer {
+	when {
+		any tx in facts.Transaction {
+			tx.amount >= 1000.25 USD
+		}
+	}
+	then emit ManualReview {
+		amount: tx.amount,
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, nil, expert.Options{})
+	if err := session.Assert(expert.Fact{
+		Type: "Transaction",
+		Key:  "tx-1",
+		Fields: map[string]any{
+			"amount": expert.D("1000.25", "USD"),
+		},
+	}); err != nil {
+		t.Fatalf("Assert: %v", err)
+	}
+
+	result, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.Outcomes) != 1 || result.Outcomes[0].Name != "ManualReview" {
+		t.Fatalf("expected ManualReview outcome, got %+v", result.Outcomes)
+	}
+	amount, ok := result.Outcomes[0].Params["amount"].(dec.Value)
+	if !ok {
+		t.Fatalf("expected decimal outcome amount, got %#v", result.Outcomes[0].Params["amount"])
+	}
+	if amount.String() != "1000.25 USD" {
+		t.Fatalf("unexpected decimal amount %q", amount.String())
+	}
+}
+
+func TestSessionDecimalSchemaRejectsWrongDimension(t *testing.T) {
+	src := []byte(`
+fact Transaction {
+	amount: decimal<currency>
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	session := expert.NewSession(program, nil, nil, expert.Options{})
+	err = session.Assert(expert.Fact{
+		Type: "Transaction",
+		Key:  "tx-1",
+		Fields: map[string]any{
+			"amount": expert.D("0.5", "ETH"),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected wrong-dimension decimal to fail")
+	}
+	if !strings.Contains(err.Error(), `expected decimal<currency>, got cryptocurrency`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -522,6 +743,71 @@ expert rule RouteManualReview {
 	}
 }
 
+func TestSessionJoinSugarSelfJoinExcludesSameFact(t *testing.T) {
+	src := []byte(`
+fact Sensor {
+	zone: string
+	humidity: number<percentage>
+}
+
+expert rule CrossZoneAlert {
+	when {
+		join a: Sensor, b: Sensor on .zone {
+			abs(a.humidity - b.humidity) > 5 pct
+		}
+	}
+	then emit ZoneAlert {
+		zone: a.zone,
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	first, err := expert.NewSession(program, nil, []expert.Fact{{
+		Type: "Sensor",
+		Key:  "zone-a-1",
+		Fields: map[string]any{
+			"zone":     "zone-a",
+			"humidity": expert.Q(70, "pct"),
+		},
+	}}, expert.Options{}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("single-sensor Run: %v", err)
+	}
+	if len(first.Outcomes) != 0 {
+		t.Fatalf("expected self-join exclusion to suppress a single fact match, got %+v", first.Outcomes)
+	}
+
+	second, err := expert.NewSession(program, nil, []expert.Fact{
+		{
+			Type: "Sensor",
+			Key:  "zone-a-1",
+			Fields: map[string]any{
+				"zone":     "zone-a",
+				"humidity": expert.Q(70, "pct"),
+			},
+		},
+		{
+			Type: "Sensor",
+			Key:  "zone-a-2",
+			Fields: map[string]any{
+				"zone":     "zone-a",
+				"humidity": expert.Q(50, "pct"),
+			},
+		},
+	}, expert.Options{}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("two-sensor Run: %v", err)
+	}
+	if len(second.Outcomes) != 1 || second.Outcomes[0].Name != "ZoneAlert" {
+		t.Fatalf("expected self-join with two facts to emit ZoneAlert, got %+v", second.Outcomes)
+	}
+}
+
 func TestSessionStopsAtMaxMutations(t *testing.T) {
 	src := []byte(`
 expert rule SeedHighRisk {
@@ -971,6 +1257,310 @@ expert rule BadModify {
 	}
 	if !strings.Contains(err.Error(), "expert rule BadModify modify RiskFlag: non-empty set block is required") {
 		t.Fatalf("unexpected expert compile error: %v", err)
+	}
+}
+
+func TestSessionTemporalForRequiresSustainedTruth(t *testing.T) {
+	src := []byte(`
+expert rule HeatStress {
+	when { input.hot == true } for 10m
+	then emit HeatWarning {
+		level: "high",
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	now := time.Unix(1_000, 0).UTC()
+	session := expert.NewSession(program, map[string]any{
+		"input": map[string]any{"hot": true},
+	}, nil, expert.Options{
+		Now: func() time.Time { return now },
+	})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run at T+0: %v", err)
+	}
+	if len(first.Outcomes) != 0 {
+		t.Fatalf("expected no outcome before duration elapses, got %+v", first.Outcomes)
+	}
+
+	now = now.Add(5 * time.Minute)
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run at T+5m: %v", err)
+	}
+	if len(second.Outcomes) != 0 {
+		t.Fatalf("expected no outcome before 10m, got %+v", second.Outcomes)
+	}
+
+	now = now.Add(5 * time.Minute)
+	third, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run at T+10m: %v", err)
+	}
+	if len(third.Outcomes) != 1 || third.Outcomes[0].Name != "HeatWarning" {
+		t.Fatalf("expected HeatWarning after 10m, got %+v", third.Outcomes)
+	}
+}
+
+func TestSessionTemporalWithinKeepsConditionActiveUntilWindowExpires(t *testing.T) {
+	src := []byte(`
+expert rule RecentSpike {
+	when { input.spike == true } within 5m
+	then assert RecentSpike {
+		key: "zone-A",
+		active: true,
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	now := time.Unix(1_000, 0).UTC()
+	session := expert.NewSession(program, map[string]any{
+		"input": map[string]any{"spike": true},
+	}, nil, expert.Options{
+		Now: func() time.Time { return now },
+	})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run at T+0: %v", err)
+	}
+	if !hasFact(first.Facts, "RecentSpike", "zone-A") {
+		t.Fatalf("expected RecentSpike fact on spike, got %+v", first.Facts)
+	}
+
+	session.SetEnvelope(map[string]any{
+		"input": map[string]any{"spike": false},
+	})
+	now = now.Add(4 * time.Minute)
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run at T+4m: %v", err)
+	}
+	if !hasFact(second.Facts, "RecentSpike", "zone-A") {
+		t.Fatalf("expected RecentSpike fact to remain active within the window, got %+v", second.Facts)
+	}
+
+	now = now.Add(2 * time.Minute)
+	third, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run at T+6m: %v", err)
+	}
+	if hasFact(third.Facts, "RecentSpike", "zone-A") {
+		t.Fatalf("expected RecentSpike fact to retract after the window expires, got %+v", third.Facts)
+	}
+}
+
+func TestSessionTemporalStableForRequiresConsecutiveRounds(t *testing.T) {
+	src := []byte(`
+expert rule ConfirmedTrend {
+	when { input.dry == true } stable_for 3 cycles
+	then emit DryAlert {
+		level: "confirmed",
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	result, err := expert.NewSession(program, map[string]any{
+		"input": map[string]any{"dry": true},
+	}, nil, expert.Options{}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Rounds != 3 {
+		t.Fatalf("expected stable_for to require 3 rounds, got %d", result.Rounds)
+	}
+	if len(result.Outcomes) != 1 || result.Outcomes[0].Name != "DryAlert" {
+		t.Fatalf("expected DryAlert after 3 stable cycles, got %+v", result.Outcomes)
+	}
+}
+
+func TestSessionTemporalCooldownSuppressesRefireUntilExpired(t *testing.T) {
+	src := []byte(`
+expert rule IrrigationPulse cooldown 15m {
+	when { input.thirsty == true }
+	then emit WaterAction {
+		zone: "zone-1",
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	now := time.Unix(1_000, 0).UTC()
+	session := expert.NewSession(program, map[string]any{
+		"input": map[string]any{"thirsty": true},
+	}, nil, expert.Options{
+		Now: func() time.Time { return now },
+	})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if len(first.Outcomes) != 1 || first.Outcomes[0].Name != "WaterAction" {
+		t.Fatalf("expected initial WaterAction, got %+v", first.Outcomes)
+	}
+
+	mark := session.Checkpoint()
+	now = now.Add(5 * time.Minute)
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	delta := session.DeltaSince(mark)
+	if len(delta.Outcomes) != 0 || len(delta.Activations) != 0 {
+		t.Fatalf("expected cooldown to suppress re-fire, got delta %+v and snapshot %+v", delta, second)
+	}
+
+	mark = session.Checkpoint()
+	now = now.Add(11 * time.Minute)
+	_, err = session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("third Run: %v", err)
+	}
+	delta = session.DeltaSince(mark)
+	if len(delta.Activations) != 1 || delta.Activations[0].Rule != "IrrigationPulse" {
+		t.Fatalf("expected one activation after cooldown expiry, got %+v", delta.Activations)
+	}
+}
+
+func TestSessionTemporalDebounceRequiresNewTrueEdgeAfterFiring(t *testing.T) {
+	src := []byte(`
+expert rule PressureDrop debounce 30s {
+	when { input.low_pressure == true }
+	then emit PressureAlert {
+		level: "warning",
+	}
+}
+`)
+
+	program, err := expert.Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	now := time.Unix(1_000, 0).UTC()
+	session := expert.NewSession(program, map[string]any{
+		"input": map[string]any{"low_pressure": true},
+	}, nil, expert.Options{
+		Now: func() time.Time { return now },
+	})
+
+	first, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run at T+0: %v", err)
+	}
+	if len(first.Outcomes) != 0 {
+		t.Fatalf("expected no initial outcome before debounce elapses, got %+v", first.Outcomes)
+	}
+
+	now = now.Add(30 * time.Second)
+	second, err := session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run at T+30s: %v", err)
+	}
+	if len(second.Outcomes) != 1 || second.Outcomes[0].Name != "PressureAlert" {
+		t.Fatalf("expected debounced PressureAlert at 30s, got %+v", second.Outcomes)
+	}
+
+	mark := session.Checkpoint()
+	now = now.Add(30 * time.Second)
+	_, err = session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run at T+60s: %v", err)
+	}
+	if delta := session.DeltaSince(mark); len(delta.Activations) != 0 {
+		t.Fatalf("expected debounce latch to suppress repeat activation, got %+v", delta.Activations)
+	}
+
+	session.SetEnvelope(map[string]any{
+		"input": map[string]any{"low_pressure": false},
+	})
+	now = now.Add(10 * time.Second)
+	if _, err := session.Run(context.Background()); err != nil {
+		t.Fatalf("Run at false edge: %v", err)
+	}
+
+	session.SetEnvelope(map[string]any{
+		"input": map[string]any{"low_pressure": true},
+	})
+	mark = session.Checkpoint()
+	now = now.Add(10 * time.Second)
+	_, err = session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run after true edge: %v", err)
+	}
+	if delta := session.DeltaSince(mark); len(delta.Activations) != 0 {
+		t.Fatalf("expected debounce timer to re-arm after the false edge, got %+v", delta.Activations)
+	}
+
+	now = now.Add(30 * time.Second)
+	_, err = session.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run at re-armed 30s: %v", err)
+	}
+	if delta := session.DeltaSince(mark); len(delta.Activations) != 1 || delta.Activations[0].Rule != "PressureDrop" {
+		t.Fatalf("expected a second debounced activation after a new true edge, got %+v", delta.Activations)
+	}
+}
+
+func TestCompileRejectsTemporalForAndDebounceCombination(t *testing.T) {
+	src := []byte(`
+expert rule InvalidTemporal debounce 30s {
+	when { input.hot == true } for 10m
+	then emit HeatWarning {
+		level: "high",
+	}
+}
+`)
+
+	_, err := expert.Compile(src)
+	if err == nil {
+		t.Fatal("expected compile to reject for + debounce")
+	}
+	if !strings.Contains(err.Error(), "for and debounce cannot be combined") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompileRejectsTemporalPerFactRule(t *testing.T) {
+	src := []byte(`
+expert rule InvalidPerFact per_fact cooldown 5m {
+	when {
+		any lead in facts.Lead { lead.score > 90 }
+	}
+	then emit ManualReview {
+		queue: lead.key,
+	}
+}
+`)
+
+	_, err := expert.Compile(src)
+	if err == nil {
+		t.Fatal("expected compile to reject temporal per_fact rule")
+	}
+	if !strings.Contains(err.Error(), "temporal operators are not supported on per_fact rules") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

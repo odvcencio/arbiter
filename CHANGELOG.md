@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.5.0
+
+### Scientific Rigor
+
+- **Fact and outcome schemas** — `fact` and `outcome` are now first-class top-level declarations with typed fields, optional fields, an implicit `key: string`, compile-time field-access checks, and runtime validation for expert `assert`, `modify`, and `emit` payloads.
+- **Quantities and units** — `number<dimension>` fields plus literals like `28 C`, `1200 ppm`, and `5m` now normalize through a built-in unit table, reject dimension mismatches at compile time, and accept runtime `expert.Q(...)` values for schema-aware sessions.
+- **Exact decimals** — `decimal` and `decimal<currency|cryptocurrency>` add exact fixed-point values, literal parsing like `1000.25 USD`, VM comparison/add/sub/abs support, and runtime `expert.D(...)` helpers for schema-aware assertions.
+
+### Temporal And Authoring
+
+- **Timestamp expressions** — RFC3339 timestamp literals, `now()`, and timestamp-plus-duration arithmetic now evaluate directly in rule conditions, which lets temporal windows live in the language instead of only in session metadata.
+- **Join sugar and richer IR** — `join a: Sensor, b: Sensor on .zone { ... }` now lowers to nested quantifiers with self-join exclusion, and the IR now carries schemas, temporal metadata, quantity/decimal/timestamp literals, and builtin calls for downstream tooling.
+- **Workflow session control** — workflows can now replace one arbiter session's base envelope or assert a fact directly into a running arbiter without rebuilding the whole graph.
+
+### Tooling
+
+- **`arbiter test` / `arbtest`** — executable `.test.arb` suites now cover stateless rules, flags, timed expert scenarios, and streamed arbiter scenarios from the CLI or package API.
+- **`arbiter explore` / `explore`** — bundles can now be summarized as JSON with schemas, constants, rule metadata, expert timing controls, and the unit dimensions they depend on.
+- **Coverage across the new surface** — parser, lowering, compiler, VM, expert runtime, workflow, CLI, and package tests now lock in the schema-aware and temporal feature set end to end.
+
+---
+
 ## v0.4.2
 
 ### Decision Tooling

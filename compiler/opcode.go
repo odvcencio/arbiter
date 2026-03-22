@@ -10,6 +10,7 @@ const (
 	// Stack operations
 	OpLoadStr  OpCode = iota // push Constants.strings[arg]
 	OpLoadNum                // push Constants.numbers[arg]
+	OpLoadDec                // push Constants.decimals[arg]
 	OpLoadBool               // push true (arg=1) or false (arg=0)
 	OpLoadNull               // push null
 	OpLoadVar                // push DataContext.Get(Constants.strings[arg])
@@ -54,6 +55,12 @@ const (
 	OpMul
 	OpDiv
 	OpMod
+	OpAbs
+	OpMin
+	OpMax
+	OpRound
+	OpFloor
+	OpCeil
 
 	// Logic
 	OpAnd // pop 2, push bool

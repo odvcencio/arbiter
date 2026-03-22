@@ -3,6 +3,7 @@ package expert
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/odvcencio/arbiter/vm"
 )
@@ -51,9 +52,13 @@ func (s *Session) hasNoRunnableRules() bool {
 }
 
 func (s *Session) prepareRun() bool {
-	nextNow := s.currentUnix()
-	forceFullEval := nextNow != s.evalNow || s.contextDirty
-	s.evalNow = nextNow
+	nextTime := s.currentTime()
+	if s.opts.Now == nil {
+		nextTime = nextTime.Truncate(time.Second)
+	}
+	forceFullEval := !nextTime.Equal(s.evalTime) || s.contextDirty
+	s.evalTime = nextTime
+	s.evalNow = nextTime.Unix()
 	return forceFullEval
 }
 
@@ -93,7 +98,7 @@ func (s *Session) executeRound(ctx context.Context, round int, firstPass bool, f
 	dirtySources := s.copyDirtySources()
 	s.clearDirtyFacts()
 
-	matched, ruleChanges, evaluated, stableDeferred, err := s.runRound(firstPass, dirtyFacts, dirtySources)
+	matched, ruleChanges, evaluated, stableDeferred, temporalPending, err := s.runRound(firstPass, dirtyFacts, dirtySources)
 	if err != nil {
 		return roundExecution{}, err
 	}
@@ -105,16 +110,17 @@ func (s *Session) executeRound(ctx context.Context, round int, firstPass bool, f
 	mutated = s.clearInactiveEvaluatedMutations(evaluated, active) || mutated
 
 	return roundExecution{
-		mutated:        mutated,
-		stopped:        stopped,
-		stableDeferred: stableDeferred,
-		ruleChanges:    ruleChanges,
+		mutated:         mutated,
+		stopped:         stopped,
+		stableDeferred:  stableDeferred,
+		temporalPending: temporalPending,
+		ruleChanges:     ruleChanges,
 	}, nil
 }
 
 func (s *Session) shouldStopAfterRound(result roundExecution, forceStableRound bool) bool {
 	if !result.mutated {
-		if result.stableDeferred {
+		if result.stableDeferred || result.temporalPending {
 			return false
 		}
 		if forceStableRound {
@@ -189,16 +195,21 @@ func (s *Session) applyMatchedRule(round int, rule Rule, match vm.MatchedRule, a
 		if err != nil {
 			return false, err
 		}
+		s.recordRuleFire(rule)
 		active.asserts[instance] = struct{}{}
 		return changed, nil
 	case ActionEmit:
 		_, err := s.applyEmit(round, rule, match)
+		if err == nil {
+			s.recordRuleFire(rule)
+		}
 		return false, err
 	case ActionRetract:
 		changed, _, instance, err := s.applyRetract(round, rule, match)
 		if err != nil {
 			return false, err
 		}
+		s.recordRuleFire(rule)
 		active.retracts[instance] = struct{}{}
 		return changed, nil
 	case ActionModify:
@@ -206,6 +217,7 @@ func (s *Session) applyMatchedRule(round int, rule Rule, match vm.MatchedRule, a
 		if err != nil {
 			return false, err
 		}
+		s.recordRuleFire(rule)
 		active.modifies[instance] = struct{}{}
 		return changed, nil
 	default:

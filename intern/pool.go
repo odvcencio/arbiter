@@ -1,6 +1,8 @@
 // intern/pool.go
 package intern
 
+import dec "github.com/odvcencio/arbiter/decimal"
+
 // TypeTag identifies the type of a pooled value.
 const (
 	TypeNull   uint8 = 0
@@ -8,6 +10,7 @@ const (
 	TypeNumber uint8 = 2
 	TypeString uint8 = 3
 	TypeList   uint8 = 4
+	TypeDecimal uint8 = 5
 )
 
 // PoolValue is the VM's value representation used in lists.
@@ -18,6 +21,7 @@ type PoolValue struct {
 	Bool    bool
 	ListIdx uint16
 	ListLen uint16
+	Dec     uint16
 }
 
 // Pool stores deduplicated constants for a compiled ruleset.
@@ -25,8 +29,10 @@ type Pool struct {
 	strings  []string
 	numbers  []float64
 	lists    []PoolValue
+	decimals []dec.Value
 	strIndex map[string]uint16
 	numIndex map[float64]uint16
+	decIndex map[string]uint16
 }
 
 // NewPool creates an empty constant pool.
@@ -34,6 +40,7 @@ func NewPool() *Pool {
 	return &Pool{
 		strIndex: make(map[string]uint16),
 		numIndex: make(map[float64]uint16),
+		decIndex: make(map[string]uint16),
 	}
 }
 
@@ -56,6 +63,18 @@ func (p *Pool) Number(n float64) uint16 {
 	idx := uint16(len(p.numbers))
 	p.numbers = append(p.numbers, n)
 	p.numIndex[n] = idx
+	return idx
+}
+
+// Decimal interns an exact decimal and returns its index.
+func (p *Pool) Decimal(v dec.Value) uint16 {
+	key := v.String()
+	if idx, ok := p.decIndex[key]; ok {
+		return idx
+	}
+	idx := uint16(len(p.decimals))
+	p.decimals = append(p.decimals, v)
+	p.decIndex[key] = idx
 	return idx
 }
 
@@ -92,11 +111,22 @@ func (p *Pool) GetList(idx, length uint16) []PoolValue {
 	return p.lists[start:end]
 }
 
+// GetDecimal returns the decimal at the given pool index.
+func (p *Pool) GetDecimal(idx uint16) dec.Value {
+	if int(idx) >= len(p.decimals) {
+		return dec.Value{}
+	}
+	return p.decimals[idx]
+}
+
 // StringCount returns the number of unique interned strings.
 func (p *Pool) StringCount() int { return len(p.strings) }
 
 // NumberCount returns the number of unique interned numbers.
 func (p *Pool) NumberCount() int { return len(p.numbers) }
+
+// DecimalCount returns the number of unique interned decimals.
+func (p *Pool) DecimalCount() int { return len(p.decimals) }
 
 // Strings returns all interned strings (for serialization).
 func (p *Pool) Strings() []string { return p.strings }
@@ -106,3 +136,6 @@ func (p *Pool) Numbers() []float64 { return p.numbers }
 
 // Lists returns the flat list storage (for serialization).
 func (p *Pool) Lists() []PoolValue { return p.lists }
+
+// Decimals returns all interned decimals.
+func (p *Pool) Decimals() []dec.Value { return p.decimals }

@@ -162,6 +162,56 @@ arbiter upstream {
 	}
 }
 
+func TestWorkflowSetArbiterEnvelopeUpdatesSessionContext(t *testing.T) {
+	src := []byte(`
+arbiter fraud_monitor {
+	stream event
+}
+
+outcome FraudAlert {
+	key: string
+	user: string
+}
+
+expert rule EmitAlert priority 10 {
+	when { event.user == "u-123" }
+	then emit FraudAlert {
+		key: event.user,
+		user: event.user,
+	}
+}
+`)
+
+	w, err := Compile(src, Options{})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	first, err := w.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+	if got := first.Arbiters["fraud_monitor"].Delta.Outcomes; len(got) != 0 {
+		t.Fatalf("unexpected outcomes without envelope: %+v", got)
+	}
+
+	if err := w.SetArbiterEnvelope("fraud_monitor", map[string]any{
+		"event": map[string]any{
+			"user": "u-123",
+		},
+	}); err != nil {
+		t.Fatalf("SetArbiterEnvelope: %v", err)
+	}
+
+	second, err := w.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	if got := second.Arbiters["fraud_monitor"].Delta.Outcomes; len(got) != 1 || got[0].Name != "FraudAlert" {
+		t.Fatalf("unexpected outcomes after envelope update: %+v", got)
+	}
+}
+
 func TestWorkflowSetSourceFactsDeepClonesNestedValues(t *testing.T) {
 	src := []byte(`
 arbiter upstream {

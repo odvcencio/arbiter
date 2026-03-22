@@ -3,6 +3,10 @@ package ir
 import (
 	"fmt"
 	"strings"
+	"time"
+
+	dec "github.com/odvcencio/arbiter/decimal"
+	"github.com/odvcencio/arbiter/units"
 )
 
 // RenderExpr renders an expression back into Arbiter-like source.
@@ -17,6 +21,15 @@ func RenderExpr(program *Program, exprID ExprID) string {
 		return fmt.Sprintf("%q", expr.String)
 	case ExprNumberLit:
 		return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%f", expr.Number), "0"), ".")
+	case ExprQuantityLit:
+		return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%f", expr.Number), "0"), ".") + " " + expr.Unit
+	case ExprDecimalLit:
+		if expr.Unit == "" {
+			return expr.String
+		}
+		return expr.String + " " + expr.Unit
+	case ExprTimestampLit:
+		return expr.String
 	case ExprBoolLit:
 		if expr.Bool {
 			return "true"
@@ -75,6 +88,12 @@ func RenderExpr(program *Program, exprID ExprID) string {
 			expr.VarName,
 			RenderExpr(program, expr.Collection),
 		)
+	case ExprBuiltinCall:
+		args := make([]string, 0, len(expr.Args))
+		for _, arg := range expr.Args {
+			args = append(args, RenderExpr(program, arg))
+		}
+		return fmt.Sprintf("%s(%s)", expr.FuncName, strings.Join(args, ", "))
 	default:
 		return "null"
 	}
@@ -125,6 +144,24 @@ func LiteralValue(program *Program, exprID ExprID) (any, bool) {
 		return expr.String, true
 	case ExprNumberLit:
 		return expr.Number, true
+	case ExprQuantityLit:
+		n, _, err := units.Normalize(expr.Number, expr.Unit)
+		if err != nil {
+			return nil, false
+		}
+		return n, true
+	case ExprDecimalLit:
+		value, err := dec.Parse(expr.String, expr.Unit)
+		if err != nil {
+			return nil, false
+		}
+		return value, true
+	case ExprTimestampLit:
+		ts, err := time.Parse(time.RFC3339Nano, expr.String)
+		if err != nil {
+			return nil, false
+		}
+		return float64(ts.UTC().Unix()), true
 	case ExprBoolLit:
 		return expr.Bool, true
 	case ExprNullLit:
@@ -177,6 +214,14 @@ func FactDeps(program *Program, exprID ExprID) []string {
 		case ExprListLit:
 			for _, elem := range expr.Elems {
 				walk(elem)
+			}
+		case ExprQuantityLit:
+			return
+		case ExprDecimalLit:
+			return
+		case ExprBuiltinCall:
+			for _, arg := range expr.Args {
+				walk(arg)
 			}
 		case ExprBinary:
 			walk(expr.Left)

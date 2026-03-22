@@ -3,6 +3,7 @@ package expert
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	arbiter "github.com/odvcencio/arbiter"
 	"github.com/odvcencio/arbiter/compiler"
@@ -24,25 +25,41 @@ const modifySetPrefix = "__expert_set__"
 
 // Rule describes one compiled expert rule.
 type Rule struct {
-	Name     string
-	Priority int
-	Kind     ActionKind
-	Target   string
-	Prereqs  []string
-	Excludes []string
-	FactDeps []string
-	NoLoop   bool
-	Stable   bool
-	PerFact  bool
-	Group    string
+	Name            string
+	Priority        int
+	Kind            ActionKind
+	Target          string
+	Prereqs         []string
+	Excludes        []string
+	FactDeps        []string
+	NoLoop          bool
+	Stable          bool
+	PerFact         bool
+	Group           string
+	ForDuration     time.Duration
+	HasFor          bool
+	WithinDuration  time.Duration
+	HasWithin       bool
+	StableCycles    int
+	HasStableCycles bool
+	Cooldown        time.Duration
+	HasCooldown     bool
+	Debounce        time.Duration
+	HasDebounce     bool
+}
+
+func (r Rule) hasTemporal() bool {
+	return r.HasFor || r.HasWithin || r.HasStableCycles || r.HasCooldown || r.HasDebounce
 }
 
 // Program is a compiled expert-rules program.
 type Program struct {
-	ruleset    *compiler.CompiledRuleset
-	segments   *govern.SegmentSet
-	rules      []Rule
-	ruleByName map[string]Rule
+	ruleset        *compiler.CompiledRuleset
+	segments       *govern.SegmentSet
+	rules          []Rule
+	ruleByName     map[string]Rule
+	factSchemas    map[string]*ir.FactSchema
+	outcomeSchemas map[string]*ir.OutcomeSchema
 }
 
 // Compile parses .arb source and extracts only expert rules into an expert program.
@@ -99,9 +116,19 @@ func CompileParsed(parsed *arbiter.ParsedSource, base *arbiter.CompileResult) (*
 	}
 
 	p := &Program{
-		segments:   base.Segments,
-		rules:      rules,
-		ruleByName: byName,
+		segments:       base.Segments,
+		rules:          rules,
+		ruleByName:     byName,
+		factSchemas:    make(map[string]*ir.FactSchema, len(base.Program.FactSchemas)),
+		outcomeSchemas: make(map[string]*ir.OutcomeSchema, len(base.Program.OutcomeSchemas)),
+	}
+	for i := range base.Program.FactSchemas {
+		schema := &base.Program.FactSchemas[i]
+		p.factSchemas[schema.Name] = schema
+	}
+	for i := range base.Program.OutcomeSchemas {
+		schema := &base.Program.OutcomeSchemas[i]
+		p.outcomeSchemas[schema.Name] = schema
 	}
 	if len(syntheticRules) == 0 {
 		return p, nil
@@ -172,6 +199,51 @@ func lowerExpertRule(program *ir.Program, expertRule *ir.ExpertRule, segmentDeps
 		Stable:   expertRule.Stable,
 		PerFact:  expertRule.PerFact,
 		Group:    expertRule.ActivationGroup,
+	}
+	if expertRule.PerFact && hasTemporalRule(expertRule) {
+		return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s: temporal operators are not supported on per_fact rules", rule.Name)
+	}
+	if expertRule.ForDuration != nil && expertRule.DebounceDuration != nil {
+		return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s: for and debounce cannot be combined", rule.Name)
+	}
+	if expertRule.ForDuration != nil {
+		duration, err := compileTemporalDuration(expertRule.ForDuration)
+		if err != nil {
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s: %w", rule.Name, err)
+		}
+		rule.ForDuration = duration
+		rule.HasFor = true
+	}
+	if expertRule.WithinDuration != nil {
+		duration, err := compileTemporalDuration(expertRule.WithinDuration)
+		if err != nil {
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s: %w", rule.Name, err)
+		}
+		rule.WithinDuration = duration
+		rule.HasWithin = true
+	}
+	if expertRule.HasStableCycles {
+		if expertRule.StableCycles <= 0 {
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s: stable_for cycles must be greater than zero", rule.Name)
+		}
+		rule.StableCycles = expertRule.StableCycles
+		rule.HasStableCycles = true
+	}
+	if expertRule.CooldownDuration != nil {
+		duration, err := compileTemporalDuration(expertRule.CooldownDuration)
+		if err != nil {
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s: %w", rule.Name, err)
+		}
+		rule.Cooldown = duration
+		rule.HasCooldown = true
+	}
+	if expertRule.DebounceDuration != nil {
+		duration, err := compileTemporalDuration(expertRule.DebounceDuration)
+		if err != nil {
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s: %w", rule.Name, err)
+		}
+		rule.Debounce = duration
+		rule.HasDebounce = true
 	}
 
 	deps := make([]string, 0)
@@ -275,4 +347,40 @@ func uniqueStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func hasTemporalRule(rule *ir.ExpertRule) bool {
+	if rule == nil {
+		return false
+	}
+	return rule.ForDuration != nil ||
+		rule.WithinDuration != nil ||
+		rule.HasStableCycles ||
+		rule.CooldownDuration != nil ||
+		rule.DebounceDuration != nil
+}
+
+func compileTemporalDuration(duration *ir.Duration) (time.Duration, error) {
+	if duration == nil {
+		return 0, fmt.Errorf("missing duration")
+	}
+	if duration.Value <= 0 {
+		return 0, fmt.Errorf("duration must be greater than zero")
+	}
+	var scale time.Duration
+	switch duration.Unit {
+	case "ms":
+		scale = time.Millisecond
+	case "s":
+		scale = time.Second
+	case "m":
+		scale = time.Minute
+	case "hr":
+		scale = time.Hour
+	case "d":
+		scale = 24 * time.Hour
+	default:
+		return 0, fmt.Errorf("unsupported duration unit %q", duration.Unit)
+	}
+	return time.Duration(duration.Value * float64(scale)), nil
 }

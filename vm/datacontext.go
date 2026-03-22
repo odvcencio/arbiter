@@ -4,6 +4,9 @@ package vm
 import (
 	"encoding/json"
 	"strings"
+
+	dec "github.com/odvcencio/arbiter/decimal"
+	"github.com/odvcencio/arbiter/units"
 )
 
 // StringPool holds interned strings. It is initialized from the constant pool
@@ -126,6 +129,14 @@ func anyToValue(v any, pool *StringPool) Value {
 		return NumVal(float64(val))
 	case string:
 		return StrVal(pool.Intern(val))
+	case dec.Value:
+		return DecimalVal(val)
+	case units.Quantity:
+		n, _, err := units.Normalize(val.Value, val.Unit)
+		if err != nil {
+			return NullVal()
+		}
+		return NumVal(n)
 	case json.Number:
 		if n, err := val.Float64(); err == nil {
 			return NumVal(n)

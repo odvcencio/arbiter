@@ -114,6 +114,15 @@ type activeRoundMutations struct {
 	modifies map[string]struct{}
 }
 
+type temporalState struct {
+	ConditionTrueAt time.Time
+	WithinExpiresAt time.Time
+	LastFiredAt     time.Time
+	CycleCount      int
+	DebounceLatched bool
+	LastCondition   bool
+}
+
 // Session runs an expert program against an envelope and working memory.
 type Session struct {
 	program            *Program
@@ -144,8 +153,10 @@ type Session struct {
 	dc                 vm.DataContext
 	evaluator          *vm.Evaluator
 	now                func() time.Time
+	evalTime           time.Time
 	evalNow            int64
 	contextDirty       bool
+	temporal           map[string]*temporalState
 }
 
 // NewSession creates a new in-memory expert session.
@@ -173,6 +184,7 @@ func NewSession(p *Program, envelope map[string]any, facts []Fact, opts Options)
 		factRetracts:   make(map[string]map[string]map[string]retractRecord),
 		modifiesByRule: make(map[string]map[string]modifyRecord),
 		factModifies:   make(map[string]map[string]map[string]modifyRecord),
+		temporal:       make(map[string]*temporalState),
 	}
 	s.now = opts.Now
 	if s.now == nil {
@@ -373,10 +385,11 @@ func (s *Session) DeltaSince(mark Checkpoint) Result {
 }
 
 type roundExecution struct {
-	mutated        bool
-	stopped        bool
-	stableDeferred bool
-	ruleChanges    map[string]struct{}
+	mutated         bool
+	stopped         bool
+	stableDeferred  bool
+	temporalPending bool
+	ruleChanges     map[string]struct{}
 }
 
 func (s *Session) applyAssert(round int, rule Rule, match vm.MatchedRule) (bool, string, string, error) {
@@ -388,12 +401,16 @@ func (s *Session) applyAssert(round int, rule Rule, match vm.MatchedRule) (bool,
 	if key == "" {
 		return false, "", "", fmt.Errorf("expert rule %s assert %s: empty key", rule.Name, rule.Target)
 	}
+	fields, err := s.program.validateFactFields(rule.Target, match.Params, true)
+	if err != nil {
+		return false, "", "", fmt.Errorf("expert rule %s assert %s: %w", rule.Name, rule.Target, err)
+	}
 	instance := mutationInstanceKey(rule.Name, key)
 
 	fact := Fact{
 		Type:   rule.Target,
 		Key:    key,
-		Fields: cloneMap(match.Params),
+		Fields: fields,
 	}
 	changed := s.setDerivedSupport(rule, fact)
 
@@ -420,10 +437,14 @@ func (s *Session) applyAssert(round int, rule Rule, match vm.MatchedRule) (bool,
 }
 
 func (s *Session) applyEmit(round int, rule Rule, match vm.MatchedRule) (bool, error) {
+	params, err := s.program.validateOutcomeFields(rule.Target, match.Params)
+	if err != nil {
+		return false, fmt.Errorf("expert rule %s emit %s: %w", rule.Name, rule.Target, err)
+	}
 	outcome := Outcome{
 		Rule:   rule.Name,
 		Name:   rule.Target,
-		Params: cloneMap(match.Params),
+		Params: params,
 	}
 	key := stableKey(outcome)
 	_, existed := s.emitted[key]
@@ -474,6 +495,10 @@ func (s *Session) applyModify(round int, rule Rule, match vm.MatchedRule) (bool,
 	if err != nil {
 		return false, "", "", fmt.Errorf("expert rule %s modify %s: %w", rule.Name, rule.Target, err)
 	}
+	setFields, err = s.program.validateFactFields(rule.Target, setFields, false)
+	if err != nil {
+		return false, "", "", fmt.Errorf("expert rule %s modify %s: %w", rule.Name, rule.Target, err)
+	}
 	instance := mutationInstanceKey(rule.Name, key)
 	changed := s.setModification(rule, rule.Target, key, setFields)
 	detail := fmt.Sprintf("modify %s/%s", rule.Target, key)
@@ -509,6 +534,10 @@ func (s *Session) upsertExternalFact(f Fact) (bool, error) {
 	if f.Fields == nil {
 		f.Fields = make(map[string]any)
 	}
+	fields, err := s.program.validateFactFields(f.Type, f.Fields, true)
+	if err != nil {
+		return false, err
+	}
 
 	byKey, ok := s.externalFacts[f.Type]
 	if !ok {
@@ -519,7 +548,7 @@ func (s *Session) upsertExternalFact(f Fact) (bool, error) {
 	next := Fact{
 		Type:          f.Type,
 		Key:           f.Key,
-		Fields:        cloneMap(f.Fields),
+		Fields:        fields,
 		AssertedRound: s.rounds,
 		AssertedAt:    f.AssertedAt,
 	}
@@ -1046,7 +1075,7 @@ func (s *Session) removeModification(record modifyRecord) {
 	}
 }
 
-func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}) ([]vm.MatchedRule, map[string]struct{}, map[string]struct{}, bool, error) {
+func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirtySources map[string]map[string]struct{}) ([]vm.MatchedRule, map[string]struct{}, map[string]struct{}, bool, bool, error) {
 	s.refreshContextView(firstPass, dirtyFacts)
 	state := s.newRoundState()
 
@@ -1064,12 +1093,13 @@ func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirty
 
 		dc, ruleRC, err := s.ruleEvalInputs(rule, state.current, state.rc)
 		if err != nil {
-			return nil, nil, nil, false, err
+			return nil, nil, nil, false, false, err
 		}
-		result, matches, err := s.evaluateRuleMatches(rule, header, dc, ruleRC)
+		result, pending, matches, err := s.evaluateRuleMatches(rule, header, dc, ruleRC)
 		if err != nil {
-			return nil, nil, nil, false, err
+			return nil, nil, nil, false, false, err
 		}
+		state.temporalPending = state.temporalPending || pending
 		prev := state.current[rule.Name]
 		state.current[rule.Name] = result
 		if prev != result || firstPass {
@@ -1080,7 +1110,7 @@ func (s *Session) runRound(firstPass bool, dirtyFacts map[string]struct{}, dirty
 	}
 
 	s.ruleResults = state.current
-	return state.matched, state.ruleChanges, state.evaluated, state.stableDeferred, nil
+	return state.matched, state.ruleChanges, state.evaluated, state.stableDeferred, state.temporalPending, nil
 }
 
 type roundState struct {
@@ -1091,6 +1121,7 @@ type roundState struct {
 	evaluated        map[string]struct{}
 	stableDeferred   bool
 	forceStableRound bool
+	temporalPending  bool
 }
 
 func (s *Session) newRoundState() roundState {
@@ -1116,6 +1147,9 @@ func (s *Session) shouldRunRuleThisRound(rule Rule, firstPass bool, dirtyFacts m
 	if rule.Stable && forceStableRound {
 		shouldEval = true
 	}
+	if s.ruleHasTemporalPending(rule) {
+		shouldEval = true
+	}
 	return shouldEval
 }
 
@@ -1138,15 +1172,15 @@ func (s *Session) ruleEvalInputs(rule Rule, current map[string]bool, rc *govern.
 	return tempDC, ruleRC, nil
 }
 
-func (s *Session) evaluateRuleMatches(rule Rule, header compiler.RuleHeader, dc vm.DataContext, rc *govern.RequestCache) (bool, []vm.MatchedRule, error) {
-	result, mr, err := s.evalRule(rule, header, s.evaluator, dc, rc)
+func (s *Session) evaluateRuleMatches(rule Rule, header compiler.RuleHeader, dc vm.DataContext, rc *govern.RequestCache) (bool, bool, []vm.MatchedRule, error) {
+	result, pending, mr, err := s.evalRule(rule, header, s.evaluator, dc, rc)
 	if err != nil || !result {
-		return result, nil, err
+		return result, pending, nil, err
 	}
 	if rule.PerFact {
-		return true, s.evalPerFact(rule, header, s.evaluator, dc, rc), nil
+		return true, pending, s.evalPerFact(rule, header, s.evaluator, dc, rc), nil
 	}
-	return true, []vm.MatchedRule{mr}, nil
+	return true, pending, []vm.MatchedRule{mr}, nil
 }
 
 // evalPerFact iterates all facts in the rule's first fact dependency and
@@ -1172,7 +1206,7 @@ func (s *Session) evalPerFact(rule Rule, header compiler.RuleHeader, evaluator *
 		// Build a temporary context with this single fact as the only fact of its type
 		tempCtx := s.buildSingleFactContext(factType, fact)
 		tempDC := vm.DataFromMap(tempCtx, s.pool)
-		ok, mr, err := s.evalRule(rule, header, evaluator, tempDC, rc)
+		ok, _, mr, err := s.evalRule(rule, header, evaluator, tempDC, rc)
 		if err != nil || !ok {
 			continue
 		}
@@ -1204,28 +1238,28 @@ func (s *Session) buildSingleFactContext(factType string, fact Fact) map[string]
 	return ctx
 }
 
-func (s *Session) evalRule(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext, rc *govern.RequestCache) (bool, vm.MatchedRule, error) {
+func (s *Session) evalRule(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext, rc *govern.RequestCache) (bool, bool, vm.MatchedRule, error) {
 	if !s.ruleAllowedByGovernance(rule, header, rc) {
-		return false, vm.MatchedRule{}, nil
+		return false, false, vm.MatchedRule{}, nil
 	}
 	if !ruleMatchesSegment(header, evaluator, rc) {
-		return false, vm.MatchedRule{}, nil
+		return false, false, vm.MatchedRule{}, nil
 	}
-	condOK, err := s.ruleConditionMatches(rule, header, evaluator, dc)
+	condOK, pending, err := s.ruleConditionMatches(rule, header, evaluator, dc)
 	if err != nil {
-		return false, vm.MatchedRule{}, err
+		return false, false, vm.MatchedRule{}, err
 	}
 	if !condOK {
-		return false, vm.MatchedRule{}, nil
+		return false, pending, vm.MatchedRule{}, nil
 	}
 	if !s.ruleAllowedByRollout(rule, header, rc) {
-		return false, vm.MatchedRule{}, nil
+		return false, false, vm.MatchedRule{}, nil
 	}
 	match, err := s.buildRuleMatch(rule, header, evaluator, dc)
 	if err != nil {
-		return false, vm.MatchedRule{}, err
+		return false, false, vm.MatchedRule{}, err
 	}
-	return true, match, nil
+	return true, false, match, nil
 }
 
 func (s *Session) ruleAllowedByGovernance(rule Rule, header compiler.RuleHeader, rc *govern.RequestCache) bool {
@@ -1247,12 +1281,121 @@ func ruleMatchesSegment(header compiler.RuleHeader, evaluator *vm.Evaluator, rc 
 	return segOK
 }
 
-func (s *Session) ruleConditionMatches(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext) (bool, error) {
+func (s *Session) ruleConditionMatches(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext) (bool, bool, error) {
 	condOK, err := evaluator.EvalRuleCondition(header, dc)
 	if err != nil {
-		return false, fmt.Errorf("expert rule %s: %w", rule.Name, err)
+		return false, false, fmt.Errorf("expert rule %s: %w", rule.Name, err)
 	}
-	return condOK, nil
+	return s.applyTemporalCondition(rule, condOK), s.ruleHasTemporalPending(rule), nil
+}
+
+func (s *Session) applyTemporalCondition(rule Rule, raw bool) bool {
+	if s == nil || !rule.hasTemporal() {
+		return raw
+	}
+	state := s.temporalState(rule.Name)
+	now := s.evalTime
+
+	if rule.HasWithin {
+		if raw {
+			state.WithinExpiresAt = now.Add(rule.WithinDuration)
+		}
+		raw = raw || (!state.WithinExpiresAt.IsZero() && !now.After(state.WithinExpiresAt))
+	}
+
+	if rule.HasFor {
+		if !raw {
+			state.ConditionTrueAt = time.Time{}
+		} else if state.ConditionTrueAt.IsZero() {
+			state.ConditionTrueAt = now
+		}
+		raw = !state.ConditionTrueAt.IsZero() && now.Sub(state.ConditionTrueAt) >= rule.ForDuration
+	}
+
+	if rule.HasStableCycles {
+		if raw {
+			if state.LastCondition {
+				state.CycleCount++
+			} else {
+				state.CycleCount = 1
+			}
+			state.LastCondition = true
+			raw = state.CycleCount >= rule.StableCycles
+		} else {
+			state.CycleCount = 0
+			state.LastCondition = false
+		}
+	}
+
+	if rule.HasDebounce {
+		if !raw {
+			state.ConditionTrueAt = time.Time{}
+			state.DebounceLatched = false
+			state.LastCondition = false
+			return false
+		}
+		if !state.LastCondition || state.ConditionTrueAt.IsZero() {
+			state.ConditionTrueAt = now
+		}
+		state.LastCondition = true
+		if state.DebounceLatched {
+			return false
+		}
+		raw = now.Sub(state.ConditionTrueAt) >= rule.Debounce
+	}
+
+	if rule.HasCooldown && raw && !state.LastFiredAt.IsZero() && now.Sub(state.LastFiredAt) < rule.Cooldown {
+		return false
+	}
+	return raw
+}
+
+func (s *Session) temporalState(ruleName string) *temporalState {
+	if s.temporal == nil {
+		s.temporal = make(map[string]*temporalState)
+	}
+	state := s.temporal[ruleName]
+	if state == nil {
+		state = &temporalState{}
+		s.temporal[ruleName] = state
+	}
+	return state
+}
+
+func (s *Session) recordRuleFire(rule Rule) {
+	if s == nil || !rule.hasTemporal() {
+		return
+	}
+	state := s.temporalState(rule.Name)
+	if rule.HasCooldown {
+		state.LastFiredAt = s.evalTime
+	}
+	if rule.HasDebounce {
+		state.DebounceLatched = true
+	}
+}
+
+func (s *Session) ruleHasTemporalPending(rule Rule) bool {
+	if s == nil || !rule.HasStableCycles {
+		return false
+	}
+	state := s.temporal[rule.Name]
+	if state == nil {
+		return false
+	}
+	return state.LastCondition && state.CycleCount > 0 && state.CycleCount < rule.StableCycles
+}
+
+func (s *Session) hasTemporalPending() bool {
+	if s == nil {
+		return false
+	}
+	for _, rule := range s.program.rules {
+		if s.ruleHasTemporalPending(rule) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Session) ruleAllowedByRollout(rule Rule, header compiler.RuleHeader, rc *govern.RequestCache) bool {
@@ -1319,6 +1462,9 @@ func dirtyFactDeps(rule Rule, dirtyFacts map[string]struct{}, dirtySources map[s
 
 func (s *Session) hasPendingWork(dirtyRules map[string]struct{}) bool {
 	if s.stablePending {
+		return true
+	}
+	if s.hasTemporalPending() {
 		return true
 	}
 	for _, rule := range s.program.rules {
@@ -1668,10 +1814,14 @@ func factEvalFields(fact Fact, now int64) map[string]any {
 }
 
 func (s *Session) currentUnix() int64 {
+	return s.currentTime().Unix()
+}
+
+func (s *Session) currentTime() time.Time {
 	if s == nil || s.now == nil {
-		return time.Now().UTC().Unix()
+		return time.Now().UTC()
 	}
-	return s.now().UTC().Unix()
+	return s.now().UTC()
 }
 
 func sortedModifications(records map[string]modifyRecord, ruleName string, kind ActionKind) []modifyRecord {

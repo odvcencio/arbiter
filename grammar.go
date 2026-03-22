@@ -44,6 +44,8 @@ func ArbiterGrammar() *Grammar {
 	g.Define("_declaration", Choice(
 		Sym("include_declaration"),
 		Sym("feature_declaration"),
+		Sym("fact_declaration"),
+		Sym("outcome_declaration"),
 		Sym("const_declaration"),
 		Sym("arbiter_declaration"),
 		Sym("rule_declaration"),
@@ -81,11 +83,45 @@ func ArbiterGrammar() *Grammar {
 		Field("type", Sym("type_name")),
 	))
 
+	g.Define("fact_declaration", Seq(
+		Str("fact"),
+		Field("name", Sym("identifier")),
+		Str("{"),
+		Repeat(Sym("schema_field_declaration")),
+		Str("}"),
+	))
+
+	g.Define("outcome_declaration", Seq(
+		Str("outcome"),
+		Field("name", Sym("identifier")),
+		Str("{"),
+		Repeat(Sym("schema_field_declaration")),
+		Str("}"),
+	))
+
+	g.Define("schema_field_declaration", Seq(
+		Field("name", Sym("identifier")),
+		Optional(Field("optional", Str("?"))),
+		Str(":"),
+		Field("type", Sym("schema_type_name")),
+	))
+
 	g.Define("type_name", Choice(
 		Str("number"),
 		Str("string"),
 		Str("bool"),
 		Seq(Str("list"), Str("<"), Sym("type_name"), Str(">")),
+	))
+
+	g.Define("schema_type_name", Choice(
+		Sym("parameterized_number_type"),
+		Sym("parameterized_decimal_type"),
+		Str("number"),
+		Str("decimal"),
+		Str("string"),
+		Str("bool"),
+		Str("boolean"),
+		Str("timestamp"),
 	))
 
 	// --- Const declaration ---
@@ -211,8 +247,12 @@ func ArbiterGrammar() *Grammar {
 		Str("expert"),
 		Str("rule"),
 		Field("name", Sym("identifier")),
-		Optional(Seq(Str("priority"), Field("priority", Sym("number_literal")))),
-		Optional(Field("per_fact", Sym("per_fact"))),
+		Repeat(Choice(
+			Sym("expert_rule_priority"),
+			Sym("per_fact"),
+			Sym("expert_rule_cooldown"),
+			Sym("expert_rule_debounce"),
+		)),
 		Str("{"),
 		Optional(Field("kill_switch", Sym("kill_switch"))),
 		Optional(Field("no_loop", Sym("no_loop"))),
@@ -224,6 +264,21 @@ func ArbiterGrammar() *Grammar {
 		Field("action", Sym("expert_then_block")),
 		Optional(Field("rollout", Sym("rule_rollout"))),
 		Str("}"),
+	))
+
+	g.Define("expert_rule_priority", Seq(
+		Str("priority"),
+		Field("priority", Sym("number_literal")),
+	))
+
+	g.Define("expert_rule_cooldown", Seq(
+		Str("cooldown"),
+		Field("duration", Sym("temporal_duration_literal")),
+	))
+
+	g.Define("expert_rule_debounce", Seq(
+		Str("debounce"),
+		Field("duration", Sym("temporal_duration_literal")),
 	))
 
 	// when always requires braces: when { expr }
@@ -252,6 +307,27 @@ func ArbiterGrammar() *Grammar {
 			Field("bindings", Sym("expert_binding_clause")),
 		),
 		Str("}"),
+		Optional(Choice(
+			Sym("expert_when_for"),
+			Sym("expert_when_within"),
+			Sym("expert_when_stable_for"),
+		)),
+	))
+
+	g.Define("expert_when_for", Seq(
+		Str("for"),
+		Field("duration", Sym("temporal_duration_literal")),
+	))
+
+	g.Define("expert_when_within", Seq(
+		Str("within"),
+		Field("duration", Sym("temporal_duration_literal")),
+	))
+
+	g.Define("expert_when_stable_for", Seq(
+		Str("stable_for"),
+		Field("cycles", Sym("number_literal")),
+		Str("cycles"),
 	))
 
 	g.Define("expert_binding_clause", Seq(
@@ -396,7 +472,7 @@ func ArbiterGrammar() *Grammar {
 		Str("when"),
 		Field("condition", Choice(
 			Seq(Field("segment", Sym("identifier")), Str("{"), Field("expr", Sym("_expr")), Str("}")), // segment + inline
-			Sym("identifier"),                     // segment reference only
+			Sym("identifier"), // segment reference only
 			Seq(Str("{"), Field("expr", Sym("_expr")), Str("}")), // inline condition only
 		)),
 		Optional(Field("rollout", Sym("rule_rollout"))),
@@ -464,6 +540,7 @@ func ArbiterGrammar() *Grammar {
 		Sym("between_expr"),
 		Sym("is_null_expr"),
 		Sym("is_not_null_expr"),
+		Sym("join_expr"),
 		Sym("quantifier_expr"),
 		Sym("_value_expr"),
 	))
@@ -585,6 +662,45 @@ func ArbiterGrammar() *Grammar {
 		Str("}"),
 	))
 
+	g.Define("join_expr", Choice(
+		Sym("join_expr_full"),
+		Sym("join_expr_shorthand"),
+	))
+
+	g.Define("join_expr_full", Seq(
+		Str("join"),
+		Sym("join_binding"),
+		Repeat1(Seq(Str(","), Sym("join_binding"))),
+		Optional(Sym("join_including_self")),
+		Str("on"),
+		Field("predicate", Sym("_expr")),
+		Str("{"),
+		Field("body", Sym("_expr")),
+		Str("}"),
+	))
+
+	g.Define("join_expr_shorthand", Seq(
+		Str("join"),
+		Field("left_binding", Sym("join_binding")),
+		Str(","),
+		Field("right_binding", Sym("join_binding")),
+		Optional(Sym("join_including_self")),
+		Str("on"),
+		Str("."),
+		Field("field", Sym("identifier")),
+		Str("{"),
+		Field("body", Sym("_expr")),
+		Str("}"),
+	))
+
+	g.Define("join_binding", Seq(
+		Field("alias", Sym("identifier")),
+		Str(":"),
+		Field("fact_type", Sym("identifier")),
+	))
+
+	g.Define("join_including_self", Str("including_self"))
+
 	g.Define("aggregate_expr", Seq(
 		Field("function", Sym("identifier")),
 		Str("("),
@@ -605,9 +721,22 @@ func ArbiterGrammar() *Grammar {
 		Str(")"),
 	))
 
+	g.Define("call_expr", Seq(
+		Field("function", Sym("identifier")),
+		Str("("),
+		Optional(CommaSep1(Sym("_expr"))),
+		Optional(Str(",")),
+		Str(")"),
+	))
+
 	// --- Primaries ---
 	g.Define("_primary", Choice(
+		Sym("call_expr"),
 		Sym("member_expr"),
+		Sym("timestamp_literal"),
+		Sym("temporal_duration_literal"),
+		Sym("decimal_literal"),
+		Sym("quantity_literal"),
 		Sym("number_literal"),
 		Sym("string_literal"),
 		Sym("bool_literal"),
@@ -641,8 +770,15 @@ func ArbiterGrammar() *Grammar {
 
 	// --- Terminals ---
 	g.Define("identifier", Pat(`[a-zA-Z_][a-zA-Z0-9_]*`))
-	g.Define("number_literal", Pat(`-?[0-9]+(\.[0-9]+)?`))
+	g.Define("parameterized_number_type", Token(Pat(`number<[a-zA-Z_][a-zA-Z0-9_]*>`)))
+	g.Define("parameterized_decimal_type", Token(Pat(`decimal<[a-zA-Z_][a-zA-Z0-9_]*>`)))
+	g.Define("timestamp_literal", Token(Pat(`[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})`)))
+	g.Define("decimal_literal", Token(Pat(`-?[0-9]+(\.[0-9]+)?[ \t]+(?:USD|EUR|GBP|JPY|CNY|CHF|CAD|AUD|BTC|ETH|SOL|USDC|USDT)`)))
+	g.Define("quantity_literal", Token(Pat(`-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?[ \t]+(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|%|hp)`)))
+	g.Define("number_literal", Pat(`-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?`))
+	g.Define("unit_literal", Pat(`(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|%|hp)`))
 	g.Define("duration_literal", Pat(`([0-9]+(ns|us|µs|ms|s|m|h))+`))
+	g.Define("temporal_duration_literal", Token(Pat(`[0-9]+(\.[0-9]+)?(ms|s|m|hr|d)`)))
 	g.Define("string_literal", Pat(`"[^"]*"`))
 	g.Define("slack_channel_literal", Token(Prec(1, Pat(`#[^\s{}"]+`))))
 	g.Define("resource_literal", Pat(`[^\s{}"#]+`))

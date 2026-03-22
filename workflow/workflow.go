@@ -142,6 +142,37 @@ func (w *Workflow) SetSourceFacts(target string, facts []expert.Fact) error {
 	return nil
 }
 
+// SetArbiterEnvelope replaces one arbiter session's base envelope.
+func (w *Workflow) SetArbiterEnvelope(name string, envelope map[string]any) error {
+	if w == nil {
+		return fmt.Errorf("nil workflow")
+	}
+	arb, ok := w.arbiters[name]
+	if !ok {
+		return fmt.Errorf("workflow arbiter %q is not declared", name)
+	}
+	arb.baseEnvelope = cloneMap(envelope)
+	if arb.session != nil {
+		arb.session.SetEnvelope(arb.baseEnvelope)
+	}
+	return nil
+}
+
+// AssertFact inserts or updates one fact in a specific arbiter session.
+func (w *Workflow) AssertFact(name string, fact expert.Fact) error {
+	if w == nil {
+		return fmt.Errorf("nil workflow")
+	}
+	arb, ok := w.arbiters[name]
+	if !ok {
+		return fmt.Errorf("workflow arbiter %q is not declared", name)
+	}
+	if arb.session == nil {
+		return fmt.Errorf("workflow arbiter %q has no session", name)
+	}
+	return arb.session.Assert(cloneExpertFact(fact))
+}
+
 // Run executes one topologically ordered workflow pass and forwards chained outcome deltas.
 func (w *Workflow) Run(ctx context.Context) (Result, error) {
 	if w == nil {

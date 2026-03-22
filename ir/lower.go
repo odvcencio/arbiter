@@ -93,6 +93,10 @@ func (l *lowerer) lowerSourceFile(root *gotreesitter.Node) error {
 			l.program.Consts = append(l.program.Consts, l.lowerConst(child))
 		case "feature_declaration":
 			l.program.Features = append(l.program.Features, l.lowerFeature(child))
+		case "fact_declaration":
+			l.program.FactSchemas = append(l.program.FactSchemas, l.lowerFactSchema(child))
+		case "outcome_declaration":
+			l.program.OutcomeSchemas = append(l.program.OutcomeSchemas, l.lowerOutcomeSchema(child))
 		case "segment_declaration":
 			segment, err := l.lowerSegment(child)
 			if err != nil {
@@ -166,6 +170,54 @@ func (l *lowerer) lowerFeature(n *gotreesitter.Node) Feature {
 		feature.Fields = append(feature.Fields, field)
 	}
 	return feature
+}
+
+func (l *lowerer) lowerFactSchema(n *gotreesitter.Node) FactSchema {
+	schema := FactSchema{
+		Span: spanForNode(n),
+	}
+	if nameNode := n.ChildByFieldName("name", l.lang); nameNode != nil {
+		schema.Name = l.text(nameNode)
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		child := n.NamedChild(i)
+		if child.Type(l.lang) != "schema_field_declaration" {
+			continue
+		}
+		schema.Fields = append(schema.Fields, l.lowerSchemaField(child))
+	}
+	return schema
+}
+
+func (l *lowerer) lowerOutcomeSchema(n *gotreesitter.Node) OutcomeSchema {
+	schema := OutcomeSchema{
+		Span: spanForNode(n),
+	}
+	if nameNode := n.ChildByFieldName("name", l.lang); nameNode != nil {
+		schema.Name = l.text(nameNode)
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		child := n.NamedChild(i)
+		if child.Type(l.lang) != "schema_field_declaration" {
+			continue
+		}
+		schema.Fields = append(schema.Fields, l.lowerSchemaField(child))
+	}
+	return schema
+}
+
+func (l *lowerer) lowerSchemaField(n *gotreesitter.Node) SchemaField {
+	field := SchemaField{
+		Span:     spanForNode(n),
+		Required: n.ChildByFieldName("optional", l.lang) == nil,
+	}
+	if nameNode := n.ChildByFieldName("name", l.lang); nameNode != nil {
+		field.Name = l.text(nameNode)
+	}
+	if typeNode := n.ChildByFieldName("type", l.lang); typeNode != nil {
+		field.Type = parseSchemaFieldType(l.text(typeNode))
+	}
+	return field
 }
 
 func (l *lowerer) lowerSegment(n *gotreesitter.Node) (Segment, error) {
@@ -401,11 +453,7 @@ func (l *lowerer) lowerExpertRule(n *gotreesitter.Node) (ExpertRule, error) {
 	if nameNode := n.ChildByFieldName("name", l.lang); nameNode != nil {
 		rule.Name = l.text(nameNode)
 	}
-	if priNode := n.ChildByFieldName("priority", l.lang); priNode != nil {
-		rule.Priority = int32(parseutil.ParseInt(l.text(priNode)))
-	}
 	rule.KillSwitch = n.ChildByFieldName("kill_switch", l.lang) != nil
-	rule.PerFact = n.ChildByFieldName("per_fact", l.lang) != nil
 	rule.NoLoop = n.ChildByFieldName("no_loop", l.lang) != nil
 	rule.Stable = n.ChildByFieldName("stable", l.lang) != nil
 	if groupNode := n.ChildByFieldName("activation_group", l.lang); groupNode != nil {
@@ -417,6 +465,20 @@ func (l *lowerer) lowerExpertRule(n *gotreesitter.Node) (ExpertRule, error) {
 	for i := 0; i < int(n.NamedChildCount()); i++ {
 		child := n.NamedChild(i)
 		switch child.Type(l.lang) {
+		case "expert_rule_priority":
+			if priNode := child.ChildByFieldName("priority", l.lang); priNode != nil {
+				rule.Priority = int32(parseutil.ParseInt(l.text(priNode)))
+			}
+		case "per_fact":
+			rule.PerFact = true
+		case "expert_rule_cooldown":
+			if durationNode := child.ChildByFieldName("duration", l.lang); durationNode != nil {
+				rule.CooldownDuration = l.lowerTemporalDuration(durationNode)
+			}
+		case "expert_rule_debounce":
+			if durationNode := child.ChildByFieldName("duration", l.lang); durationNode != nil {
+				rule.DebounceDuration = l.lowerTemporalDuration(durationNode)
+			}
 		case "rule_requires":
 			if refNode := child.ChildByFieldName("name", l.lang); refNode != nil {
 				rule.Prereqs = append(rule.Prereqs, l.text(refNode))
@@ -430,7 +492,7 @@ func (l *lowerer) lowerExpertRule(n *gotreesitter.Node) (ExpertRule, error) {
 
 	whenNode := n.ChildByFieldName("condition", l.lang)
 	if whenNode != nil {
-		segment, lets, cond, hasCond, err := l.lowerExpertWhen(whenNode)
+		segment, lets, cond, hasCond, forDuration, withinDuration, stableCycles, hasStableCycles, err := l.lowerExpertWhen(whenNode)
 		if err != nil {
 			return ExpertRule{}, err
 		}
@@ -438,6 +500,10 @@ func (l *lowerer) lowerExpertRule(n *gotreesitter.Node) (ExpertRule, error) {
 		rule.Lets = lets
 		rule.Condition = cond
 		rule.HasCondition = hasCond
+		rule.ForDuration = forDuration
+		rule.WithinDuration = withinDuration
+		rule.StableCycles = stableCycles
+		rule.HasStableCycles = hasStableCycles
 	}
 
 	actionNode := n.ChildByFieldName("action", l.lang)
@@ -468,7 +534,7 @@ func (l *lowerer) lowerExpertRule(n *gotreesitter.Node) (ExpertRule, error) {
 	return rule, nil
 }
 
-func (l *lowerer) lowerExpertWhen(n *gotreesitter.Node) (string, []LetBinding, ExprID, bool, error) {
+func (l *lowerer) lowerExpertWhen(n *gotreesitter.Node) (string, []LetBinding, ExprID, bool, *Duration, *Duration, int, bool, error) {
 	segment := ""
 	if segNode := n.ChildByFieldName("segment", l.lang); segNode != nil {
 		segment = l.text(segNode)
@@ -496,17 +562,43 @@ func (l *lowerer) lowerExpertWhen(n *gotreesitter.Node) (string, []LetBinding, E
 	}
 
 	if exprNode := n.ChildByFieldName("expr", l.lang); exprNode != nil {
-		return segment, lets, l.lowerExpr(exprNode, baseScope), true, nil
+		forDuration, withinDuration, stableCycles, hasStableCycles := l.lowerWhenTemporal(n)
+		return segment, lets, l.lowerExpr(exprNode, baseScope), true, forDuration, withinDuration, stableCycles, hasStableCycles, nil
 	}
 	bindingsNode := n.ChildByFieldName("bindings", l.lang)
 	if bindingsNode == nil {
-		return segment, lets, 0, false, nil
+		return segment, lets, 0, false, nil, nil, 0, false, nil
 	}
 	bodyID, err := l.lowerExpertBindingClause(bindingsNode, baseScope)
 	if err != nil {
-		return "", nil, 0, false, err
+		return "", nil, 0, false, nil, nil, 0, false, err
 	}
-	return segment, lets, bodyID, true, nil
+	forDuration, withinDuration, stableCycles, hasStableCycles := l.lowerWhenTemporal(n)
+	return segment, lets, bodyID, true, forDuration, withinDuration, stableCycles, hasStableCycles, nil
+}
+
+func (l *lowerer) lowerWhenTemporal(n *gotreesitter.Node) (*Duration, *Duration, int, bool) {
+	if n == nil {
+		return nil, nil, 0, false
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		child := n.NamedChild(i)
+		switch child.Type(l.lang) {
+		case "expert_when_for":
+			if durationNode := child.ChildByFieldName("duration", l.lang); durationNode != nil {
+				return l.lowerTemporalDuration(durationNode), nil, 0, false
+			}
+		case "expert_when_within":
+			if durationNode := child.ChildByFieldName("duration", l.lang); durationNode != nil {
+				return nil, l.lowerTemporalDuration(durationNode), 0, false
+			}
+		case "expert_when_stable_for":
+			if cyclesNode := child.ChildByFieldName("cycles", l.lang); cyclesNode != nil {
+				return nil, nil, parseutil.ParseInt(l.text(cyclesNode)), true
+			}
+		}
+	}
+	return nil, nil, 0, false
 }
 
 type expertBinding struct {
@@ -776,6 +868,8 @@ func (l *lowerer) lowerExpr(n *gotreesitter.Node, scope *scope) ExprID {
 		})
 	case "quantifier_expr":
 		return l.lowerQuantifier(n, scope)
+	case "join_expr", "join_expr_full", "join_expr_shorthand":
+		return l.lowerJoinExpr(n, scope)
 	case "aggregate_expr":
 		return l.lowerAggregate(n, scope)
 	case "member_expr":
@@ -829,6 +923,39 @@ func (l *lowerer) lowerExpr(n *gotreesitter.Node, scope *scope) ExprID {
 			Span:   spanForNode(n),
 			Number: parseutil.ParseFloat(l.text(n)),
 		})
+	case "timestamp_literal":
+		return l.addExpr(Expr{
+			Kind:   ExprTimestampLit,
+			Span:   spanForNode(n),
+			String: l.text(n),
+		})
+	case "decimal_literal":
+		value, unit := parseQuantityLiteral(l.text(n))
+		return l.addExpr(Expr{
+			Kind:   ExprDecimalLit,
+			Span:   spanForNode(n),
+			String: strings.TrimSpace(strings.TrimSuffix(l.text(n), unit)),
+			Number: value,
+			Unit:   unit,
+		})
+	case "temporal_duration_literal":
+		value, unit := parseTemporalDurationExpr(l.text(n))
+		return l.addExpr(Expr{
+			Kind:   ExprQuantityLit,
+			Span:   spanForNode(n),
+			Number: value,
+			Unit:   unit,
+		})
+	case "quantity_literal":
+		value, unit := parseQuantityLiteral(l.text(n))
+		return l.addExpr(Expr{
+			Kind:   ExprQuantityLit,
+			Span:   spanForNode(n),
+			Number: value,
+			Unit:   unit,
+		})
+	case "call_expr":
+		return l.lowerCallExpr(n, scope)
 	case "string_literal":
 		return l.addExpr(Expr{
 			Kind:   ExprStringLit,
@@ -874,6 +1001,24 @@ func (l *lowerer) lowerExpr(n *gotreesitter.Node, scope *scope) ExprID {
 	}
 }
 
+func (l *lowerer) lowerCallExpr(n *gotreesitter.Node, scope *scope) ExprID {
+	expr := Expr{
+		Kind: ExprBuiltinCall,
+		Span: spanForNode(n),
+	}
+	if fnNode := n.ChildByFieldName("function", l.lang); fnNode != nil {
+		expr.FuncName = l.text(fnNode)
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		child := n.NamedChild(i)
+		if child.Type(l.lang) == "identifier" && l.text(child) == expr.FuncName {
+			continue
+		}
+		expr.Args = append(expr.Args, l.lowerExpr(child, scope))
+	}
+	return l.addExpr(expr)
+}
+
 func (l *lowerer) lowerBinary(n *gotreesitter.Node, scope *scope, op BinaryOpKind) ExprID {
 	return l.addExpr(Expr{
 		Kind:     ExprBinary,
@@ -898,6 +1043,140 @@ func (l *lowerer) lowerQuantifier(n *gotreesitter.Node, scope *scope) ExprID {
 		VarName:        varName,
 		Collection:     l.lowerExpr(n.ChildByFieldName("collection", l.lang), scope),
 		Body:           l.lowerExpr(n.ChildByFieldName("body", l.lang), bodyScope),
+	})
+}
+
+type joinBinding struct {
+	alias    string
+	factType string
+}
+
+func (l *lowerer) lowerJoinExpr(n *gotreesitter.Node, scope *scope) ExprID {
+	if n != nil && n.Type(l.lang) == "join_expr" && n.NamedChildCount() == 1 {
+		n = n.NamedChild(0)
+	}
+	bindings, includingSelf := l.lowerJoinBindings(n)
+	if len(bindings) < 2 {
+		return l.addExpr(Expr{Kind: ExprNullLit, Span: spanForNode(n)})
+	}
+
+	bodyScope := cloneScope(scope)
+	for _, binding := range bindings {
+		bodyScope.define(binding.alias)
+	}
+
+	predicateID, hasPredicate := l.lowerJoinPredicate(n, bindings, bodyScope)
+	bodyNode := n.ChildByFieldName("body", l.lang)
+	bodyID := l.lowerExpr(bodyNode, bodyScope)
+	combined := bodyID
+	if hasPredicate {
+		combined = l.combineJoinExprs(predicateID, bodyID)
+	}
+
+	if !includingSelf {
+		for i := 0; i < len(bindings); i++ {
+			for j := i + 1; j < len(bindings); j++ {
+				if bindings[i].factType != bindings[j].factType {
+					continue
+				}
+				leftKey := l.addExpr(Expr{
+					Kind: ExprVarRef,
+					Span: spanForNode(n),
+					Path: bindings[i].alias + ".key",
+				})
+				rightKey := l.addExpr(Expr{
+					Kind: ExprVarRef,
+					Span: spanForNode(n),
+					Path: bindings[j].alias + ".key",
+				})
+				exclusion := l.addExpr(Expr{
+					Kind:     ExprBinary,
+					Span:     spanForNode(n),
+					BinaryOp: BinaryNeq,
+					Left:     leftKey,
+					Right:    rightKey,
+				})
+				combined = l.combineJoinExprs(exclusion, combined)
+			}
+		}
+	}
+
+	for i := len(bindings) - 1; i >= 0; i-- {
+		collection := l.addExpr(Expr{
+			Kind: ExprVarRef,
+			Span: spanForNode(n),
+			Path: "facts." + bindings[i].factType,
+		})
+		combined = l.addExpr(Expr{
+			Kind:           ExprQuantifier,
+			Span:           spanForNode(n),
+			QuantifierKind: QuantifierAny,
+			VarName:        bindings[i].alias,
+			Collection:     collection,
+			Body:           combined,
+		})
+	}
+	return combined
+}
+
+func (l *lowerer) lowerJoinBindings(n *gotreesitter.Node) ([]joinBinding, bool) {
+	var bindings []joinBinding
+	includingSelf := false
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		child := n.NamedChild(i)
+		switch child.Type(l.lang) {
+		case "join_binding":
+			aliasNode := child.ChildByFieldName("alias", l.lang)
+			factTypeNode := child.ChildByFieldName("fact_type", l.lang)
+			if aliasNode == nil || factTypeNode == nil {
+				continue
+			}
+			bindings = append(bindings, joinBinding{
+				alias:    l.text(aliasNode),
+				factType: l.text(factTypeNode),
+			})
+		case "join_including_self":
+			includingSelf = true
+		}
+	}
+	return bindings, includingSelf
+}
+
+func (l *lowerer) lowerJoinPredicate(n *gotreesitter.Node, bindings []joinBinding, scope *scope) (ExprID, bool) {
+	if fieldNode := n.ChildByFieldName("field", l.lang); fieldNode != nil && len(bindings) == 2 {
+		field := l.text(fieldNode)
+		left := l.addExpr(Expr{
+			Kind: ExprVarRef,
+			Span: spanForNode(fieldNode),
+			Path: bindings[0].alias + "." + field,
+		})
+		right := l.addExpr(Expr{
+			Kind: ExprVarRef,
+			Span: spanForNode(fieldNode),
+			Path: bindings[1].alias + "." + field,
+		})
+		return l.addExpr(Expr{
+			Kind:     ExprBinary,
+			Span:     spanForNode(n),
+			BinaryOp: BinaryEq,
+			Left:     left,
+			Right:    right,
+		}), true
+	}
+	predicateNode := n.ChildByFieldName("predicate", l.lang)
+	if predicateNode == nil {
+		return 0, false
+	}
+	return l.lowerExpr(predicateNode, scope), true
+}
+
+func (l *lowerer) combineJoinExprs(left, right ExprID) ExprID {
+	return l.addExpr(Expr{
+		Kind:     ExprBinary,
+		Span:     l.program.Expr(left).Span,
+		BinaryOp: BinaryAnd,
+		Left:     left,
+		Right:    right,
 	})
 }
 
@@ -950,6 +1229,81 @@ func (l *lowerer) text(n *gotreesitter.Node) string {
 func (l *lowerer) isConst(name string) bool {
 	_, ok := l.constNames[name]
 	return ok
+}
+
+func normalizeSchemaTypeName(name string) string {
+	switch name {
+	case "bool":
+		return "boolean"
+	default:
+		return name
+	}
+}
+
+func parseSchemaFieldType(text string) FieldType {
+	text = normalizeSchemaTypeName(text)
+	if strings.HasPrefix(text, "number<") && strings.HasSuffix(text, ">") {
+		return FieldType{
+			Base:      "number",
+			Dimension: text[len("number<") : len(text)-1],
+		}
+	}
+	if strings.HasPrefix(text, "decimal<") && strings.HasSuffix(text, ">") {
+		return FieldType{
+			Base:      "decimal",
+			Dimension: text[len("decimal<") : len(text)-1],
+		}
+	}
+	return FieldType{Base: text}
+}
+
+func parseQuantityLiteral(text string) (float64, string) {
+	text = strings.TrimSpace(text)
+	for i, r := range text {
+		if r == ' ' || r == '\t' {
+			value := parseutil.ParseFloat(strings.TrimSpace(text[:i]))
+			unit := strings.TrimSpace(text[i+1:])
+			return value, unit
+		}
+	}
+	return parseutil.ParseFloat(text), ""
+}
+
+func parseTemporalDurationExpr(text string) (float64, string) {
+	text = strings.TrimSpace(text)
+	unitStart := len(text)
+	for i, r := range text {
+		if (r < '0' || r > '9') && r != '.' {
+			unitStart = i
+			break
+		}
+	}
+	value := parseutil.ParseFloat(strings.TrimSpace(text[:unitStart]))
+	switch strings.TrimSpace(text[unitStart:]) {
+	case "m":
+		return value, "min"
+	default:
+		return value, strings.TrimSpace(text[unitStart:])
+	}
+}
+
+func (l *lowerer) lowerTemporalDuration(n *gotreesitter.Node) *Duration {
+	if n == nil {
+		return nil
+	}
+	text := strings.TrimSpace(l.text(n))
+	unitStart := len(text)
+	for i, r := range text {
+		if (r < '0' || r > '9') && r != '.' {
+			unitStart = i
+			break
+		}
+	}
+	return &Duration{
+		Value: parseutil.ParseFloat(strings.TrimSpace(text[:unitStart])),
+		Unit:  strings.TrimSpace(text[unitStart:]),
+		Span:  spanForNode(n),
+	}
 }
 
 func spanForNode(n *gotreesitter.Node) Span {

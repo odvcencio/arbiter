@@ -5,21 +5,25 @@ type ExprID uint32
 
 // Program is the lowered in-process representation of a parsed `.arb` source.
 type Program struct {
-	Consts   []Const
-	Features []Feature
-	Segments []Segment
-	Rules    []Rule
-	Flags    []Flag
-	Expert   []ExpertRule
-	Arbiters []Arbiter
-	Exprs    []Expr
+	Consts         []Const
+	Features       []Feature
+	FactSchemas    []FactSchema
+	OutcomeSchemas []OutcomeSchema
+	Segments       []Segment
+	Rules          []Rule
+	Flags          []Flag
+	Expert         []ExpertRule
+	Arbiters       []Arbiter
+	Exprs          []Expr
 
-	constIndex   map[string]int
-	segmentIndex map[string]int
-	ruleIndex    map[string]int
-	flagIndex    map[string]int
-	expertIndex  map[string]int
-	arbiterIndex map[string]int
+	constIndex         map[string]int
+	factSchemaIndex    map[string]int
+	outcomeSchemaIndex map[string]int
+	segmentIndex       map[string]int
+	ruleIndex          map[string]int
+	flagIndex          map[string]int
+	expertIndex        map[string]int
+	arbiterIndex       map[string]int
 }
 
 // Span stores byte and point ranges for a declaration or expression.
@@ -52,6 +56,34 @@ type FeatureField struct {
 	Name string
 	Type string
 	Span Span
+}
+
+// FactSchema is one top-level fact schema declaration.
+type FactSchema struct {
+	Name   string
+	Fields []SchemaField
+	Span   Span
+}
+
+// OutcomeSchema is one top-level outcome schema declaration.
+type OutcomeSchema struct {
+	Name   string
+	Fields []SchemaField
+	Span   Span
+}
+
+// SchemaField is one fact/outcome schema field declaration.
+type SchemaField struct {
+	Name     string
+	Type     FieldType
+	Required bool
+	Span     Span
+}
+
+// FieldType is one schema field type.
+type FieldType struct {
+	Base      string
+	Dimension string
 }
 
 // Segment is one top-level segment declaration.
@@ -154,25 +186,38 @@ const (
 
 // ExpertRule is one top-level expert rule declaration.
 type ExpertRule struct {
-	Name            string
-	Span            Span
-	Priority        int32
-	KillSwitch      bool
-	Prereqs         []string
-	Excludes        []string
-	Segment         string
-	Lets            []LetBinding
-	Condition       ExprID
-	HasCondition    bool
-	Rollout         *Rollout
-	PerFact         bool
-	NoLoop          bool
-	Stable          bool
-	ActivationGroup string
-	ActionKind      ExpertActionKind
-	Target          string
-	Params          []ActionParam
-	SetParams       []ActionParam
+	Name             string
+	Span             Span
+	Priority         int32
+	KillSwitch       bool
+	Prereqs          []string
+	Excludes         []string
+	Segment          string
+	Lets             []LetBinding
+	Condition        ExprID
+	HasCondition     bool
+	Rollout          *Rollout
+	PerFact          bool
+	NoLoop           bool
+	Stable           bool
+	ActivationGroup  string
+	ForDuration      *Duration
+	WithinDuration   *Duration
+	StableCycles     int
+	HasStableCycles  bool
+	CooldownDuration *Duration
+	DebounceDuration *Duration
+	ActionKind       ExpertActionKind
+	Target           string
+	Params           []ActionParam
+	SetParams        []ActionParam
+}
+
+// Duration is one parsed temporal duration literal.
+type Duration struct {
+	Value float64
+	Unit  string
+	Span  Span
 }
 
 // ArbiterClauseKind identifies the kind of arbiter clause.
@@ -243,22 +288,26 @@ type Rollout struct {
 type ExprKind string
 
 const (
-	ExprStringLit ExprKind = "string_lit"
-	ExprNumberLit ExprKind = "number_lit"
-	ExprBoolLit   ExprKind = "bool_lit"
-	ExprNullLit   ExprKind = "null_lit"
-	ExprListLit   ExprKind = "list_lit"
+	ExprStringLit    ExprKind = "string_lit"
+	ExprNumberLit    ExprKind = "number_lit"
+	ExprQuantityLit  ExprKind = "quantity_lit"
+	ExprDecimalLit   ExprKind = "decimal_lit"
+	ExprTimestampLit ExprKind = "timestamp_lit"
+	ExprBoolLit      ExprKind = "bool_lit"
+	ExprNullLit      ExprKind = "null_lit"
+	ExprListLit      ExprKind = "list_lit"
 
 	ExprVarRef    ExprKind = "var_ref"
 	ExprConstRef  ExprKind = "const_ref"
 	ExprLocalRef  ExprKind = "local_ref"
 	ExprSecretRef ExprKind = "secret_ref"
 
-	ExprBinary     ExprKind = "binary"
-	ExprUnary      ExprKind = "unary"
-	ExprBetween    ExprKind = "between"
-	ExprQuantifier ExprKind = "quantifier"
-	ExprAggregate  ExprKind = "aggregate"
+	ExprBinary      ExprKind = "binary"
+	ExprUnary       ExprKind = "unary"
+	ExprBetween     ExprKind = "between"
+	ExprQuantifier  ExprKind = "quantifier"
+	ExprAggregate   ExprKind = "aggregate"
+	ExprBuiltinCall ExprKind = "builtin_call"
 )
 
 // BinaryOpKind identifies a binary operator.
@@ -339,6 +388,7 @@ type Expr struct {
 	Bool   bool
 	Name   string
 	Path   string
+	Unit   string
 
 	Elems []ExprID
 
@@ -361,6 +411,9 @@ type Expr struct {
 	Body           ExprID
 	ValueExpr      ExprID
 	HasValueExpr   bool
+
+	FuncName string
+	Args     []ExprID
 }
 
 // Expr returns the expression at id.
@@ -393,6 +446,28 @@ func (p *Program) SegmentByName(name string) (*Segment, bool) {
 	}
 	if idx, ok := p.segmentIndex[name]; ok {
 		return &p.Segments[idx], true
+	}
+	return nil, false
+}
+
+// FactSchemaByName returns the named fact schema declaration.
+func (p *Program) FactSchemaByName(name string) (*FactSchema, bool) {
+	if p == nil || name == "" {
+		return nil, false
+	}
+	if idx, ok := p.factSchemaIndex[name]; ok {
+		return &p.FactSchemas[idx], true
+	}
+	return nil, false
+}
+
+// OutcomeSchemaByName returns the named outcome schema declaration.
+func (p *Program) OutcomeSchemaByName(name string) (*OutcomeSchema, bool) {
+	if p == nil || name == "" {
+		return nil, false
+	}
+	if idx, ok := p.outcomeSchemaIndex[name]; ok {
+		return &p.OutcomeSchemas[idx], true
 	}
 	return nil, false
 }
@@ -453,6 +528,14 @@ func (p *Program) rebuildIndexes() {
 	p.constIndex = make(map[string]int, len(p.Consts))
 	for i := range p.Consts {
 		p.constIndex[p.Consts[i].Name] = i
+	}
+	p.factSchemaIndex = make(map[string]int, len(p.FactSchemas))
+	for i := range p.FactSchemas {
+		p.factSchemaIndex[p.FactSchemas[i].Name] = i
+	}
+	p.outcomeSchemaIndex = make(map[string]int, len(p.OutcomeSchemas))
+	for i := range p.OutcomeSchemas {
+		p.outcomeSchemaIndex[p.OutcomeSchemas[i].Name] = i
 	}
 	p.segmentIndex = make(map[string]int, len(p.Segments))
 	for i := range p.Segments {

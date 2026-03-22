@@ -233,6 +233,64 @@ func TestParseFeature(t *testing.T) {
 	}
 }
 
+func TestParseSchemas(t *testing.T) {
+	sexp := parseArb(t, `
+fact PlantStress {
+	level: string
+	note?: string
+	recorded: timestamp
+}
+
+outcome WaterAction {
+	zone: string
+	liters: number
+}
+`)
+	if !strings.Contains(sexp, "fact_declaration") {
+		t.Fatal("expected fact_declaration")
+	}
+	if !strings.Contains(sexp, "outcome_declaration") {
+		t.Fatal("expected outcome_declaration")
+	}
+	if strings.Count(sexp, "schema_field_declaration") != 5 {
+		t.Fatalf("expected 5 schema_field_declaration nodes, got: %s", sexp)
+	}
+}
+
+func TestParseQuantityLiteral(t *testing.T) {
+	sexp := parseArb(t, `rule HeatStress { when { reading.temperature > 28 C } then Alert {} }`)
+	if !strings.Contains(sexp, "quantity_literal") {
+		t.Fatalf("expected quantity_literal, got: %s", sexp)
+	}
+}
+
+func TestParseBuiltinCallAndTimestampLiteral(t *testing.T) {
+	sexp := parseArb(t, `rule T { when { now() > 2026-01-01T00:00:00Z and abs(sensor.delta) > 5 } then A {} }`)
+	if !strings.Contains(sexp, "call_expr") {
+		t.Fatalf("expected call_expr, got: %s", sexp)
+	}
+	if !strings.Contains(sexp, "timestamp_literal") {
+		t.Fatalf("expected timestamp_literal, got: %s", sexp)
+	}
+}
+
+func TestParseTemporalDurationLiteralInExpr(t *testing.T) {
+	sexp := parseArb(t, `rule T { when { recorded + 5m > now() } then A {} }`)
+	if !strings.Contains(sexp, "temporal_duration_literal") {
+		t.Fatalf("expected temporal_duration_literal, got: %s", sexp)
+	}
+}
+
+func TestParseJoinExpr(t *testing.T) {
+	sexp := parseArb(t, `expert rule T { when { join a: Sensor, b: Sensor on .zone { abs(a.temperature - b.temperature) > 5 C } } then emit Alert {} }`)
+	if !strings.Contains(sexp, "join_expr_shorthand") {
+		t.Fatalf("expected join_expr_shorthand, got: %s", sexp)
+	}
+	if strings.Count(sexp, "join_binding") != 2 {
+		t.Fatalf("expected 2 join bindings, got: %s", sexp)
+	}
+}
+
 func TestParseComparison(t *testing.T) {
 	sexp := parseArb(t, `rule T { when { x >= 18 } then A {} }`)
 	if !strings.Contains(sexp, "comparison_expr") {

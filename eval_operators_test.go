@@ -2,9 +2,11 @@ package arbiter
 
 import (
 	"testing"
+	"time"
 
 	"github.com/odvcencio/arbiter/compiler"
 	"github.com/odvcencio/arbiter/intern"
+	"github.com/odvcencio/arbiter/units"
 )
 
 // Helper that compiles .arb source and evals against the given data context.
@@ -117,6 +119,20 @@ func TestEvalOpLte(t *testing.T) {
 	}
 }
 
+func TestEvalOpDecimalComparison(t *testing.T) {
+	src := `rule T { when { 1000.25 USD >= 1000.25 USD } then A {} }`
+	if !evalRule(t, src, nil) {
+		t.Error("expected exact decimal comparison to match")
+	}
+}
+
+func TestEvalOpDecimalArithmetic(t *testing.T) {
+	src := `rule T { when { abs(-1000.25 USD + 10.00 USD) == 990.25 USD } then A {} }`
+	if !evalRule(t, src, nil) {
+		t.Error("expected decimal arithmetic to match")
+	}
+}
+
 // === String Comparison ===
 
 func TestEvalStringEq(t *testing.T) {
@@ -157,6 +173,70 @@ func TestEvalStringConcat(t *testing.T) {
 	}
 	if matched[0].Params["message"] != "Hello World" {
 		t.Fatalf("message: got %v, want %q", matched[0].Params["message"], "Hello World")
+	}
+}
+
+func TestEvalQuantityComparison(t *testing.T) {
+	src := `rule T { when { sensor.temp > 28 C } then A {} }`
+	rs, err := Compile([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dc := DataFromMap(map[string]any{
+		"sensor": map[string]any{
+			"temp": units.Quantity{Value: 86, Unit: "F"},
+		},
+	}, rs)
+	matched, err := Eval(rs, dc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matched) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(matched))
+	}
+}
+
+func TestEvalBuiltinMathFunctions(t *testing.T) {
+	src := `rule T { when { abs(sensor.delta) > 5 and max(sensor.left, sensor.right) == 9 and min(sensor.left, sensor.right) == 3 and round(sensor.ratio) == 4 and floor(sensor.flooring) == 4 and ceil(sensor.ceiling) == 5 } then A {} }`
+	if !evalRule(t, src, map[string]any{
+		"sensor": map[string]any{
+			"delta":    -6.0,
+			"left":     3.0,
+			"right":    9.0,
+			"ratio":    3.6,
+			"flooring": 4.9,
+			"ceiling":  4.1,
+		},
+	}) {
+		t.Fatal("expected builtin math functions to evaluate correctly")
+	}
+}
+
+func TestEvalTimestampLiteralAndNowBuiltin(t *testing.T) {
+	cutoff := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	src := `rule T { when { now() > 2026-01-01T00:00:00Z } then A {} }`
+	if !evalRule(t, src, map[string]any{"__now": float64(cutoff.Add(24 * time.Hour).Unix())}) {
+		t.Fatal("expected now() to compare against timestamp literal")
+	}
+	if evalRule(t, src, map[string]any{"__now": float64(cutoff.Unix())}) {
+		t.Fatal("expected now() at cutoff to not satisfy > comparison")
+	}
+}
+
+func TestEvalTimestampAdditionWithDuration(t *testing.T) {
+	recorded := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	src := `rule T { when { recorded + 5m > now() } then A {} }`
+	if !evalRule(t, src, map[string]any{
+		"recorded": float64(recorded.Unix()),
+		"__now":    float64(recorded.Add(4 * time.Minute).Unix()),
+	}) {
+		t.Fatal("expected timestamp + duration to compare against now()")
+	}
+	if evalRule(t, src, map[string]any{
+		"recorded": float64(recorded.Unix()),
+		"__now":    float64(recorded.Add(6 * time.Minute).Unix()),
+	}) {
+		t.Fatal("expected timestamp + duration comparison to fail after expiry")
 	}
 }
 

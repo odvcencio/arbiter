@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"fmt"
 	"math"
 	"strings"
 
@@ -71,6 +72,9 @@ func (vm *VM) evalLoadOp(instrs []byte, end, ip uint32, op compiler.OpCode, flag
 	case compiler.OpLoadNum:
 		vm.push(NumVal(vm.pool.GetNumber(arg)))
 		return nextInstruction(ip), true
+	case compiler.OpLoadDec:
+		vm.push(DecimalVal(vm.pool.GetDecimal(arg)))
+		return nextInstruction(ip), true
 	case compiler.OpLoadBool:
 		vm.push(BoolVal(arg == 1))
 		return nextInstruction(ip), true
@@ -104,16 +108,40 @@ func (vm *VM) evalComparisonOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 		vm.push(BoolVal(!vm.valEqual(a, b)))
 	case compiler.OpGt:
 		b, a := vm.pop(), vm.pop()
-		vm.push(BoolVal(vm.toNum(a) > vm.toNum(b)))
+		cmp, err := vm.orderedCompare(a, b)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(BoolVal(false))
+			break
+		}
+		vm.push(BoolVal(cmp > 0))
 	case compiler.OpGte:
 		b, a := vm.pop(), vm.pop()
-		vm.push(BoolVal(vm.toNum(a) >= vm.toNum(b)))
+		cmp, err := vm.orderedCompare(a, b)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(BoolVal(false))
+			break
+		}
+		vm.push(BoolVal(cmp >= 0))
 	case compiler.OpLt:
 		b, a := vm.pop(), vm.pop()
-		vm.push(BoolVal(vm.toNum(a) < vm.toNum(b)))
+		cmp, err := vm.orderedCompare(a, b)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(BoolVal(false))
+			break
+		}
+		vm.push(BoolVal(cmp < 0))
 	case compiler.OpLte:
 		b, a := vm.pop(), vm.pop()
-		vm.push(BoolVal(vm.toNum(a) <= vm.toNum(b)))
+		cmp, err := vm.orderedCompare(a, b)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(BoolVal(false))
+			break
+		}
+		vm.push(BoolVal(cmp <= 0))
 	default:
 		return 0, false
 	}
@@ -124,19 +152,37 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 	switch op {
 	case compiler.OpAdd:
 		b, a := vm.pop(), vm.pop()
-		if a.Typ == TypeString || b.Typ == TypeString {
-			vm.push(StrVal(vm.strPool.Intern(vm.valueToString(a) + vm.valueToString(b))))
-		} else {
-			vm.push(NumVal(vm.toNum(a) + vm.toNum(b)))
+		next, err := vm.addValues(a, b)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(NullVal())
+			break
 		}
+		vm.push(next)
 	case compiler.OpSub:
 		b, a := vm.pop(), vm.pop()
-		vm.push(NumVal(vm.toNum(a) - vm.toNum(b)))
+		next, err := vm.subValues(a, b)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(NullVal())
+			break
+		}
+		vm.push(next)
 	case compiler.OpMul:
 		b, a := vm.pop(), vm.pop()
+		if a.Typ == TypeDecimal || b.Typ == TypeDecimal {
+			vm.setErr(fmt.Errorf("operator * does not support decimal operands"))
+			vm.push(NullVal())
+			break
+		}
 		vm.push(NumVal(vm.toNum(a) * vm.toNum(b)))
 	case compiler.OpDiv:
 		b, a := vm.pop(), vm.pop()
+		if a.Typ == TypeDecimal || b.Typ == TypeDecimal {
+			vm.setErr(fmt.Errorf("operator / does not support decimal operands"))
+			vm.push(NullVal())
+			break
+		}
 		denom := vm.toNum(b)
 		if denom == 0 {
 			vm.push(NumVal(math.NaN()))
@@ -145,12 +191,68 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 		}
 	case compiler.OpMod:
 		b, a := vm.pop(), vm.pop()
+		if a.Typ == TypeDecimal || b.Typ == TypeDecimal {
+			vm.setErr(fmt.Errorf("operator %% does not support decimal operands"))
+			vm.push(NullVal())
+			break
+		}
 		denom := vm.toNum(b)
 		if denom == 0 {
 			vm.push(NumVal(math.NaN()))
 		} else {
 			vm.push(NumVal(math.Mod(vm.toNum(a), denom)))
 		}
+	case compiler.OpAbs:
+		a := vm.pop()
+		next, err := vm.absValue(a)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(NullVal())
+			break
+		}
+		vm.push(next)
+	case compiler.OpMin:
+		b, a := vm.pop(), vm.pop()
+		next, err := vm.minValue(a, b)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(NullVal())
+			break
+		}
+		vm.push(next)
+	case compiler.OpMax:
+		b, a := vm.pop(), vm.pop()
+		next, err := vm.maxValue(a, b)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(NullVal())
+			break
+		}
+		vm.push(next)
+	case compiler.OpRound:
+		a := vm.pop()
+		if a.Typ == TypeDecimal {
+			vm.setErr(fmt.Errorf("builtin round does not support decimal operands"))
+			vm.push(NullVal())
+			break
+		}
+		vm.push(NumVal(math.Round(vm.toNum(a))))
+	case compiler.OpFloor:
+		a := vm.pop()
+		if a.Typ == TypeDecimal {
+			vm.setErr(fmt.Errorf("builtin floor does not support decimal operands"))
+			vm.push(NullVal())
+			break
+		}
+		vm.push(NumVal(math.Floor(vm.toNum(a))))
+	case compiler.OpCeil:
+		a := vm.pop()
+		if a.Typ == TypeDecimal {
+			vm.setErr(fmt.Errorf("builtin ceil does not support decimal operands"))
+			vm.push(NullVal())
+			break
+		}
+		vm.push(NumVal(math.Ceil(vm.toNum(a))))
 	default:
 		return 0, false
 	}
@@ -266,20 +368,40 @@ func (vm *VM) evalRangeOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 	switch op {
 	case compiler.OpBetweenCC:
 		hi, lo, val := vm.pop(), vm.pop(), vm.pop()
-		n, l, h := vm.toNum(val), vm.toNum(lo), vm.toNum(hi)
-		vm.push(BoolVal(n >= l && n <= h))
+		ok, err := vm.betweenValues(val, lo, hi, true, true)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(BoolVal(false))
+			break
+		}
+		vm.push(BoolVal(ok))
 	case compiler.OpBetweenOO:
 		hi, lo, val := vm.pop(), vm.pop(), vm.pop()
-		n, l, h := vm.toNum(val), vm.toNum(lo), vm.toNum(hi)
-		vm.push(BoolVal(n > l && n < h))
+		ok, err := vm.betweenValues(val, lo, hi, false, false)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(BoolVal(false))
+			break
+		}
+		vm.push(BoolVal(ok))
 	case compiler.OpBetweenCO:
 		hi, lo, val := vm.pop(), vm.pop(), vm.pop()
-		n, l, h := vm.toNum(val), vm.toNum(lo), vm.toNum(hi)
-		vm.push(BoolVal(n >= l && n < h))
+		ok, err := vm.betweenValues(val, lo, hi, true, false)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(BoolVal(false))
+			break
+		}
+		vm.push(BoolVal(ok))
 	case compiler.OpBetweenOC:
 		hi, lo, val := vm.pop(), vm.pop(), vm.pop()
-		n, l, h := vm.toNum(val), vm.toNum(lo), vm.toNum(hi)
-		vm.push(BoolVal(n > l && n <= h))
+		ok, err := vm.betweenValues(val, lo, hi, false, true)
+		if err != nil {
+			vm.setErr(err)
+			vm.push(BoolVal(false))
+			break
+		}
+		vm.push(BoolVal(ok))
 	default:
 		return 0, false
 	}

@@ -1,6 +1,7 @@
 package arbiter
 
 import "github.com/odvcencio/arbiter/ir"
+import "github.com/odvcencio/arbiter/units"
 
 func emitIRProgram(program *ir.Program) *TranspileResult {
 	result := &TranspileResult{
@@ -94,6 +95,14 @@ func emitIRExpr(program *ir.Program, exprID ir.ExprID) any {
 		return map[string]any{"Const": map[string]any{"StrConst": expr.String}}
 	case ir.ExprNumberLit:
 		return map[string]any{"Const": map[string]any{"NumConst": expr.Number}}
+	case ir.ExprQuantityLit:
+		n, _, err := units.Normalize(expr.Number, expr.Unit)
+		if err != nil {
+			return map[string]any{"_raw": ir.RenderExpr(program, exprID)}
+		}
+		return map[string]any{"Const": map[string]any{"NumConst": n}}
+	case ir.ExprTimestampLit:
+		return map[string]any{"_raw": expr.String}
 	case ir.ExprBoolLit:
 		return map[string]any{"Const": map[string]any{"BoolConst": expr.Bool}}
 	case ir.ExprNullLit:
@@ -140,6 +149,8 @@ func emitIRExpr(program *ir.Program, exprID ir.ExprID) any {
 			"Condition":       emitIRExpr(program, expr.Body),
 		}
 	case ir.ExprAggregate:
+		return map[string]any{"_raw": ir.RenderExpr(program, exprID)}
+	case ir.ExprBuiltinCall:
 		return map[string]any{"_raw": ir.RenderExpr(program, exprID)}
 	default:
 		return map[string]any{"_raw": ir.RenderExpr(program, exprID)}

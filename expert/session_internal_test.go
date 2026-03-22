@@ -566,7 +566,7 @@ expert rule RouteReview {
 	}, nil, Options{})
 	session.refreshContextView(true, nil)
 
-	ok, match, err := session.evalRule(
+	ok, _, match, err := session.evalRule(
 		program.rules[0],
 		program.ruleset.Rules[0],
 		session.evaluator,
@@ -595,7 +595,7 @@ expert rule RouteReview {
 	session := NewSession(program, nil, nil, Options{})
 	session.refreshContextView(true, nil)
 
-	ok, match, err := session.evalRule(
+	ok, _, match, err := session.evalRule(
 		program.rules[0],
 		program.ruleset.Rules[0],
 		session.evaluator,
