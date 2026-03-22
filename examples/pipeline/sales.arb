@@ -15,68 +15,86 @@ arbiter sales_pipeline {
     on Status audit /var/log/arbiter/sales-pipeline.jsonl
 }
 
-# Phase 1: Qualify inbound leads
+# Phase 1: Qualify leads by tier (set in spreadsheet)
 
-expert rule QualifyHighTier priority 10 {
+expert rule QualifyHighTier priority 10 per_fact {
     when {
-        any lead in facts.Lead {
-            lead.title contains "fraud"
-            or lead.title contains "risk"
-            or lead.title contains "platform"
-        }
+        any lead in facts.Lead { lead.tier == "high" }
     }
     then assert QualifiedLead {
-        key: lead.email,
+        key: lead.key,
+        name: lead.name,
         tier: "high",
         source: lead.source,
         company: lead.company,
+        status: lead.status,
     }
 }
 
-expert rule QualifyMedTier priority 11 {
-    excludes QualifyHighTier
+expert rule QualifyMedTier priority 11 per_fact {
     when {
-        any lead in facts.Lead {
-            lead.title contains "engineer"
-            or lead.title contains "VP"
-            or lead.title contains "CTO"
-        }
+        any lead in facts.Lead { lead.tier == "medium" }
     }
     then assert QualifiedLead {
-        key: lead.email,
+        key: lead.key,
+        name: lead.name,
         tier: "medium",
         source: lead.source,
         company: lead.company,
+        status: lead.status,
     }
 }
 
 # Phase 2: Determine outreach action
 
-expert rule FirstTouch priority 20 {
+expert rule FirstTouchHigh priority 20 per_fact {
     when {
-        any ql in facts.QualifiedLead { ql.tier == "high" }
-        and none dm in facts.DMSent { dm.lead == ql.email }
+        any ql in facts.QualifiedLead {
+            ql.tier == "high"
+            and ql.status == "new"
+        }
     }
     then emit Action {
         type: "send_dm",
         template: "benchmark_hook",
-        lead: ql.email,
+        lead: ql.key,
+        name: ql.name,
         company: ql.company,
         priority: "high",
     }
 }
 
-expert rule FirstTouchMedium priority 21 {
+expert rule FirstTouchMedium priority 21 per_fact {
     when {
-        any ql in facts.QualifiedLead { ql.tier == "medium" }
-        and none dm in facts.DMSent { dm.lead == ql.email }
+        any ql in facts.QualifiedLead {
+            ql.tier == "medium"
+            and ql.status == "new"
+        }
     }
     then emit Action {
         type: "send_dm",
         template: "problem_hook",
-        lead: ql.email,
+        lead: ql.key,
+        name: ql.name,
         company: ql.company,
         priority: "medium",
+    }
+}
+
+expert rule FollowUpStale priority 22 per_fact {
+    stable
+    when {
+        any ql in facts.QualifiedLead {
+            ql.status == "dm_sent"
+            and ql.days_since > 3
+        }
+    }
+    then emit Reminder {
+        type: "follow_up",
+        lead: ql.key,
+        name: ql.name,
+        company: ql.company,
+        reason: "DM sent 3+ days ago with no response",
     }
 }
 

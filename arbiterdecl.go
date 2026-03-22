@@ -2,11 +2,9 @@ package arbiter
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/odvcencio/arbiter/internal/parseutil"
-	gotreesitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/arbiter/ir"
 )
 
 // ArbiterDeclaration is one continuously running decision loop declared in .arb.
@@ -62,15 +60,14 @@ type ArbiterHandler struct {
 	Target  string
 }
 
-func compileArbiters(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) ([]ArbiterDeclaration, error) {
-	out := make([]ArbiterDeclaration, 0)
-	seen := make(map[string]struct{})
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		child := root.NamedChild(i)
-		if child.Type(lang) != "arbiter_declaration" {
-			continue
-		}
-		decl, err := compileArbiterDeclaration(child, source, lang)
+func compileArbiters(program *ir.Program) ([]ArbiterDeclaration, error) {
+	if program == nil {
+		return nil, nil
+	}
+	out := make([]ArbiterDeclaration, 0, len(program.Arbiters))
+	seen := make(map[string]struct{}, len(program.Arbiters))
+	for i := range program.Arbiters {
+		decl, err := compileArbiterDeclaration(program, &program.Arbiters[i])
 		if err != nil {
 			return nil, err
 		}
@@ -83,26 +80,26 @@ func compileArbiters(root *gotreesitter.Node, source []byte, lang *gotreesitter.
 	return out, nil
 }
 
-func compileArbiterDeclaration(n *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (ArbiterDeclaration, error) {
-	nameNode := n.ChildByFieldName("name", lang)
-	if nameNode == nil {
+func compileArbiterDeclaration(program *ir.Program, declIR *ir.Arbiter) (ArbiterDeclaration, error) {
+	if declIR == nil {
+		return ArbiterDeclaration{}, fmt.Errorf("nil arbiter declaration")
+	}
+	if declIR.Name == "" {
 		return ArbiterDeclaration{}, fmt.Errorf("arbiter declaration missing name")
 	}
 
 	decl := ArbiterDeclaration{
-		Name:     nodeText(nameNode, source),
+		Name:     declIR.Name,
 		Killable: true,
 	}
 
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		child := n.NamedChild(i)
-		switch child.Type(lang) {
-		case "arbiter_poll_clause":
-			intervalNode := child.ChildByFieldName("interval", lang)
-			if intervalNode == nil {
+	for _, clause := range declIR.Clauses {
+		switch clause.Kind {
+		case ir.ArbiterPollClause:
+			if clause.Interval == "" {
 				return ArbiterDeclaration{}, fmt.Errorf("arbiter %s: poll interval is required", decl.Name)
 			}
-			interval, err := time.ParseDuration(nodeText(intervalNode, source))
+			interval, err := time.ParseDuration(clause.Interval)
 			if err != nil {
 				return ArbiterDeclaration{}, fmt.Errorf("arbiter %s: parse poll interval: %w", decl.Name, err)
 			}
@@ -113,62 +110,47 @@ func compileArbiterDeclaration(n *gotreesitter.Node, source []byte, lang *gotree
 				Kind:     ArbiterTriggerPoll,
 				Interval: interval,
 			})
-		case "arbiter_stream_clause":
-			targetNode := child.ChildByFieldName("target", lang)
-			if targetNode == nil {
+		case ir.ArbiterStreamClause:
+			if clause.Target == "" {
 				return ArbiterDeclaration{}, fmt.Errorf("arbiter %s: stream target is required", decl.Name)
 			}
 			decl.Triggers = append(decl.Triggers, ArbiterTrigger{
 				Kind:   ArbiterTriggerStream,
-				Target: arbiterLiteral(nodeText(targetNode, source)),
+				Target: clause.Target,
 			})
-		case "arbiter_schedule_clause":
-			exprNode := child.ChildByFieldName("expr", lang)
-			if exprNode == nil {
+		case ir.ArbiterScheduleClause:
+			if clause.Expr == "" {
 				return ArbiterDeclaration{}, fmt.Errorf("arbiter %s: schedule expression is required", decl.Name)
 			}
-			trigger := ArbiterTrigger{
+			decl.Triggers = append(decl.Triggers, ArbiterTrigger{
 				Kind:     ArbiterTriggerSchedule,
-				Schedule: arbiterLiteral(nodeText(exprNode, source)),
-			}
-			if targetNode := child.ChildByFieldName("target", lang); targetNode != nil {
-				trigger.Target = arbiterLiteral(nodeText(targetNode, source))
-			}
-			decl.Triggers = append(decl.Triggers, trigger)
-		case "arbiter_source_clause":
-			targetNode := child.ChildByFieldName("target", lang)
-			if targetNode == nil {
+				Schedule: clause.Expr,
+				Target:   clause.Target,
+			})
+		case ir.ArbiterSourceClause:
+			if clause.Target == "" {
 				return ArbiterDeclaration{}, fmt.Errorf("arbiter %s: source target is required", decl.Name)
 			}
-			decl.Sources = append(decl.Sources, ArbiterSource{
-				Target: arbiterLiteral(nodeText(targetNode, source)),
-			})
-		case "arbiter_checkpoint_clause":
-			targetNode := child.ChildByFieldName("target", lang)
-			if targetNode == nil {
+			decl.Sources = append(decl.Sources, ArbiterSource{Target: clause.Target})
+		case ir.ArbiterCheckpointClause:
+			if clause.Target == "" {
 				return ArbiterDeclaration{}, fmt.Errorf("arbiter %s: checkpoint target is required", decl.Name)
 			}
 			if decl.Checkpoint != "" {
 				return ArbiterDeclaration{}, fmt.Errorf("arbiter %s: checkpoint may only be declared once", decl.Name)
 			}
-			decl.Checkpoint = arbiterLiteral(nodeText(targetNode, source))
-		case "arbiter_handler_clause":
-			outcomeNode := child.ChildByFieldName("outcome", lang)
-			kindNode := child.ChildByFieldName("kind", lang)
-			if outcomeNode == nil || kindNode == nil {
+			decl.Checkpoint = clause.Target
+		case ir.ArbiterHandlerClause:
+			if clause.Outcome == "" || clause.Handler == "" {
 				return ArbiterDeclaration{}, fmt.Errorf("arbiter %s: handler must declare outcome and kind", decl.Name)
 			}
 			handler := ArbiterHandler{
-				Outcome: nodeText(outcomeNode, source),
-				Kind:    ArbiterHandlerKind(nodeText(kindNode, source)),
+				Outcome: clause.Outcome,
+				Kind:    ArbiterHandlerKind(clause.Handler),
+				Target:  clause.Target,
 			}
-			if filterNode := child.ChildByFieldName("filter", lang); filterNode != nil {
-				if exprNode := filterNode.ChildByFieldName("expr", lang); exprNode != nil {
-					handler.Where = strings.TrimSpace(nodeText(exprNode, source))
-				}
-			}
-			if targetNode := child.ChildByFieldName("target", lang); targetNode != nil {
-				handler.Target = arbiterLiteral(nodeText(targetNode, source))
+			if clause.HasFilter {
+				handler.Where = ir.RenderExpr(program, clause.Filter)
 			}
 			if handler.Kind != ArbiterHandlerStdout && handler.Target == "" {
 				return ArbiterDeclaration{}, fmt.Errorf("arbiter %s: handler %s requires a target", decl.Name, handler.Kind)
@@ -187,10 +169,6 @@ func compileArbiterDeclaration(n *gotreesitter.Node, source []byte, lang *gotree
 		return ArbiterDeclaration{}, fmt.Errorf("arbiter %s: at least one trigger is required", decl.Name)
 	}
 	return decl, nil
-}
-
-func arbiterLiteral(raw string) string {
-	return parseutil.StripQuotes(raw)
 }
 
 func isArbiterIdentifier(s string) bool {

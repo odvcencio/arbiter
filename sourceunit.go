@@ -10,6 +10,7 @@ import (
 
 	"github.com/odvcencio/arbiter/compiler"
 	"github.com/odvcencio/arbiter/internal/parseutil"
+	"github.com/odvcencio/arbiter/ir"
 	gotreesitter "github.com/odvcencio/gotreesitter"
 )
 
@@ -229,7 +230,11 @@ func CompileParsed(parsed *ParsedSource) (*compiler.CompiledRuleset, error) {
 	if parsed == nil {
 		return nil, fmt.Errorf("nil parsed source")
 	}
-	return compiler.CompileCST(parsed.Root, parsed.Source, parsed.Lang)
+	program, err := ir.Lower(parsed.Root, parsed.Source, parsed.Lang)
+	if err != nil {
+		return nil, err
+	}
+	return compiler.CompileIR(program)
 }
 
 // CompileFullParsed compiles a previously parsed source and extracts segments
@@ -238,15 +243,19 @@ func CompileFullParsed(parsed *ParsedSource) (*CompileResult, error) {
 	if parsed == nil {
 		return nil, fmt.Errorf("nil parsed source")
 	}
-	rs, err := compiler.CompileCST(parsed.Root, parsed.Source, parsed.Lang)
+	program, err := ir.Lower(parsed.Root, parsed.Source, parsed.Lang)
 	if err != nil {
 		return nil, err
 	}
-	segs, err := compileSegments(parsed.Root, parsed.Source, parsed.Lang)
+	rs, err := compiler.CompileIR(program)
 	if err != nil {
 		return nil, err
 	}
-	arbiters, err := compileArbiters(parsed.Root, parsed.Source, parsed.Lang)
+	segs, err := compileSegments(program)
+	if err != nil {
+		return nil, err
+	}
+	arbiters, err := compileArbiters(program)
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +263,7 @@ func CompileFullParsed(parsed *ParsedSource) (*CompileResult, error) {
 		Ruleset:  rs,
 		Segments: segs,
 		Arbiters: arbiters,
+		Program:  program,
 	}, nil
 }
 

@@ -1,257 +1,148 @@
 package emit
 
 import (
-	"fmt"
 	"strings"
 
-	"github.com/odvcencio/arbiter"
-	gotreesitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/arbiter/ir"
 )
 
 // ToCEL converts .arb source to CEL expressions (one per rule).
 func ToCEL(source []byte) (string, error) {
-	lang, err := arbiter.GetLanguage()
+	program, err := lowerProgram(source)
 	if err != nil {
-		return "", fmt.Errorf("generate arbiter language: %w", err)
+		return "", err
 	}
-
-	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.Parse(source)
-	if err != nil {
-		return "", fmt.Errorf("parse: %w", err)
-	}
-
-	root := tree.RootNode()
-	if root.HasError() {
-		return "", fmt.Errorf("parse errors in arbiter source")
-	}
-
-	e := &celEmitter{
-		src:    source,
-		lang:   lang,
-		consts: make(map[string]string),
-	}
-
-	return e.emitSourceFile(root), nil
-}
-
-type celEmitter struct {
-	src    []byte
-	lang   *gotreesitter.Language
-	consts map[string]string
-}
-
-func (e *celEmitter) text(n *gotreesitter.Node) string {
-	return string(e.src[n.StartByte():n.EndByte()])
-}
-
-func (e *celEmitter) nodeType(n *gotreesitter.Node) string {
-	return n.Type(e.lang)
-}
-
-func (e *celEmitter) childByField(n *gotreesitter.Node, field string) *gotreesitter.Node {
-	return n.ChildByFieldName(field, e.lang)
-}
-
-func (e *celEmitter) emitSourceFile(n *gotreesitter.Node) string {
-	// First pass: collect consts
-	e.collectConsts(n)
-
 	var rules []string
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		c := n.NamedChild(i)
-		if e.nodeType(c) == "rule_declaration" {
-			rules = append(rules, e.emitRule(c))
-		}
+	for i := range program.Rules {
+		rules = append(rules, emitCELRule(program, &program.Rules[i]))
 	}
-
-	return strings.Join(rules, "\n")
+	return strings.Join(rules, "\n"), nil
 }
 
-func (e *celEmitter) collectConsts(root *gotreesitter.Node) {
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		c := root.NamedChild(i)
-		if e.nodeType(c) == "const_declaration" {
-			name := e.text(e.childByField(c, "name"))
-			value := e.emitValue(e.childByField(c, "value"))
-			e.consts[name] = value
-		}
-	}
-}
-
-func (e *celEmitter) emitRule(n *gotreesitter.Node) string {
-	name := ""
-	if nameNode := e.childByField(n, "name"); nameNode != nil {
-		name = e.text(nameNode)
-	}
-
-	whenNode := e.childByField(n, "condition")
-	if whenNode == nil {
+func emitCELRule(program *ir.Program, rule *ir.Rule) string {
+	expr := emitCELRuleCondition(program, rule)
+	if expr == "" {
 		return ""
 	}
-	exprNode := e.childByField(whenNode, "expr")
-	if exprNode == nil {
-		return ""
-	}
-
-	expr := e.emitExpr(exprNode)
-	return "// " + name + "\n" + expr
+	return "// " + rule.Name + "\n" + expr
 }
 
-func (e *celEmitter) emitExpr(n *gotreesitter.Node) string {
-	if n == nil {
+func emitCELRuleCondition(program *ir.Program, rule *ir.Rule) string {
+	locals := localBindings(rule)
+	var parts []string
+	if rule.Segment != "" {
+		if segment, ok := program.SegmentByName(rule.Segment); ok {
+			parts = append(parts, emitCELExpr(program, segment.Condition, nil))
+		}
+	}
+	if rule.HasCondition {
+		parts = append(parts, emitCELExpr(program, rule.Condition, locals))
+	}
+	return strings.Join(parts, " && ")
+}
+
+func emitCELExpr(program *ir.Program, exprID ir.ExprID, locals map[string]ir.ExprID) string {
+	expr := program.Expr(exprID)
+	if expr == nil {
 		return ""
 	}
 
-	switch e.nodeType(n) {
-	case "or_expr":
-		left := e.emitExpr(e.childByField(n, "left"))
-		right := e.emitExpr(e.childByField(n, "right"))
-		return left + " || " + right
-
-	case "and_expr":
-		left := e.emitExpr(e.childByField(n, "left"))
-		right := e.emitExpr(e.childByField(n, "right"))
-		return left + " && " + right
-
-	case "not_expr":
-		operand := e.emitExpr(e.childByField(n, "operand"))
-		return "!" + operand
-
-	case "comparison_expr":
-		return e.emitComparison(n)
-
-	case "in_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return left + " in " + right
-
-	case "not_in_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return "!(" + left + " in " + right + ")"
-
-	case "starts_with_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return left + ".startsWith(" + right + ")"
-
-	case "ends_with_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return left + ".endsWith(" + right + ")"
-
-	case "matches_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return left + ".matches(" + right + ")"
-
-	case "is_null_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		return left + " == null"
-
-	case "is_not_null_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		return left + " != null"
-
-	case "contains_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return right + " in " + left
-
-	case "between_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		low := e.emitValue(e.childByField(n, "low"))
-		high := e.emitValue(e.childByField(n, "high"))
-		open := e.text(e.childByField(n, "open"))
-		close := e.text(e.childByField(n, "close"))
-		var lowOp, highOp string
-		if open == "[" {
-			lowOp = ">="
-		} else {
-			lowOp = ">"
+	switch expr.Kind {
+	case ir.ExprStringLit:
+		return `"` + expr.String + `"`
+	case ir.ExprNumberLit:
+		return formatNumber(expr.Number)
+	case ir.ExprBoolLit:
+		if expr.Bool {
+			return "true"
 		}
-		if close == "]" {
-			highOp = "<="
-		} else {
-			highOp = "<"
+		return "false"
+	case ir.ExprNullLit:
+		return "null"
+	case ir.ExprListLit:
+		items := make([]string, 0, len(expr.Elems))
+		for _, elem := range expr.Elems {
+			items = append(items, emitCELExpr(program, elem, locals))
+		}
+		return "[" + strings.Join(items, ", ") + "]"
+	case ir.ExprVarRef:
+		return expr.Path
+	case ir.ExprLocalRef:
+		if id, ok := locals[expr.Name]; ok {
+			return emitCELExpr(program, id, locals)
+		}
+		return expr.Name
+	case ir.ExprConstRef:
+		if decl, ok := program.ConstByName(expr.Name); ok {
+			return emitCELExpr(program, decl.Value, locals)
+		}
+		return expr.Name
+	case ir.ExprSecretRef:
+		return `"` + expr.Path + `"`
+	case ir.ExprUnary:
+		switch expr.UnaryOp {
+		case ir.UnaryNot:
+			return "!" + emitCELExpr(program, expr.Operand, locals)
+		case ir.UnaryIsNull:
+			return emitCELExpr(program, expr.Operand, locals) + " == null"
+		case ir.UnaryIsNotNull:
+			return emitCELExpr(program, expr.Operand, locals) + " != null"
+		}
+	case ir.ExprBetween:
+		left := emitCELExpr(program, expr.Value, locals)
+		low := emitCELExpr(program, expr.Low, locals)
+		high := emitCELExpr(program, expr.High, locals)
+		lowOp, highOp := ">", "<"
+		switch expr.BetweenKind {
+		case ir.BetweenClosedClosed:
+			lowOp, highOp = ">=", "<="
+		case ir.BetweenClosedOpen:
+			lowOp, highOp = ">=", "<"
+		case ir.BetweenOpenClosed:
+			lowOp, highOp = ">", "<="
 		}
 		return left + " " + lowOp + " " + low + " && " + left + " " + highOp + " " + high
-
-	case "paren_expr":
-		return "(" + e.emitExpr(e.childByField(n, "expr")) + ")"
-
+	case ir.ExprBinary:
+		left := emitCELExpr(program, expr.Left, locals)
+		right := emitCELExpr(program, expr.Right, locals)
+		switch expr.BinaryOp {
+		case ir.BinaryAnd:
+			return left + " && " + right
+		case ir.BinaryOr:
+			return left + " || " + right
+		case ir.BinaryIn:
+			return left + " in " + right
+		case ir.BinaryNotIn:
+			return "!(" + left + " in " + right + ")"
+		case ir.BinaryContains:
+			return right + " in " + left
+		case ir.BinaryNotContains:
+			return "!(" + right + " in " + left + ")"
+		case ir.BinaryStartsWith:
+			return left + ".startsWith(" + right + ")"
+		case ir.BinaryEndsWith:
+			return left + ".endsWith(" + right + ")"
+		case ir.BinaryMatches:
+			return left + ".matches(" + right + ")"
+		case ir.BinaryEq, ir.BinaryNeq, ir.BinaryGt, ir.BinaryGte, ir.BinaryLt, ir.BinaryLte,
+			ir.BinaryAdd, ir.BinarySub, ir.BinaryMul, ir.BinaryDiv, ir.BinaryMod:
+			return left + " " + string(expr.BinaryOp) + " " + right
+		default:
+			return ir.RenderExpr(program, exprID)
+		}
 	default:
-		return e.emitValue(n)
+		return ir.RenderExpr(program, exprID)
 	}
+	return ir.RenderExpr(program, exprID)
 }
 
-func (e *celEmitter) emitComparison(n *gotreesitter.Node) string {
-	left := e.emitValue(e.childByField(n, "left"))
-	right := e.emitValue(e.childByField(n, "right"))
-	op := e.extractComparisonOp(n)
-	return left + " " + op + " " + right
-}
-
-func (e *celEmitter) extractComparisonOp(n *gotreesitter.Node) string {
-	if opNode := e.childByField(n, "op"); opNode != nil {
-		return e.text(opNode)
+func localBindings(rule *ir.Rule) map[string]ir.ExprID {
+	if len(rule.Lets) == 0 {
+		return nil
 	}
-	leftNode := e.childByField(n, "left")
-	rightNode := e.childByField(n, "right")
-	if leftNode != nil && rightNode != nil {
-		between := strings.TrimSpace(string(e.src[leftNode.EndByte():rightNode.StartByte()]))
-		if between != "" {
-			return between
-		}
+	locals := make(map[string]ir.ExprID, len(rule.Lets))
+	for _, binding := range rule.Lets {
+		locals[binding.Name] = binding.Value
 	}
-	return "=="
-}
-
-func (e *celEmitter) emitValue(n *gotreesitter.Node) string {
-	if n == nil {
-		return ""
-	}
-
-	switch e.nodeType(n) {
-	case "member_expr":
-		return e.text(n)
-	case "identifier":
-		name := e.text(n)
-		if val, ok := e.consts[name]; ok {
-			return val
-		}
-		if name == "true" || name == "false" || name == "null" {
-			return name
-		}
-		return name
-	case "number_literal":
-		return e.text(n)
-	case "string_literal":
-		return e.text(n)
-	case "bool_literal":
-		return e.text(n)
-	case "list_literal":
-		return e.emitList(n)
-	case "math_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		op := e.text(e.childByField(n, "op"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return left + " " + op + " " + right
-	case "paren_expr":
-		return "(" + e.emitValue(e.childByField(n, "expr")) + ")"
-	default:
-		if n.NamedChildCount() == 1 {
-			return e.emitValue(n.NamedChild(0))
-		}
-		return e.text(n)
-	}
-}
-
-func (e *celEmitter) emitList(n *gotreesitter.Node) string {
-	var items []string
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		items = append(items, e.emitValue(n.NamedChild(i)))
-	}
-	return "[" + strings.Join(items, ", ") + "]"
+	return locals
 }

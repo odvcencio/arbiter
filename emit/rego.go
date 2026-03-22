@@ -1,340 +1,209 @@
 package emit
 
 import (
-	"fmt"
 	"strings"
 
-	"github.com/odvcencio/arbiter"
-	gotreesitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/arbiter/ir"
 )
 
 // ToRego converts .arb source to Rego (OPA) policy text.
 func ToRego(source []byte) (string, error) {
-	lang, err := arbiter.GetLanguage()
+	program, err := lowerProgram(source)
 	if err != nil {
-		return "", fmt.Errorf("generate arbiter language: %w", err)
+		return "", err
 	}
 
-	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.Parse(source)
-	if err != nil {
-		return "", fmt.Errorf("parse: %w", err)
-	}
-
-	root := tree.RootNode()
-	if root.HasError() {
-		return "", fmt.Errorf("parse errors in arbiter source")
-	}
-
-	e := &regoEmitter{
-		src:    source,
-		lang:   lang,
-		consts: make(map[string]string),
-	}
-
-	return e.emitSourceFile(root), nil
-}
-
-type regoEmitter struct {
-	src    []byte
-	lang   *gotreesitter.Language
-	consts map[string]string // const name -> rego literal
-}
-
-func (e *regoEmitter) text(n *gotreesitter.Node) string {
-	return string(e.src[n.StartByte():n.EndByte()])
-}
-
-func (e *regoEmitter) nodeType(n *gotreesitter.Node) string {
-	return n.Type(e.lang)
-}
-
-func (e *regoEmitter) childByField(n *gotreesitter.Node, field string) *gotreesitter.Node {
-	return n.ChildByFieldName(field, e.lang)
-}
-
-func (e *regoEmitter) emitSourceFile(n *gotreesitter.Node) string {
 	var buf strings.Builder
 	buf.WriteString("package rules\n\nimport rego.v1\n")
-
-	// First pass: collect consts
-	e.collectConsts(n)
-
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		c := n.NamedChild(i)
-		if e.nodeType(c) == "rule_declaration" {
-			buf.WriteString("\n")
-			buf.WriteString(e.emitRule(c))
-		}
+	for i := range program.Rules {
+		buf.WriteString("\n")
+		buf.WriteString(emitRegoRule(program, &program.Rules[i]))
 	}
-
-	return buf.String()
+	return buf.String(), nil
 }
 
-func (e *regoEmitter) collectConsts(root *gotreesitter.Node) {
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		c := root.NamedChild(i)
-		if e.nodeType(c) == "const_declaration" {
-			name := e.text(e.childByField(c, "name"))
-			value := e.emitValue(e.childByField(c, "value"))
-			e.consts[name] = value
-		}
-	}
-}
-
-func (e *regoEmitter) emitRule(n *gotreesitter.Node) string {
-	name := ""
-	if nameNode := e.childByField(n, "name"); nameNode != nil {
-		name = toSnakeCase(e.text(nameNode))
-	}
-
-	whenNode := e.childByField(n, "condition")
-	if whenNode == nil {
-		return ""
-	}
-	exprNode := e.childByField(whenNode, "expr")
-	if exprNode == nil {
-		return ""
-	}
-
-	// Check if the top-level expression is an OR — emit multiple rule bodies
-	if e.nodeType(exprNode) == "or_expr" {
-		branches := e.flattenOr(exprNode)
-		var buf strings.Builder
-		for _, branch := range branches {
-			buf.WriteString(name + " if {\n")
-			lines := e.emitConditionLines(branch)
-			for _, line := range lines {
-				buf.WriteString("    " + line + "\n")
-			}
-			buf.WriteString("}\n\n")
-		}
-		return buf.String()
-	}
+func emitRegoRule(program *ir.Program, rule *ir.Rule) string {
+	exprIDs := splitRegoOr(program, effectiveRuleCondition(program, rule))
+	name := toSnakeCase(rule.Name)
 
 	var buf strings.Builder
-	buf.WriteString(name + " if {\n")
-	lines := e.emitConditionLines(exprNode)
-	for _, line := range lines {
-		buf.WriteString("    " + line + "\n")
+	for _, exprID := range exprIDs {
+		buf.WriteString(name + " if {\n")
+		for _, line := range emitRegoConditionLines(program, exprID, localBindings(rule)) {
+			buf.WriteString("    " + line + "\n")
+		}
+		buf.WriteString("}\n\n")
 	}
-	buf.WriteString("}\n")
 	return buf.String()
 }
 
-// flattenOr collects all branches of nested or_expr nodes.
-func (e *regoEmitter) flattenOr(n *gotreesitter.Node) []*gotreesitter.Node {
-	if e.nodeType(n) != "or_expr" {
-		return []*gotreesitter.Node{n}
+func effectiveRuleCondition(program *ir.Program, rule *ir.Rule) ir.ExprID {
+	if rule.Segment == "" {
+		return rule.Condition
 	}
-	left := e.childByField(n, "left")
-	right := e.childByField(n, "right")
-	var result []*gotreesitter.Node
-	result = append(result, e.flattenOr(left)...)
-	result = append(result, e.flattenOr(right)...)
-	return result
+	segment, ok := program.SegmentByName(rule.Segment)
+	if !ok {
+		return rule.Condition
+	}
+	if !rule.HasCondition {
+		return segment.Condition
+	}
+	return appendExpr(program, ir.Expr{
+		Kind:     ir.ExprBinary,
+		BinaryOp: ir.BinaryAnd,
+		Left:     segment.Condition,
+		Right:    rule.Condition,
+	})
 }
 
-// emitConditionLines returns one line per AND-ed condition.
-func (e *regoEmitter) emitConditionLines(n *gotreesitter.Node) []string {
-	if e.nodeType(n) == "and_expr" {
-		parts := e.flattenAnd(n)
-		var lines []string
-		for _, part := range parts {
-			lines = append(lines, e.emitConditionLines(part)...)
+func splitRegoOr(program *ir.Program, exprID ir.ExprID) []ir.ExprID {
+	expr := program.Expr(exprID)
+	if expr == nil {
+		return nil
+	}
+	if expr.Kind == ir.ExprBinary && expr.BinaryOp == ir.BinaryAnd {
+		if lhs := program.Expr(expr.Left); lhs != nil && lhs.Kind == ir.ExprBinary && lhs.BinaryOp == ir.BinaryOr {
+			return flattenOr(program, expr.Left, expr.Right)
 		}
+	}
+	if expr.Kind == ir.ExprBinary && expr.BinaryOp == ir.BinaryOr {
+		return flattenSimpleOr(program, exprID)
+	}
+	return []ir.ExprID{exprID}
+}
+
+func flattenOr(program *ir.Program, orID, tailID ir.ExprID) []ir.ExprID {
+	branches := flattenSimpleOr(program, orID)
+	out := make([]ir.ExprID, 0, len(branches))
+	for _, branch := range branches {
+		expr := ir.Expr{
+			Kind:     ir.ExprBinary,
+			BinaryOp: ir.BinaryAnd,
+			Left:     branch,
+			Right:    tailID,
+		}
+		out = append(out, appendExpr(program, expr))
+	}
+	return out
+}
+
+func flattenSimpleOr(program *ir.Program, exprID ir.ExprID) []ir.ExprID {
+	expr := program.Expr(exprID)
+	if expr == nil || expr.Kind != ir.ExprBinary || expr.BinaryOp != ir.BinaryOr {
+		return []ir.ExprID{exprID}
+	}
+	out := flattenSimpleOr(program, expr.Left)
+	out = append(out, flattenSimpleOr(program, expr.Right)...)
+	return out
+}
+
+func appendExpr(program *ir.Program, expr ir.Expr) ir.ExprID {
+	id := ir.ExprID(len(program.Exprs))
+	program.Exprs = append(program.Exprs, expr)
+	return id
+}
+
+func emitRegoConditionLines(program *ir.Program, exprID ir.ExprID, locals map[string]ir.ExprID) []string {
+	expr := program.Expr(exprID)
+	if expr == nil {
+		return nil
+	}
+	if expr.Kind == ir.ExprBinary && expr.BinaryOp == ir.BinaryAnd {
+		lines := emitRegoConditionLines(program, expr.Left, locals)
+		lines = append(lines, emitRegoConditionLines(program, expr.Right, locals)...)
 		return lines
 	}
-	return []string{e.emitExpr(n)}
+	return []string{emitRegoExpr(program, exprID, locals)}
 }
 
-func (e *regoEmitter) flattenAnd(n *gotreesitter.Node) []*gotreesitter.Node {
-	if e.nodeType(n) != "and_expr" {
-		return []*gotreesitter.Node{n}
-	}
-	left := e.childByField(n, "left")
-	right := e.childByField(n, "right")
-	var result []*gotreesitter.Node
-	result = append(result, e.flattenAnd(left)...)
-	result = append(result, e.flattenAnd(right)...)
-	return result
-}
-
-func (e *regoEmitter) emitExpr(n *gotreesitter.Node) string {
-	if n == nil {
+func emitRegoExpr(program *ir.Program, exprID ir.ExprID, locals map[string]ir.ExprID) string {
+	expr := program.Expr(exprID)
+	if expr == nil {
 		return ""
 	}
-
-	switch e.nodeType(n) {
-	case "or_expr":
-		// Within a nested context, emit with explicit or
-		left := e.emitExpr(e.childByField(n, "left"))
-		right := e.emitExpr(e.childByField(n, "right"))
-		return left + " # or " + right
-
-	case "and_expr":
-		parts := e.flattenAnd(n)
-		var strs []string
-		for _, p := range parts {
-			strs = append(strs, e.emitExpr(p))
+	switch expr.Kind {
+	case ir.ExprStringLit:
+		return `"` + expr.String + `"`
+	case ir.ExprNumberLit:
+		return formatNumber(expr.Number)
+	case ir.ExprBoolLit:
+		if expr.Bool {
+			return "true"
 		}
-		return strings.Join(strs, "; ")
-
-	case "not_expr":
-		operand := e.emitExpr(e.childByField(n, "operand"))
-		return "not " + operand
-
-	case "comparison_expr":
-		return e.emitComparison(n)
-
-	case "in_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return left + " in " + right
-
-	case "not_in_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return "not " + left + " in " + right
-
-	case "starts_with_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return "startswith(" + left + ", " + right + ")"
-
-	case "ends_with_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return "endswith(" + left + ", " + right + ")"
-
-	case "matches_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return "regex.match(" + right + ", " + left + ")"
-
-	case "is_null_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		return left + " == null"
-
-	case "is_not_null_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		return left + " != null"
-
-	case "contains_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return right + " in " + left
-
-	case "between_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		low := e.emitValue(e.childByField(n, "low"))
-		high := e.emitValue(e.childByField(n, "high"))
-		open := e.text(e.childByField(n, "open"))
-		close := e.text(e.childByField(n, "close"))
-		var lowOp, highOp string
-		if open == "[" {
-			lowOp = ">="
-		} else {
-			lowOp = ">"
+		return "false"
+	case ir.ExprNullLit:
+		return "null"
+	case ir.ExprListLit:
+		items := make([]string, 0, len(expr.Elems))
+		for _, elem := range expr.Elems {
+			items = append(items, emitRegoExpr(program, elem, locals))
 		}
-		if close == "]" {
-			highOp = "<="
-		} else {
-			highOp = "<"
+		return "[" + strings.Join(items, ", ") + "]"
+	case ir.ExprVarRef:
+		return "input." + expr.Path
+	case ir.ExprLocalRef:
+		if id, ok := locals[expr.Name]; ok {
+			return emitRegoExpr(program, id, locals)
+		}
+		return "input." + expr.Name
+	case ir.ExprConstRef:
+		if decl, ok := program.ConstByName(expr.Name); ok {
+			return emitRegoExpr(program, decl.Value, locals)
+		}
+		return expr.Name
+	case ir.ExprSecretRef:
+		return `"` + expr.Path + `"`
+	case ir.ExprUnary:
+		switch expr.UnaryOp {
+		case ir.UnaryNot:
+			return "not " + emitRegoExpr(program, expr.Operand, locals)
+		case ir.UnaryIsNull:
+			return emitRegoExpr(program, expr.Operand, locals) + " == null"
+		case ir.UnaryIsNotNull:
+			return emitRegoExpr(program, expr.Operand, locals) + " != null"
+		}
+	case ir.ExprBetween:
+		left := emitRegoExpr(program, expr.Value, locals)
+		low := emitRegoExpr(program, expr.Low, locals)
+		high := emitRegoExpr(program, expr.High, locals)
+		lowOp, highOp := ">", "<"
+		switch expr.BetweenKind {
+		case ir.BetweenClosedClosed:
+			lowOp, highOp = ">=", "<="
+		case ir.BetweenClosedOpen:
+			lowOp, highOp = ">=", "<"
+		case ir.BetweenOpenClosed:
+			lowOp, highOp = ">", "<="
 		}
 		return left + " " + lowOp + " " + low + "; " + left + " " + highOp + " " + high
-
-	case "paren_expr":
-		return "(" + e.emitExpr(e.childByField(n, "expr")) + ")"
-
+	case ir.ExprBinary:
+		left := emitRegoExpr(program, expr.Left, locals)
+		right := emitRegoExpr(program, expr.Right, locals)
+		switch expr.BinaryOp {
+		case ir.BinaryOr:
+			return left + " # or " + right
+		case ir.BinaryAnd:
+			return left + "; " + right
+		case ir.BinaryIn:
+			return left + " in " + right
+		case ir.BinaryNotIn:
+			return "not " + left + " in " + right
+		case ir.BinaryStartsWith:
+			return "startswith(" + left + ", " + right + ")"
+		case ir.BinaryEndsWith:
+			return "endswith(" + left + ", " + right + ")"
+		case ir.BinaryMatches:
+			return "regex.match(" + right + ", " + left + ")"
+		case ir.BinaryContains:
+			return right + " in " + left
+		case ir.BinaryEq, ir.BinaryNeq, ir.BinaryGt, ir.BinaryGte, ir.BinaryLt, ir.BinaryLte,
+			ir.BinaryAdd, ir.BinarySub, ir.BinaryMul, ir.BinaryDiv, ir.BinaryMod:
+			return left + " " + string(expr.BinaryOp) + " " + right
+		default:
+			return ir.RenderExpr(program, exprID)
+		}
 	default:
-		return e.emitValue(n)
+		return ir.RenderExpr(program, exprID)
 	}
-}
-
-func (e *regoEmitter) emitComparison(n *gotreesitter.Node) string {
-	left := e.emitValue(e.childByField(n, "left"))
-	right := e.emitValue(e.childByField(n, "right"))
-	op := e.extractComparisonOp(n)
-	return left + " " + op + " " + right
-}
-
-func (e *regoEmitter) extractComparisonOp(n *gotreesitter.Node) string {
-	if opNode := e.childByField(n, "op"); opNode != nil {
-		return e.text(opNode)
-	}
-	leftNode := e.childByField(n, "left")
-	rightNode := e.childByField(n, "right")
-	if leftNode != nil && rightNode != nil {
-		between := strings.TrimSpace(string(e.src[leftNode.EndByte():rightNode.StartByte()]))
-		if between != "" {
-			return between
-		}
-	}
-	return "=="
-}
-
-func (e *regoEmitter) emitValue(n *gotreesitter.Node) string {
-	if n == nil {
-		return ""
-	}
-
-	switch e.nodeType(n) {
-	case "member_expr":
-		return "input." + e.text(n)
-	case "identifier":
-		name := e.text(n)
-		if val, ok := e.consts[name]; ok {
-			return val
-		}
-		if name == "true" || name == "false" || name == "null" {
-			return name
-		}
-		return "input." + name
-	case "number_literal":
-		return e.text(n)
-	case "string_literal":
-		return e.text(n)
-	case "bool_literal":
-		return e.text(n)
-	case "list_literal":
-		return e.emitList(n)
-	case "math_expr":
-		left := e.emitValue(e.childByField(n, "left"))
-		op := e.text(e.childByField(n, "op"))
-		right := e.emitValue(e.childByField(n, "right"))
-		return left + " " + op + " " + right
-	case "paren_expr":
-		return "(" + e.emitValue(e.childByField(n, "expr")) + ")"
-	default:
-		// Recurse into single-child wrapper nodes
-		if n.NamedChildCount() == 1 {
-			return e.emitValue(n.NamedChild(0))
-		}
-		return e.text(n)
-	}
-}
-
-func (e *regoEmitter) emitList(n *gotreesitter.Node) string {
-	var items []string
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		items = append(items, e.emitValue(n.NamedChild(i)))
-	}
-	return "[" + strings.Join(items, ", ") + "]"
-}
-
-// toSnakeCase converts PascalCase/camelCase to snake_case.
-func toSnakeCase(s string) string {
-	var buf strings.Builder
-	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				buf.WriteByte('_')
-			}
-			buf.WriteByte(byte(r - 'A' + 'a'))
-		} else {
-			buf.WriteRune(r)
-		}
-	}
-	return buf.String()
+	return ir.RenderExpr(program, exprID)
 }

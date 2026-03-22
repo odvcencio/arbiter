@@ -2,14 +2,12 @@ package expert
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	arbiter "github.com/odvcencio/arbiter"
 	"github.com/odvcencio/arbiter/compiler"
 	"github.com/odvcencio/arbiter/govern"
-	"github.com/odvcencio/arbiter/internal/parseutil"
-	gotreesitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/arbiter/ir"
 )
 
 // ActionKind is the kind of expert action a rule performs.
@@ -72,36 +70,23 @@ func CompileParsed(parsed *arbiter.ParsedSource, base *arbiter.CompileResult) (*
 			return nil, err
 		}
 	}
-	source := parsed.Source
-	lang := parsed.Lang
-	root := parsed.Root
-	var synthetic strings.Builder
-	rules := make([]Rule, 0)
-	byName := make(map[string]Rule)
-	segmentDeps := make(map[string][]string)
-
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		child := root.NamedChild(i)
-		switch child.Type(lang) {
-		case "const_declaration":
-			synthetic.WriteString(nodeText(child, source))
-			synthetic.WriteString("\n")
-		case "segment_declaration":
-			nameNode := child.ChildByFieldName("name", lang)
-			condNode := child.ChildByFieldName("condition", lang)
-			if nameNode != nil && condNode != nil {
-				segmentDeps[nodeText(nameNode, source)] = collectFactDeps(condNode, source, lang)
-			}
-		}
+	if base.Program == nil {
+		return nil, fmt.Errorf("nil lowered program")
 	}
 
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		child := root.NamedChild(i)
-		if child.Type(lang) != "expert_rule_declaration" {
-			continue
-		}
+	segmentDeps := make(map[string][]string, len(base.Program.Segments))
+	for i := range base.Program.Segments {
+		segment := &base.Program.Segments[i]
+		segmentDeps[segment.Name] = ir.FactDeps(base.Program, segment.Condition)
+	}
 
-		rule, compiled, err := parseExpertRule(child, source, lang, segmentDeps)
+	rules := make([]Rule, 0, len(base.Program.Expert))
+	byName := make(map[string]Rule, len(base.Program.Expert))
+	syntheticRules := make([]ir.Rule, 0, len(base.Program.Expert))
+
+	for i := range base.Program.Expert {
+		expertRule := &base.Program.Expert[i]
+		rule, synthetic, err := lowerExpertRule(base.Program, expertRule, segmentDeps)
 		if err != nil {
 			return nil, err
 		}
@@ -110,8 +95,7 @@ func CompileParsed(parsed *arbiter.ParsedSource, base *arbiter.CompileResult) (*
 		}
 		byName[rule.Name] = rule
 		rules = append(rules, rule)
-		synthetic.WriteString(compiled)
-		synthetic.WriteString("\n")
+		syntheticRules = append(syntheticRules, synthetic)
 	}
 
 	p := &Program{
@@ -119,15 +103,22 @@ func CompileParsed(parsed *arbiter.ParsedSource, base *arbiter.CompileResult) (*
 		rules:      rules,
 		ruleByName: byName,
 	}
-	if len(rules) == 0 {
+	if len(syntheticRules) == 0 {
 		return p, nil
 	}
 
-	compiled, err := arbiter.CompileFull([]byte(synthetic.String()))
+	syntheticProgram := &ir.Program{
+		Consts: base.Program.Consts,
+		Exprs:  base.Program.Exprs,
+		Rules:  syntheticRules,
+	}
+	syntheticProgram.RebuildIndexes()
+
+	compiled, err := compiler.CompileIR(syntheticProgram)
 	if err != nil {
 		return nil, fmt.Errorf("compile expert program: %w", err)
 	}
-	p.ruleset = compiled.Ruleset
+	p.ruleset = compiled
 	return p, nil
 }
 
@@ -166,321 +157,105 @@ func (p *Program) lookupRule(name string) (Rule, bool) {
 	return rule, ok
 }
 
-func parseExpertRule(n *gotreesitter.Node, source []byte, lang *gotreesitter.Language, segmentDeps map[string][]string) (Rule, string, error) {
-	nameNode := n.ChildByFieldName("name", lang)
-	whenNode := n.ChildByFieldName("condition", lang)
-	actionNode := n.ChildByFieldName("action", lang)
-	if nameNode == nil || whenNode == nil || actionNode == nil {
-		return Rule{}, "", fmt.Errorf("expert rule missing name, condition, or action")
+func lowerExpertRule(program *ir.Program, expertRule *ir.ExpertRule, segmentDeps map[string][]string) (Rule, ir.Rule, error) {
+	if expertRule == nil {
+		return Rule{}, ir.Rule{}, fmt.Errorf("nil expert rule")
 	}
-
 	rule := Rule{
-		Name: nodeText(nameNode, source),
-	}
-	if priNode := n.ChildByFieldName("priority", lang); priNode != nil {
-		rule.Priority = parseutil.ParseInt(nodeText(priNode, source))
-	}
-	rule.NoLoop = n.ChildByFieldName("no_loop", lang) != nil
-	rule.Stable = n.ChildByFieldName("stable", lang) != nil
-	rule.PerFact = n.ChildByFieldName("per_fact", lang) != nil
-	if groupNode := n.ChildByFieldName("activation_group", lang); groupNode != nil {
-		if nameNode := groupNode.ChildByFieldName("name", lang); nameNode != nil {
-			rule.Group = nodeText(nameNode, source)
-		}
+		Name:     expertRule.Name,
+		Priority: int(expertRule.Priority),
+		Kind:     ActionKind(expertRule.ActionKind),
+		Target:   expertRule.Target,
+		Prereqs:  append([]string(nil), expertRule.Prereqs...),
+		Excludes: append([]string(nil), expertRule.Excludes...),
+		NoLoop:   expertRule.NoLoop,
+		Stable:   expertRule.Stable,
+		PerFact:  expertRule.PerFact,
+		Group:    expertRule.ActivationGroup,
 	}
 
-	kindNode := actionNode.ChildByFieldName("kind", lang)
-	targetNode := actionNode.ChildByFieldName("action_name", lang)
-	if kindNode == nil || targetNode == nil {
-		return Rule{}, "", fmt.Errorf("expert rule %s missing action kind or target", rule.Name)
-	}
-	switch nodeText(kindNode, source) {
-	case string(ActionAssert):
-		rule.Kind = ActionAssert
-	case string(ActionEmit):
-		rule.Kind = ActionEmit
-	case string(ActionRetract):
-		rule.Kind = ActionRetract
-	case string(ActionModify):
-		rule.Kind = ActionModify
-	default:
-		return Rule{}, "", fmt.Errorf("expert rule %s has unsupported action kind %q", rule.Name, nodeText(kindNode, source))
-	}
-	rule.Target = nodeText(targetNode, source)
 	deps := make([]string, 0)
-	if segNode := whenNode.ChildByFieldName("segment", lang); segNode != nil {
-		deps = append(deps, segmentDeps[nodeText(segNode, source)]...)
+	if expertRule.Segment != "" {
+		deps = append(deps, segmentDeps[expertRule.Segment]...)
 	}
-	whenSource, whenDeps, err := expertConditionSource(whenNode, source, lang)
-	if err != nil {
-		return Rule{}, "", fmt.Errorf("expert rule %s: %w", rule.Name, err)
+	for _, binding := range expertRule.Lets {
+		deps = append(deps, ir.FactDeps(program, binding.Value)...)
 	}
-	deps = append(deps, whenDeps...)
-	for i := 0; i < int(actionNode.NamedChildCount()); i++ {
-		child := actionNode.NamedChild(i)
-		switch child.Type(lang) {
-		case "param_assignment":
-			keyNode := child.ChildByFieldName("key", lang)
-			if keyNode != nil && strings.HasPrefix(nodeText(keyNode, source), modifySetPrefix) {
-				return Rule{}, "", fmt.Errorf("expert rule %s uses reserved param prefix %q", rule.Name, modifySetPrefix)
-			}
-			if valueNode := child.ChildByFieldName("value", lang); valueNode != nil {
-				deps = append(deps, collectFactDeps(valueNode, source, lang)...)
-			}
-		case "expert_set_block":
-			for j := 0; j < int(child.NamedChildCount()); j++ {
-				setChild := child.NamedChild(j)
-				if setChild.Type(lang) != "param_assignment" {
-					continue
-				}
-				keyNode := setChild.ChildByFieldName("key", lang)
-				if keyNode != nil && strings.HasPrefix(nodeText(keyNode, source), modifySetPrefix) {
-					return Rule{}, "", fmt.Errorf("expert rule %s uses reserved set-field prefix %q", rule.Name, modifySetPrefix)
-				}
-				if valueNode := setChild.ChildByFieldName("value", lang); valueNode != nil {
-					deps = append(deps, collectFactDeps(valueNode, source, lang)...)
-				}
-			}
+	if expertRule.HasCondition {
+		deps = append(deps, ir.FactDeps(program, expertRule.Condition)...)
+	}
+	for _, param := range expertRule.Params {
+		if strings.HasPrefix(param.Key, modifySetPrefix) {
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s uses reserved param prefix %q", rule.Name, modifySetPrefix)
 		}
+		deps = append(deps, ir.FactDeps(program, param.Value)...)
 	}
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		child := n.NamedChild(i)
-		switch child.Type(lang) {
-		case "rule_requires":
-			if prereqNode := child.ChildByFieldName("name", lang); prereqNode != nil {
-				rule.Prereqs = append(rule.Prereqs, nodeText(prereqNode, source))
-			}
-		case "rule_excludes":
-			if exclNode := child.ChildByFieldName("name", lang); exclNode != nil {
-				rule.Excludes = append(rule.Excludes, nodeText(exclNode, source))
-			}
-		default:
-			continue
+	for _, param := range expertRule.SetParams {
+		if strings.HasPrefix(param.Key, modifySetPrefix) {
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s uses reserved set-field prefix %q", rule.Name, modifySetPrefix)
 		}
+		deps = append(deps, ir.FactDeps(program, param.Value)...)
 	}
 	rule.FactDeps = uniqueStrings(deps)
 
-	setBlock := actionNode.ChildByFieldName("set_block", lang)
 	hasKey := false
-	setCount := 0
-	for i := 0; i < int(actionNode.NamedChildCount()); i++ {
-		child := actionNode.NamedChild(i)
-		if child.Type(lang) != "param_assignment" {
-			continue
-		}
-		if keyNode := child.ChildByFieldName("key", lang); keyNode != nil && nodeText(keyNode, source) == "key" {
+	for _, param := range expertRule.Params {
+		if param.Key == "key" {
 			hasKey = true
-		}
-	}
-	if setBlock != nil {
-		for i := 0; i < int(setBlock.NamedChildCount()); i++ {
-			if setBlock.NamedChild(i).Type(lang) == "param_assignment" {
-				setCount++
-			}
+			break
 		}
 	}
 	switch rule.Kind {
 	case ActionRetract:
 		if !hasKey {
-			return Rule{}, "", fmt.Errorf("expert rule %s retract %s: key is required", rule.Name, rule.Target)
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s retract %s: key is required", rule.Name, rule.Target)
 		}
-		if setBlock != nil {
-			return Rule{}, "", fmt.Errorf("expert rule %s retract %s: set block is not allowed", rule.Name, rule.Target)
+		if len(expertRule.SetParams) > 0 {
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s retract %s: set block is not allowed", rule.Name, rule.Target)
 		}
 	case ActionModify:
 		if !hasKey {
-			return Rule{}, "", fmt.Errorf("expert rule %s modify %s: key is required", rule.Name, rule.Target)
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s modify %s: key is required", rule.Name, rule.Target)
 		}
-		if setBlock == nil || setCount == 0 {
-			return Rule{}, "", fmt.Errorf("expert rule %s modify %s: non-empty set block is required", rule.Name, rule.Target)
+		if len(expertRule.SetParams) == 0 {
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s modify %s: non-empty set block is required", rule.Name, rule.Target)
 		}
 	default:
-		if setBlock != nil {
-			return Rule{}, "", fmt.Errorf("expert rule %s %s %s: set block is only valid for modify", rule.Name, rule.Kind, rule.Target)
+		if len(expertRule.SetParams) > 0 {
+			return Rule{}, ir.Rule{}, fmt.Errorf("expert rule %s %s %s: set block is only valid for modify", rule.Name, rule.Kind, rule.Target)
 		}
 	}
 
-	var synthetic strings.Builder
-	synthetic.WriteString("rule ")
-	synthetic.WriteString(rule.Name)
-	if priNode := n.ChildByFieldName("priority", lang); priNode != nil {
-		synthetic.WriteString(" priority ")
-		synthetic.WriteString(nodeText(priNode, source))
+	action := ir.Action{
+		Name:   rule.Target,
+		Params: append([]ir.ActionParam(nil), expertRule.Params...),
 	}
-	synthetic.WriteString(" {\n")
-	if ksNode := n.ChildByFieldName("kill_switch", lang); ksNode != nil {
-		synthetic.WriteString(nodeText(ksNode, source))
-		synthetic.WriteString("\n")
-	}
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		child := n.NamedChild(i)
-		if child.Type(lang) != "rule_requires" {
-			continue
-		}
-		synthetic.WriteString(nodeText(child, source))
-		synthetic.WriteString("\n")
-	}
-	synthetic.WriteString(whenSource)
-	synthetic.WriteString("\n")
-	synthetic.WriteString("then ")
-	synthetic.WriteString(rule.Target)
-	synthetic.WriteString(" {\n")
-	for i := 0; i < int(actionNode.NamedChildCount()); i++ {
-		child := actionNode.NamedChild(i)
-		switch child.Type(lang) {
-		case "param_assignment":
-			synthetic.WriteString(nodeText(child, source))
-			synthetic.WriteString("\n")
-		case "expert_set_block":
-			for j := 0; j < int(child.NamedChildCount()); j++ {
-				setChild := child.NamedChild(j)
-				if setChild.Type(lang) != "param_assignment" {
-					continue
-				}
-				keyNode := setChild.ChildByFieldName("key", lang)
-				valueNode := setChild.ChildByFieldName("value", lang)
-				if keyNode == nil || valueNode == nil {
-					continue
-				}
-				synthetic.WriteString(modifySetPrefix)
-				synthetic.WriteString(nodeText(keyNode, source))
-				synthetic.WriteString(": ")
-				synthetic.WriteString(nodeText(valueNode, source))
-				synthetic.WriteString("\n")
-			}
+	if len(expertRule.SetParams) > 0 {
+		for _, param := range expertRule.SetParams {
+			action.Params = append(action.Params, ir.ActionParam{
+				Key:   modifySetPrefix + param.Key,
+				Span:  param.Span,
+				Value: param.Value,
+			})
 		}
 	}
-	synthetic.WriteString("}\n")
-	if rolloutNode := n.ChildByFieldName("rollout", lang); rolloutNode != nil {
-		synthetic.WriteString(nodeText(rolloutNode, source))
-		synthetic.WriteString("\n")
-	}
-	synthetic.WriteString("}\n")
 
-	return rule, synthetic.String(), nil
-}
-
-type bindingRef struct {
-	Name   string
-	Source string
-}
-
-func expertConditionSource(whenNode *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (string, []string, error) {
-	if whenNode == nil {
-		return "", nil, fmt.Errorf("missing expert when block")
-	}
-	letExprs, letDeps := collectLetBindings(whenNode, source, lang)
-	if exprNode := whenNode.ChildByFieldName("expr", lang); exprNode != nil {
-		deps := append(collectFactDeps(exprNode, source, lang), letDeps...)
-		return nodeText(whenNode, source), uniqueStrings(deps), nil
+	synthetic := ir.Rule{
+		Name:         expertRule.Name,
+		Span:         expertRule.Span,
+		Priority:     expertRule.Priority,
+		KillSwitch:   expertRule.KillSwitch,
+		Prereqs:      append([]string(nil), expertRule.Prereqs...),
+		Excludes:     append([]string(nil), expertRule.Excludes...),
+		Segment:      expertRule.Segment,
+		Lets:         append([]ir.LetBinding(nil), expertRule.Lets...),
+		Condition:    expertRule.Condition,
+		HasCondition: expertRule.HasCondition,
+		Action:       action,
+		Rollout:      expertRule.Rollout,
 	}
 
-	bindingsNode := whenNode.ChildByFieldName("bindings", lang)
-	if bindingsNode == nil {
-		return "", nil, fmt.Errorf("expert binding clause is missing")
-	}
-	whereNode := bindingsNode.ChildByFieldName("where", lang)
-	if whereNode == nil {
-		return "", nil, fmt.Errorf("expert binding clause is missing where block")
-	}
-	bodyExpr := whereNode.ChildByFieldName("expr", lang)
-	if bodyExpr == nil {
-		return "", nil, fmt.Errorf("expert binding clause is missing where expression")
-	}
-
-	bindings := make([]bindingRef, 0)
-	deps := append(collectFactDeps(bodyExpr, source, lang), letDeps...)
-	for i := 0; i < int(bindingsNode.NamedChildCount()); i++ {
-		child := bindingsNode.NamedChild(i)
-		if child.Type(lang) != "expert_binding" {
-			continue
-		}
-		nameNode := child.ChildByFieldName("name", lang)
-		sourceNode := child.ChildByFieldName("source", lang)
-		if nameNode == nil || sourceNode == nil {
-			return "", nil, fmt.Errorf("expert binding is missing name or source")
-		}
-		bindings = append(bindings, bindingRef{
-			Name:   nodeText(nameNode, source),
-			Source: nodeText(sourceNode, source),
-		})
-		deps = append(deps, collectFactDeps(sourceNode, source, lang)...)
-	}
-	if len(bindings) == 0 {
-		return "", nil, fmt.Errorf("expert binding clause requires at least one bind")
-	}
-
-	expr := nodeText(bodyExpr, source)
-	for i := len(bindings) - 1; i >= 0; i-- {
-		expr = fmt.Sprintf("any %s in %s { %s }", bindings[i].Name, bindings[i].Source, expr)
-	}
-
-	var out strings.Builder
-	out.WriteString("when ")
-	if segNode := whenNode.ChildByFieldName("segment", lang); segNode != nil {
-		out.WriteString("segment ")
-		out.WriteString(nodeText(segNode, source))
-		out.WriteByte(' ')
-	}
-	out.WriteString("{ ")
-	for _, letExpr := range letExprs {
-		out.WriteString(letExpr)
-		out.WriteByte(' ')
-	}
-	out.WriteString(expr)
-	out.WriteString(" }")
-	return out.String(), uniqueStrings(deps), nil
-}
-
-func collectLetBindings(whenNode *gotreesitter.Node, source []byte, lang *gotreesitter.Language) ([]string, []string) {
-	if whenNode == nil {
-		return nil, nil
-	}
-	letExprs := make([]string, 0)
-	letDeps := make([]string, 0)
-	for i := 0; i < int(whenNode.NamedChildCount()); i++ {
-		child := whenNode.NamedChild(i)
-		if child.Type(lang) != "let_binding" {
-			continue
-		}
-		letExprs = append(letExprs, nodeText(child, source))
-		if valueNode := child.ChildByFieldName("value", lang); valueNode != nil {
-			letDeps = append(letDeps, collectFactDeps(valueNode, source, lang)...)
-		}
-	}
-	return letExprs, letDeps
-}
-
-func nodeText(n *gotreesitter.Node, source []byte) string {
-	return string(source[n.StartByte():n.EndByte()])
-}
-
-func collectFactDeps(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) []string {
-	if root == nil {
-		return nil
-	}
-
-	var deps []string
-	var walk func(*gotreesitter.Node)
-	walk = func(n *gotreesitter.Node) {
-		if n == nil {
-			return
-		}
-		if n.Type(lang) == "member_expr" {
-			text := nodeText(n, source)
-			if strings.HasPrefix(text, "facts.") {
-				parts := strings.Split(text, ".")
-				if len(parts) >= 2 && parts[1] != "" {
-					deps = append(deps, parts[1])
-				}
-			}
-		}
-		for i := 0; i < int(n.NamedChildCount()); i++ {
-			walk(n.NamedChild(i))
-		}
-	}
-	walk(root)
-	return uniqueStrings(deps)
+	return rule, synthetic, nil
 }
 
 func uniqueStrings(values []string) []string {
@@ -488,10 +263,15 @@ func uniqueStrings(values []string) []string {
 		return nil
 	}
 	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		if value == "" || slices.Contains(out, value) {
+		if value == "" {
 			continue
 		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
 		out = append(out, value)
 	}
 	return out

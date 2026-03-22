@@ -35,6 +35,12 @@ rule EnhancedRiskCheck {
 	if !result.Ruleset.Rules[0].HasSegment {
 		t.Fatal("expected compiled rule to reference a segment")
 	}
+	if result.Program == nil {
+		t.Fatal("expected CompileFull to retain lowered program")
+	}
+	if len(result.Program.Segments) != 1 {
+		t.Fatalf("expected lowered program to contain 1 segment, got %d", len(result.Program.Segments))
+	}
 }
 
 func TestEvalGovernedUsesPrereqsAndSegments(t *testing.T) {

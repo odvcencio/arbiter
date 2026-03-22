@@ -2,12 +2,12 @@ package arbiter
 
 import (
 	"fmt"
-	"strings"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 
 	"github.com/odvcencio/arbiter/compiler"
 	"github.com/odvcencio/arbiter/govern"
+	"github.com/odvcencio/arbiter/ir"
 	"github.com/odvcencio/arbiter/overrides"
 	"github.com/odvcencio/arbiter/vm"
 )
@@ -26,6 +26,7 @@ type CompileResult struct {
 	Ruleset  *compiler.CompiledRuleset
 	Segments *govern.SegmentSet
 	Arbiters []ArbiterDeclaration
+	Program  *ir.Program
 }
 
 // CompileFull compiles .arb source and extracts top-level segments.
@@ -125,30 +126,22 @@ func DataFromJSON(jsonStr string, rs *compiler.CompiledRuleset) (vm.DataContext,
 	return &evalContextWrapper{inner: dc, pool: pool}, nil
 }
 
-func compileSegments(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (*govern.SegmentSet, error) {
+func compileSegments(program *ir.Program) (*govern.SegmentSet, error) {
 	segments := govern.NewSegmentSet()
 
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		child := root.NamedChild(i)
-		if child.Type(lang) != "segment_declaration" {
-			continue
-		}
+	if program == nil {
+		return segments, nil
+	}
 
-		nameNode := child.ChildByFieldName("name", lang)
-		condNode := child.ChildByFieldName("condition", lang)
-		if nameNode == nil || condNode == nil {
-			return nil, fmt.Errorf("segment missing name or condition")
-		}
-
-		name := nodeText(nameNode, source)
-		condition := strings.TrimSpace(nodeText(condNode, source))
-		rs, err := compileSegmentRuleset(name, condition)
+	for i := range program.Segments {
+		segment := &program.Segments[i]
+		rs, err := compileSegmentRuleset(program, segment)
 		if err != nil {
-			return nil, fmt.Errorf("compile segment %s: %w", name, err)
+			return nil, fmt.Errorf("compile segment %s: %w", segment.Name, err)
 		}
 		segments.Add(&govern.CompiledSegment{
-			Name:    name,
-			Source:  condition,
+			Name:    segment.Name,
+			Source:  ir.RenderExpr(program, segment.Condition),
 			Ruleset: rs,
 		})
 	}
@@ -156,9 +149,24 @@ func compileSegments(root *gotreesitter.Node, source []byte, lang *gotreesitter.
 	return segments, nil
 }
 
-func compileSegmentRuleset(name, condition string) (*compiler.CompiledRuleset, error) {
-	synthetic := fmt.Sprintf("rule __seg_%s { when { %s } then Match {} }", name, condition)
-	return Compile([]byte(synthetic))
+func compileSegmentRuleset(program *ir.Program, segment *ir.Segment) (*compiler.CompiledRuleset, error) {
+	if program == nil || segment == nil {
+		return nil, fmt.Errorf("nil segment program")
+	}
+	synthetic := &ir.Program{
+		Consts: program.Consts,
+		Exprs:  program.Exprs,
+		Rules: []ir.Rule{
+			{
+				Name:         "__seg_" + segment.Name,
+				HasCondition: true,
+				Condition:    segment.Condition,
+				Action:       ir.Action{Name: "Match"},
+			},
+		},
+	}
+	synthetic.RebuildIndexes()
+	return compiler.CompileIR(synthetic)
 }
 
 func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *vm.StringPool, segments *govern.SegmentSet, ctx map[string]any, bundleID string, view overrides.View) ([]vm.MatchedRule, *govern.Trace, error) {

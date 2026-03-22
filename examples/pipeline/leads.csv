@@ -1,0 +1,12 @@
+type,key,name,title,company,tier,source,status,days_since,booked_call,needs_go_engineers,notes
+Lead,michael@boatsetter.com,Michael Switzer,VP Engineering,Boatsetter,high,warm,dm_sent,0,false,false,Former manager. Boat rental marketplace. Pricing/trust/safety rules scattered across services. Feature flags for growth experiments.
+Lead,sardine-eng,Ryan McCormack,Director of Engineering,Sardine,high,cold,dm_sent,0,false,false,$70M Series C. 300+ enterprise customers. Own rules engine with 4000+ fraud features. AI Rule Builder generates rules from plain language. 2.2B devices profiled. Customers include FIS Deel GoDaddy X.
+Lead,seon-eng,TBD,VP Engineering,SEON,high,cold,new,0,false,false,Fraud prevention platform. 5K+ customers. Real-time fraud scoring. Benchmark hook: their eval speed vs 223ns.
+Lead,resistant-eng,TBD,Engineering Lead,Resistant AI,high,cold,new,0,false,false,Series B $25M. Anti-fraud for document verification. Customers include AXA Finom Bank of Valletta. 100 employees. 10x ARR growth since Series A.
+Lead,coris-eng,Shyam,CEO,Coris,high,cold,dm_sent,0,false,false,YC-backed $3.7M seed. SMB merchant risk. Fuzio no-code rule engine. Risk AI slack agent. 150K+ SMBs verified. Could use Arbiter as Fuzio infrastructure AND as customer-facing format.
+Lead,feedzai-eng,TBD,Platform Engineering,Feedzai,high,cold,new,0,false,false,Bank-scale fraud+AML. Combines adaptive AI with user-defined rules. Large banks and processors. API-driven. Their pitch is literally AI+rules.
+Lead,liberate-eng,TBD,VP Engineering,Liberate,medium,cold,new,0,false,false,AI insurance operations. $50M raise valued at $300M. Automates claims sales service. Decision chains for underwriting.
+Lead,stoik-eng,TBD,Engineering Lead,Stoik,medium,cold,new,0,false,false,Cyber insurance + security. $54M total funding. Combines insurance and cybersecurity. Multi-step risk assessment is expert inference use case.
+Lead,corgi-eng,TBD,Head of Platform,Corgi,medium,cold,new,0,false,false,AI insurtech $108M round. Large ambitions needs decision infrastructure at scale.
+Lead,whatnot-eng,TBD,Head of Trust Safety,Whatnot,medium,cold,new,0,false,false,Live commerce marketplace. Trust/safety and fraud at scale. Real-time bidding rules. Content moderation decisions.
+Lead,faire-eng,TBD,Staff Eng Platform,Faire,medium,cold,new,0,false,false,Wholesale marketplace Series G. Pricing credit terms fraud merchant scoring. Eng teams have autonomy to adopt.
