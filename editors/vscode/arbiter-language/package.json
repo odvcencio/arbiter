@@ -2,7 +2,7 @@
   "name": "arbiter-language",
   "displayName": "Arbiter Language",
   "description": "Syntax highlighting, comments, brackets, and snippets for Arbiter .arb files.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "odvcencio",
   "license": "MIT",
   "main": "./extension.js",

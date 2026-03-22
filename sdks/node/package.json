@@ -1,6 +1,6 @@
 {
   "name": "@arbiter/sdk-node",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Thin Node gRPC client for Arbiter",
   "main": "src/index.js",
   "license": "MIT",
