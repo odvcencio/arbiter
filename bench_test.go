@@ -98,10 +98,10 @@ func BenchmarkEval5KRules(b *testing.B) {
 
 func BenchmarkEvalSingleRule(b *testing.B) {
 	rules := []compiler.JSONRuleInput{{
-		Name:     "test",
-		Priority: 1,
+		Name:      "test",
+		Priority:  1,
 		Condition: `{"OpLogic":"&&","Conditions":[{"Operator":"==","Lhs":{"VarExpr":"fromId"},"Rhs":{"Const":{"StrConst":"HuangShan"}}},{"Operator":"LIST_IN","Lhs":{"VarExpr":"customerGroupId"},"Rhs":{"ConstList":[{"StrConst":"10549"},{"StrConst":"1"}]}}]}`,
-		Action:   `{"ActionName":"Greeting"}`,
+		Action:    `{"ActionName":"Greeting"}`,
 	}}
 	rs, _ := CompileJSONRules(rules)
 	dc := DataFromMap(map[string]any{"fromId": "HuangShan", "customerGroupId": "10549"}, rs)
@@ -116,10 +116,10 @@ func BenchmarkEval100Rules(b *testing.B) {
 	rules := make([]compiler.JSONRuleInput, 100)
 	for i := range rules {
 		rules[i] = compiler.JSONRuleInput{
-			Name:     fmt.Sprintf("rule%d", i),
-			Priority: i,
+			Name:      fmt.Sprintf("rule%d", i),
+			Priority:  i,
 			Condition: fmt.Sprintf(`{"OpLogic":"&&","Conditions":[{"Operator":"==","Lhs":{"VarExpr":"fromId"},"Rhs":{"Const":{"StrConst":"HuangShan"}}},{"Operator":"LIST_IN","Lhs":{"VarExpr":"customerGroupId"},"Rhs":{"ConstList":[{"StrConst":"10549"},{"StrConst":"%d"}]}}]}`, i),
-			Action:   `{"ActionName":"Greeting"}`,
+			Action:    `{"ActionName":"Greeting"}`,
 		}
 	}
 	rs, _ := CompileJSONRules(rules)
@@ -135,10 +135,10 @@ func BenchmarkEval10KRules(b *testing.B) {
 	rules := make([]compiler.JSONRuleInput, 10000)
 	for i := range rules {
 		rules[i] = compiler.JSONRuleInput{
-			Name:     fmt.Sprintf("rule%d", i),
-			Priority: i,
+			Name:      fmt.Sprintf("rule%d", i),
+			Priority:  i,
 			Condition: fmt.Sprintf(`{"OpLogic":"&&","Conditions":[{"Operator":"==","Lhs":{"VarExpr":"fromId"},"Rhs":{"Const":{"StrConst":"HuangShan"}}},{"Operator":"LIST_IN","Lhs":{"VarExpr":"customerGroupId"},"Rhs":{"ConstList":[{"StrConst":"10549"},{"StrConst":"%d"}]}}]}`, i),
-			Action:   `{"ActionName":"Greeting"}`,
+			Action:    `{"ActionName":"Greeting"}`,
 		}
 	}
 	rs, _ := CompileJSONRules(rules)

@@ -5,11 +5,11 @@ import dec "github.com/odvcencio/arbiter/decimal"
 
 // TypeTag identifies the type of a pooled value.
 const (
-	TypeNull   uint8 = 0
-	TypeBool   uint8 = 1
-	TypeNumber uint8 = 2
-	TypeString uint8 = 3
-	TypeList   uint8 = 4
+	TypeNull    uint8 = 0
+	TypeBool    uint8 = 1
+	TypeNumber  uint8 = 2
+	TypeString  uint8 = 3
+	TypeList    uint8 = 4
 	TypeDecimal uint8 = 5
 )
 

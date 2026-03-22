@@ -239,17 +239,17 @@ func main() {
 		now := time.Now()
 		ctx := map[string]any{
 			"workflow": map[string]any{
-				"name":                workflow,
-				"branch":              branch,
-				"repo":                repo,
-				"estimated_minutes":   10, // could be derived from historical average
+				"name":                   workflow,
+				"branch":                 branch,
+				"repo":                   repo,
+				"estimated_minutes":      10, // could be derived from historical average
 				"minutes_since_last_run": recentRuns.MinutesSinceLast(repo, workflow),
 			},
 			"billing": map[string]any{
 				"used_minutes_pct": usage.UsedMinutesPct(),
 			},
 			"context": map[string]any{
-				"hour":       now.Hour(),
+				"hour":        now.Hour(),
 				"day_of_week": int(now.Weekday()),
 			},
 		}

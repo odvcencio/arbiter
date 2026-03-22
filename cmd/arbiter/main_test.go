@@ -50,6 +50,16 @@ func TestFormatCLIErrorPrefixesGenericErrors(t *testing.T) {
 	}
 }
 
+func TestRunRejectsRemovedEmitCommand(t *testing.T) {
+	err := run([]string{"emit", "bundle.arb"})
+	if err == nil {
+		t.Fatal("expected removed emit command to fail")
+	}
+	if !strings.Contains(err.Error(), "Unknown command: emit") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestCheckRejectsCompileErrorsInIncludedFiles(t *testing.T) {
 	dir := t.TempDir()
 	mainPath := writeCLIFile(t, dir, "main.arb", `include "bad.arb"`)
@@ -79,6 +89,20 @@ fact SensorReading {
 	temperature: number<temperature>
 }
 
+outcome HeatWarning {
+	zone: string
+}
+
+strategy RouteHeat returns HeatWarning {
+	when { input.hot == true } then AlertNow {
+		zone: "zone-a",
+	}
+
+	else Ignore {
+		zone: "zone-b",
+	}
+}
+
 expert rule HeatStress {
 	when { input.hot == true } for 10m
 	then emit HeatWarning {
@@ -95,8 +119,47 @@ expert rule HeatStress {
 	if !strings.Contains(out, `"fact_schemas"`) || !strings.Contains(out, `"expert_rules"`) {
 		t.Fatalf("expected explore output to include schemas and expert rules, got %s", out)
 	}
+	if !strings.Contains(out, `"strategies"`) {
+		t.Fatalf("expected explore output to include strategies, got %s", out)
+	}
 	if !strings.Contains(out, `"SAFE_TEMP"`) {
 		t.Fatalf("expected explore output to include constants, got %s", out)
+	}
+}
+
+func TestStrategyCmdEvaluatesStrategy(t *testing.T) {
+	dir := t.TempDir()
+	path := writeCLIFile(t, dir, "bundle.arb", `
+outcome CheckoutPath {
+	target: string
+	reason: string
+}
+
+strategy CheckoutRouting returns CheckoutPath {
+	when {
+		user.country == "US"
+	} then Domestic {
+		target: "domestic",
+		reason: "local",
+	}
+
+	else Global {
+		target: "global",
+		reason: "fallback",
+	}
+}
+`)
+
+	out := captureStdout(t, func() {
+		if err := strategyCmd(path, "CheckoutRouting", `{"user":{"country":"US"}}`); err != nil {
+			t.Fatalf("strategyCmd: %v", err)
+		}
+	})
+	if !strings.Contains(out, `"selected": "Domestic"`) {
+		t.Fatalf("expected strategy output to include selected candidate, got %s", out)
+	}
+	if !strings.Contains(out, `"outcome": "CheckoutPath"`) {
+		t.Fatalf("expected strategy output to include outcome schema, got %s", out)
 	}
 }
 

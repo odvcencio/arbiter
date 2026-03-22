@@ -60,22 +60,22 @@ type VariantDef struct {
 
 // FlagRule is one targeting rule within a flag.
 type FlagRule struct {
-	SegmentName    string                  // reference to a named segment, or ""
-	InlineExpr     string                  // inline condition source (if no segment name)
-	CompiledInline *govern.CompiledSegment // precompiled inline condition (nil if segment ref)
-	Variant        string                  // variant name to serve if matched
-	HasRollout     bool
-	RolloutBps     uint16 // 0..10000 basis points
-	RolloutSubject string
+	SegmentName      string                  // reference to a named segment, or ""
+	InlineExpr       string                  // inline condition source (if no segment name)
+	CompiledInline   *govern.CompiledSegment // precompiled inline condition (nil if segment ref)
+	Variant          string                  // variant name to serve if matched
+	HasRollout       bool
+	RolloutBps       uint16 // 0..10000 basis points
+	RolloutSubject   string
 	RolloutNamespace string
-	Split         []SplitBand
-	SplitSubject  string
-	SplitNamespace string
+	Split            []SplitBand
+	SplitSubject     string
+	SplitNamespace   string
 }
 
 // SplitBand is one weighted variant assignment band.
 type SplitBand struct {
-	Variant string
+	Variant   string
 	WeightBps uint16
 }
 

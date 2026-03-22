@@ -254,7 +254,7 @@ Initial release.
 
 ### CLI
 
-- `arbiter compile`, `arbiter eval`, `arbiter check`, `arbiter emit`, `arbiter expert`, `arbiter serve`, `arbiter import`.
+- `arbiter compile`, `arbiter eval`, `arbiter check`, `arbiter expert`, `arbiter serve`, `arbiter import`.
 - File-aware diagnostics with `path:line:column` error formatting across includes.
 
 ### Editor Support

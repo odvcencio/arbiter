@@ -3,7 +3,7 @@ const grpc = require("@grpc/grpc-js");
 const protoLoader = require("@grpc/proto-loader");
 const googleProtoFiles = require("google-proto-files");
 
-const protoPath = path.join(__dirname, "..", "proto", "arbiter", "v1", "service.proto");
+const protoPath = path.join(__dirname, "..", "proto", "arbiter", "v2", "service.proto");
 const packageDefinition = protoLoader.loadSync(protoPath, {
   keepCase: false,
   longs: String,

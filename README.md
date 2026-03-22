@@ -7,10 +7,7 @@ Every decision your software makes — approve this transaction, show this varia
 ```text
 .arb source ──→ Parser ──→ Compiler ──→ Bytecode VM (~200ns simple eval)
                               │
-                              ├──→ Arishem JSON (compatibility)
-                              ├──→ CEL
-                              ├──→ Rego / OPA
-                              └──→ Drools DRL
+                              └──→ Arishem JSON (compatibility)
 ```
 
 Four modalities, one language. **Stateless evaluation** for request-path decisions. **Feature flags** for governed variant resolution. **Expert inference** for forward-chaining reasoning until quiescence. **Continuous arbiters** for always-on decision loops. Same compiler, same VM, same governance.
@@ -62,7 +59,9 @@ The gRPC benches publish the bundle once, warm it up, and benchmark `EvaluateRul
 
 ## Governance
 
-Segments, rollouts, kill switches, prerequisites, explainability — governance primitives that apply to any outcome. Rules, flags, and expert inferences all share them.
+Segments, rollouts, kill switches, prerequisites, explainability — governance primitives that apply to any outcome. Rules, strategies, flags, and expert inferences all share them.
+
+Within stateless governed evaluation, rules collect applicable outcomes, strategies select one ordered path, and flags resolve named variants.
 
 ### Rules
 
@@ -95,7 +94,7 @@ rule EnhancedRiskCheck priority 1 {
 
 ### Segments
 
-Reusable conditions. Define once, reference from any rule or flag.
+Reusable conditions. Define once, reference from any rule, strategy, or flag.
 
 ```arb
 segment beta_users {
@@ -106,6 +105,33 @@ segment high_value {
     user.lifetime_spend > 10000
 }
 ```
+
+### Strategies
+
+Strategies handle ordered stateless governed evaluation over recognized decision shapes in current facts/state, with exactly-one routing and a required fallback.
+
+```arb
+outcome CheckoutPath {
+    target: string
+    reason: string
+}
+
+strategy CheckoutRouting returns CheckoutPath {
+    when {
+        risk.requires_review == true
+    } then Manual {
+        target: "manual",
+        reason: "review required",
+    }
+
+    else Automatic {
+        target: "auto",
+        reason: "default path",
+    }
+}
+```
+
+They reuse the same conditions, segments, rollouts, and trace machinery as rules, but the evaluation model recognizes one named shape and then takes the first matching governed path with an explicit fallback.
 
 ### Feature Flags
 
@@ -405,10 +431,9 @@ Tree-sitter consumers can use [highlights.scm](highlights.scm) directly for `.ar
 ```bash
 arbiter compile rules.arb          # compile and show stats
 arbiter eval rules.arb --data '{...}'  # evaluate against data
+arbiter strategy rules.arb --name CheckoutRouting --data '{...}'
 arbiter diff current.arb candidate.arb --data-file contexts.json --key request_id
 arbiter replay candidate.arb --audit decisions.jsonl --request-id req-42
-arbiter emit rules.arb             # emit Arishem JSON
-arbiter emit rules.arb --rule Name # emit single rule
 arbiter check rules.arb            # validate without emitting
 arbiter expert tax.arb --envelope '{...}' [--facts '[...]']
 arbiter serve --grpc :8081 --audit-file decisions.jsonl --bundle-file bundles.json --overrides-file overrides.json
@@ -790,11 +815,11 @@ compiler/     CST → bytecode compiler + Arishem JSON loader
 vm/           Stack-based bytecode VM (fixed 256-element stack, low-allocation eval)
 govern/       Governance primitives: segments, rollouts, kill switches, prerequisites, trace
 flags/        Feature flags: variants, schema validation, secret references, hot reload
+strategy/     Native decision trees: exactly-one governed routing with trace
 expert/       Forward-chaining inference: working memory, assert/emit/retract/modify, activation trace
 audit/        Durable decision logging (Sink interface, JSONL default)
 overrides/    Runtime governance overrides (kill switches, rollout percentages)
 grpcserver/   gRPC service: bundle registry, evaluation, flag resolution, expert sessions
-emit/         Code generators: Rego, CEL, Drools DRL
 decompile/    Bytecode → Arishem JSON
 sourceunit.go Multi-file include expansion for file-backed APIs
 ```

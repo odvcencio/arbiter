@@ -2,14 +2,10 @@
 //
 // Commands:
 //
-//	arbiter emit <file.arb>                   — print Arishem JSON to stdout (default)
-//	arbiter emit <file.arb> --format rego     — emit Rego (OPA) policy
-//	arbiter emit <file.arb> --format cel      — emit CEL expressions
-//	arbiter emit <file.arb> --format drools   — emit DRL (Drools Rule Language)
-//	arbiter emit <file.arb> --rule Name       — emit a single rule's condition JSON
 //	arbiter check <file.arb>                  — validate without emitting
 //	arbiter compile <file.arb>                — compile to bytecode, print stats
 //	arbiter eval <file.arb> --data '{...}'    — compile and eval against JSON
+//	arbiter strategy <file.arb> [--name Name] --data '{...}' — evaluate one strategy
 //	arbiter diff <base.arb> <candidate.arb> [--data '{...}' | --data-file contexts.json] [--key path] [--json] — compare governed outcomes
 //	arbiter replay <rules.arb> --audit decisions.jsonl [--request-id id] [--limit N] [--json] — replay audited rule decisions
 //	arbiter expert <file.arb> --envelope '{...}' [--facts '[...]'] — run one expert session
@@ -34,7 +30,6 @@ import (
 	"github.com/odvcencio/arbiter/arbtest"
 	"github.com/odvcencio/arbiter/audit"
 	"github.com/odvcencio/arbiter/decompile"
-	"github.com/odvcencio/arbiter/emit"
 	"github.com/odvcencio/arbiter/expert"
 	explorepkg "github.com/odvcencio/arbiter/explore"
 	"github.com/odvcencio/arbiter/flags"
@@ -44,7 +39,7 @@ import (
 )
 
 const (
-	commandList = "emit, check, compile, eval, diff, replay, expert, test, explore, import, serve"
+	commandList = "check, compile, eval, strategy, diff, replay, expert, test, explore, import, serve"
 	rootUsage   = "Usage: arbiter <command> <file>\nCommands: " + commandList
 )
 
@@ -53,17 +48,17 @@ type usageError string
 func (e usageError) Error() string { return string(e) }
 
 var commandHandlers = map[string]func([]string) error{
-	"emit":    runEmit,
-	"check":   runCheck,
-	"compile": runCompile,
-	"eval":    runEval,
-	"diff":    runDiff,
-	"replay":  runReplay,
-	"expert":  runExpert,
-	"test":    runTest,
-	"explore": runExplore,
-	"import":  runImport,
-	"serve":   runServe,
+	"check":    runCheck,
+	"compile":  runCompile,
+	"eval":     runEval,
+	"strategy": runStrategy,
+	"diff":     runDiff,
+	"replay":   runReplay,
+	"expert":   runExpert,
+	"test":     runTest,
+	"explore":  runExplore,
+	"import":   runImport,
+	"serve":    runServe,
 }
 
 func main() {
@@ -87,25 +82,6 @@ func run(args []string) error {
 		return usageError(fmt.Sprintf("Unknown command: %s\nCommands: %s", args[0], commandList))
 	}
 	return handler(args[1:])
-}
-
-func runEmit(args []string) error {
-	if len(args) < 1 {
-		return usageError("Usage: arbiter emit <file.arb> [--format rego|cel|drools] [--rule Name]")
-	}
-	ruleName := ""
-	format := ""
-	for i := 1; i < len(args); i++ {
-		if args[i] == "--rule" && i+1 < len(args) {
-			ruleName = args[i+1]
-			i++
-		}
-		if args[i] == "--format" && i+1 < len(args) {
-			format = args[i+1]
-			i++
-		}
-	}
-	return emitCmd(args[0], ruleName, format)
 }
 
 func runCheck(args []string) error {
@@ -137,6 +113,32 @@ func runEval(args []string) error {
 		return fmt.Errorf("--data flag is required")
 	}
 	return evalCmd(args[0], dataJSON)
+}
+
+func runStrategy(args []string) error {
+	if len(args) < 1 {
+		return usageError("Usage: arbiter strategy <file.arb> [--name Name] --data '{...}'")
+	}
+	name := ""
+	dataJSON := ""
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--name":
+			if i+1 < len(args) {
+				name = args[i+1]
+				i++
+			}
+		case "--data":
+			if i+1 < len(args) {
+				dataJSON = args[i+1]
+				i++
+			}
+		}
+	}
+	if dataJSON == "" {
+		return fmt.Errorf("--data flag is required")
+	}
+	return strategyCmd(args[0], name, dataJSON)
 }
 
 func runDiff(args []string) error {
@@ -338,58 +340,6 @@ func looksLikeDiagnostic(message string) bool {
 	return true
 }
 
-func emitCmd(path, ruleName, format string) error {
-	source, err := arbiter.LoadFileSource(path)
-	if err != nil {
-		return err
-	}
-
-	// If a specific format is requested, use the emit package
-	switch format {
-	case "rego":
-		out, err := emit.ToRego(source)
-		if err != nil {
-			return fmt.Errorf("emit rego: %w", err)
-		}
-		fmt.Print(out)
-		return nil
-	case "cel":
-		out, err := emit.ToCEL(source)
-		if err != nil {
-			return fmt.Errorf("emit cel: %w", err)
-		}
-		fmt.Print(out)
-		return nil
-	case "drools":
-		out, err := emit.ToDRL(source)
-		if err != nil {
-			return fmt.Errorf("emit drools: %w", err)
-		}
-		fmt.Print(out)
-		return nil
-	case "":
-		// Default: Arishem JSON
-	default:
-		return fmt.Errorf("unknown format %q (supported: rego, cel, drools)", format)
-	}
-
-	if ruleName != "" {
-		json, err := arbiter.TranspileRuleFile(path, ruleName)
-		if err != nil {
-			return fmt.Errorf("transpile rule %s: %w", ruleName, err)
-		}
-		fmt.Println(json)
-		return nil
-	}
-
-	json, err := arbiter.TranspileFile(path)
-	if err != nil {
-		return fmt.Errorf("transpile %s: %w", path, err)
-	}
-	fmt.Println(json)
-	return nil
-}
-
 func check(path string) error {
 	unit, parsed, err := arbiter.LoadFileParsed(path)
 	if err != nil {
@@ -405,8 +355,10 @@ func check(path string) error {
 	if _, err := expert.CompileParsed(parsed, full); err != nil {
 		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
 	}
-	if _, err := arbiter.TranspileParsed(parsed); err != nil {
-		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
+	if full.Strategies.Count() == 0 {
+		if _, err := arbiter.TranspileParsed(parsed); err != nil {
+			return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "%s: ok\n", path)
@@ -414,13 +366,15 @@ func check(path string) error {
 }
 
 func compileCmd(path string) error {
-	rs, err := arbiter.CompileFile(path)
+	full, err := arbiter.CompileFullFile(path)
 	if err != nil {
 		return fmt.Errorf("compile %s: %w", path, err)
 	}
+	rs := full.Ruleset
 
 	fmt.Printf("compiled %s\n", path)
 	fmt.Printf("  rules:        %d\n", len(rs.Rules))
+	fmt.Printf("  strategies:   %d\n", full.Strategies.Count())
 	fmt.Printf("  actions:      %d\n", len(rs.Actions))
 	fmt.Printf("  instructions: %d bytes\n", len(rs.Instructions))
 	fmt.Printf("  strings:      %d\n", rs.Constants.StringCount())
@@ -462,6 +416,41 @@ func evalCmd(path, dataJSON string) error {
 		fmt.Println()
 	}
 
+	return nil
+}
+
+func strategyCmd(path, name, dataJSON string) error {
+	full, err := arbiter.CompileFullFile(path)
+	if err != nil {
+		return fmt.Errorf("load strategies: %w", err)
+	}
+	strategies := full.Strategies
+	if name == "" {
+		names := strategies.Names()
+		switch len(names) {
+		case 0:
+			return fmt.Errorf("bundle contains no strategies")
+		case 1:
+			name = names[0]
+		default:
+			return fmt.Errorf("bundle contains multiple strategies; use --name (%s)", strings.Join(names, ", "))
+		}
+	}
+
+	var ctx map[string]any
+	if err := json.Unmarshal([]byte(dataJSON), &ctx); err != nil {
+		return fmt.Errorf("parse data: %w", err)
+	}
+
+	result, err := arbiter.EvalStrategy(full, name, ctx)
+	if err != nil {
+		return fmt.Errorf("strategy %s: %w", name, err)
+	}
+	blob, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal strategy result: %w", err)
+	}
+	fmt.Println(string(blob))
 	return nil
 }
 

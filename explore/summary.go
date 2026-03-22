@@ -14,6 +14,7 @@ type Summary struct {
 	Source         string              `json:"source,omitempty"`
 	FactSchemas    []SchemaSummary     `json:"fact_schemas,omitempty"`
 	OutcomeSchemas []SchemaSummary     `json:"outcome_schemas,omitempty"`
+	Strategies     []StrategySummary   `json:"strategies,omitempty"`
 	Constants      []ConstantSummary   `json:"constants,omitempty"`
 	Rules          []RuleSummary       `json:"rules,omitempty"`
 	ExpertRules    []ExpertRuleSummary `json:"expert_rules,omitempty"`
@@ -61,6 +62,21 @@ type ExpertRuleSummary struct {
 	Debounce        string `json:"debounce,omitempty"`
 }
 
+type StrategySummary struct {
+	Name       string                     `json:"name"`
+	Returns    string                     `json:"returns"`
+	Candidates []StrategyCandidateSummary `json:"candidates,omitempty"`
+}
+
+type StrategyCandidateSummary struct {
+	Label      string `json:"label"`
+	Condition  string `json:"condition,omitempty"`
+	Segment    string `json:"segment,omitempty"`
+	KillSwitch bool   `json:"kill_switch,omitempty"`
+	Rollout    string `json:"rollout,omitempty"`
+	Else       bool   `json:"else,omitempty"`
+}
+
 type DimensionUnits struct {
 	Dimension string   `json:"dimension"`
 	Symbols   []string `json:"symbols,omitempty"`
@@ -91,6 +107,9 @@ func BuildSummary(program *ir.Program) *Summary {
 	}
 	for _, schema := range program.OutcomeSchemas {
 		summary.OutcomeSchemas = append(summary.OutcomeSchemas, summarizeOutcomeSchema(schema))
+	}
+	for _, strategy := range program.Strategies {
+		summary.Strategies = append(summary.Strategies, summarizeStrategy(program, strategy))
 	}
 	for _, decl := range program.Consts {
 		value, ok := ir.LiteralValue(program, decl.Value)
@@ -172,6 +191,29 @@ func summarizeOutcomeSchema(schema ir.OutcomeSchema) SchemaSummary {
 	return out
 }
 
+func summarizeStrategy(program *ir.Program, strategy ir.Strategy) StrategySummary {
+	out := StrategySummary{
+		Name:    strategy.Name,
+		Returns: strategy.Returns,
+	}
+	for _, candidate := range strategy.Candidates {
+		item := StrategyCandidateSummary{
+			Label:      candidate.Label,
+			Segment:    candidate.Segment,
+			KillSwitch: candidate.KillSwitch,
+			Else:       candidate.IsElse,
+		}
+		if candidate.HasCondition {
+			item.Condition = ir.RenderExpr(program, candidate.Condition)
+		}
+		if candidate.Rollout != nil {
+			item.Rollout = formatRollout(candidate.Rollout)
+		}
+		out.Candidates = append(out.Candidates, item)
+	}
+	return out
+}
+
 func fieldTypeString(fieldType ir.FieldType, required bool) string {
 	base := fieldType.Base
 	if fieldType.Dimension != "" {
@@ -188,6 +230,20 @@ func formatDuration(duration *ir.Duration) string {
 		return ""
 	}
 	return fmt.Sprintf("%g%s", duration.Value, duration.Unit)
+}
+
+func formatRollout(rollout *ir.Rollout) string {
+	if rollout == nil {
+		return ""
+	}
+	out := fmt.Sprintf("%g%%", float64(rollout.Bps)/100)
+	if rollout.HasSubject {
+		out += " by " + rollout.Subject
+	}
+	if rollout.HasNamespace {
+		out += fmt.Sprintf(" namespace %q", rollout.Namespace)
+	}
+	return out
 }
 
 func collectUsedUnits(program *ir.Program) []DimensionUnits {

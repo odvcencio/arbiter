@@ -9,6 +9,7 @@ type Program struct {
 	Features       []Feature
 	FactSchemas    []FactSchema
 	OutcomeSchemas []OutcomeSchema
+	Strategies     []Strategy
 	Segments       []Segment
 	Rules          []Rule
 	Flags          []Flag
@@ -19,6 +20,7 @@ type Program struct {
 	constIndex         map[string]int
 	factSchemaIndex    map[string]int
 	outcomeSchemaIndex map[string]int
+	strategyIndex      map[string]int
 	segmentIndex       map[string]int
 	ruleIndex          map[string]int
 	flagIndex          map[string]int
@@ -108,6 +110,28 @@ type Rule struct {
 	Action       Action
 	Fallback     *Action
 	Rollout      *Rollout
+}
+
+// Strategy is one top-level strategy declaration.
+type Strategy struct {
+	Name       string
+	Returns    string
+	Span       Span
+	Candidates []StrategyCandidate
+}
+
+// StrategyCandidate is one ordered arm in a strategy declaration.
+type StrategyCandidate struct {
+	Label        string
+	Span         Span
+	Segment      string
+	Lets         []LetBinding
+	Condition    ExprID
+	HasCondition bool
+	KillSwitch   bool
+	Rollout      *Rollout
+	Params       []ActionParam
+	IsElse       bool
 }
 
 // FlagType identifies the kind of flag declaration.
@@ -472,6 +496,17 @@ func (p *Program) OutcomeSchemaByName(name string) (*OutcomeSchema, bool) {
 	return nil, false
 }
 
+// StrategyByName returns the named strategy declaration.
+func (p *Program) StrategyByName(name string) (*Strategy, bool) {
+	if p == nil || name == "" {
+		return nil, false
+	}
+	if idx, ok := p.strategyIndex[name]; ok {
+		return &p.Strategies[idx], true
+	}
+	return nil, false
+}
+
 // RuleByName returns the named rule declaration.
 func (p *Program) RuleByName(name string) (*Rule, bool) {
 	if p == nil || name == "" {
@@ -536,6 +571,10 @@ func (p *Program) rebuildIndexes() {
 	p.outcomeSchemaIndex = make(map[string]int, len(p.OutcomeSchemas))
 	for i := range p.OutcomeSchemas {
 		p.outcomeSchemaIndex[p.OutcomeSchemas[i].Name] = i
+	}
+	p.strategyIndex = make(map[string]int, len(p.Strategies))
+	for i := range p.Strategies {
+		p.strategyIndex[p.Strategies[i].Name] = i
 	}
 	p.segmentIndex = make(map[string]int, len(p.Segments))
 	for i := range p.Segments {

@@ -23,6 +23,16 @@ outcome HeatWarning {
 	zone: string
 }
 
+strategy RouteHeat returns HeatWarning {
+	when { input.hot == true } then AlertNow {
+		zone: "zone-a",
+	}
+
+	else Ignore {
+		zone: "zone-b",
+	}
+}
+
 rule CheckTemp {
 	when { sensor.temperature > SAFE_TEMP }
 	then Alert {}
@@ -51,6 +61,9 @@ expert rule HeatStress cooldown 15m {
 	}
 	if len(summary.OutcomeSchemas) != 1 || summary.OutcomeSchemas[0].Name != "HeatWarning" {
 		t.Fatalf("unexpected outcome schemas: %+v", summary.OutcomeSchemas)
+	}
+	if len(summary.Strategies) != 1 || summary.Strategies[0].Name != "RouteHeat" {
+		t.Fatalf("unexpected strategies: %+v", summary.Strategies)
 	}
 	if len(summary.Constants) != 1 || summary.Constants[0].Raw != "28 C" {
 		t.Fatalf("unexpected constants: %+v", summary.Constants)

@@ -204,6 +204,11 @@ func (v *programValidator) validate() error {
 			return err
 		}
 	}
+	for i := range v.program.Strategies {
+		if err := v.validateStrategy(&v.program.Strategies[i]); err != nil {
+			return err
+		}
+	}
 	for i := range v.program.Flags {
 		if err := v.validateFlag(&v.program.Flags[i]); err != nil {
 			return err
@@ -242,6 +247,72 @@ func (v *programValidator) validateRule(rule *ir.Rule) error {
 		if err := v.validateParams(rule.Fallback.Params, env); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (v *programValidator) validateStrategy(strategy *ir.Strategy) error {
+	if strategy == nil {
+		return nil
+	}
+	schema, ok := v.program.OutcomeSchemaByName(strategy.Returns)
+	if !ok || schema == nil {
+		return spanError(strategy.Span, "strategy %s returns %s: unknown outcome schema", strategy.Name, strategy.Returns)
+	}
+	if len(strategy.Candidates) == 0 {
+		return spanError(strategy.Span, "strategy %s: at least one candidate is required", strategy.Name)
+	}
+	seenLabels := make(map[string]struct{}, len(strategy.Candidates))
+	whenCount := 0
+	sawElse := false
+	for i := range strategy.Candidates {
+		candidate := &strategy.Candidates[i]
+		if candidate.Label == "" {
+			return spanError(candidate.Span, "strategy %s: candidate label is required", strategy.Name)
+		}
+		if _, ok := seenLabels[candidate.Label]; ok {
+			return spanError(candidate.Span, "strategy %s: duplicate candidate label %q", strategy.Name, candidate.Label)
+		}
+		seenLabels[candidate.Label] = struct{}{}
+		if candidate.IsElse {
+			if i != len(strategy.Candidates)-1 {
+				return spanError(candidate.Span, "strategy %s: else arm must be last", strategy.Name)
+			}
+			if candidate.HasCondition || len(candidate.Lets) > 0 || candidate.Segment != "" || candidate.KillSwitch || candidate.Rollout != nil {
+				return spanError(candidate.Span, "strategy %s candidate %s: else arm cannot declare conditions or governance", strategy.Name, candidate.Label)
+			}
+			sawElse = true
+		} else {
+			if sawElse {
+				return spanError(candidate.Span, "strategy %s: when arms cannot appear after else", strategy.Name)
+			}
+			whenCount++
+		}
+		env, err := v.validateLets(candidate.Lets, newValidationEnv())
+		if err != nil {
+			return err
+		}
+		if candidate.HasCondition {
+			if err := v.validateCondition(candidate.Condition, env, "strategy "+strategy.Name+" candidate "+candidate.Label); err != nil {
+				return err
+			}
+		} else if !candidate.IsElse {
+			return spanError(candidate.Span, "strategy %s candidate %s: when arm requires a condition", strategy.Name, candidate.Label)
+		}
+		if candidate.Segment != "" {
+			if _, ok := v.program.SegmentByName(candidate.Segment); !ok {
+				return spanError(candidate.Span, "strategy %s candidate %s: unknown segment %q", strategy.Name, candidate.Label, candidate.Segment)
+			}
+		}
+		if err := v.validateStrategyOutcomeParams(strategy, candidate, schema, env); err != nil {
+			return err
+		}
+	}
+	if !sawElse {
+		return spanError(strategy.Span, "strategy %s: else arm is required", strategy.Name)
+	}
+	if whenCount == 0 {
+		return spanError(strategy.Span, "strategy %s: at least one when arm is required before else", strategy.Name)
 	}
 	return nil
 }
@@ -441,6 +512,48 @@ func (v *programValidator) validateOutcomeAction(rule *ir.ExpertRule, env *valid
 		if _, ok := required[field.Name]; ok {
 			return spanError(rule.Span, "expert rule %s emit %s: missing required field %q", rule.Name, rule.Target, field.Name)
 		}
+	}
+	return nil
+}
+
+func (v *programValidator) validateStrategyOutcomeParams(strategy *ir.Strategy, candidate *ir.StrategyCandidate, schema *ir.OutcomeSchema, env *validationEnv) error {
+	if strategy == nil || candidate == nil {
+		return nil
+	}
+	if err := v.validateParams(candidate.Params, env); err != nil {
+		return err
+	}
+	required := make(map[string]struct{}, len(schema.Fields))
+	for _, field := range schema.Fields {
+		if field.Required {
+			required[field.Name] = struct{}{}
+		}
+	}
+	for _, param := range candidate.Params {
+		field, ok := outcomeSchemaField(schema, param.Key)
+		if !ok {
+			return spanError(param.Span, "strategy %s candidate %s: unknown field %q on %s", strategy.Name, candidate.Label, param.Key, strategy.Returns)
+		}
+		if err := v.validateStrategyAssignedType(strategy, candidate, param.Value, field, env); err != nil {
+			return err
+		}
+		delete(required, param.Key)
+	}
+	for _, field := range schema.Fields {
+		if _, ok := required[field.Name]; ok {
+			return spanError(candidate.Span, "strategy %s candidate %s: missing required field %q for %s", strategy.Name, candidate.Label, field.Name, strategy.Returns)
+		}
+	}
+	return nil
+}
+
+func (v *programValidator) validateStrategyAssignedType(strategy *ir.Strategy, candidate *ir.StrategyCandidate, exprID ir.ExprID, field ir.SchemaField, env *validationEnv) error {
+	valueType, err := v.validateExpr(exprID, env)
+	if err != nil {
+		return err
+	}
+	if !assignableToField(valueType, field) {
+		return spanError(v.program.Expr(exprID).Span, "strategy %s candidate %s: field %q expects %s, got %s", strategy.Name, candidate.Label, field.Name, fieldTypeString(field), valueType.String())
 	}
 	return nil
 }

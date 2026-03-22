@@ -20,6 +20,7 @@ source_file        = { top_level_declaration } ;
 top_level_declaration
                    = const_declaration
                    | segment_declaration
+                   | strategy_declaration
                    | rule_declaration
                    | flag_declaration
                    | expert_rule_declaration
@@ -32,6 +33,27 @@ const_declaration  = "const" identifier "=" literal ;
 
 segment_declaration
                    = "segment" identifier block_expr ;
+```
+
+## Strategies
+
+```ebnf
+strategy_declaration
+                   = "strategy" identifier "returns" identifier
+                     "{"
+                       strategy_when_candidate
+                       { strategy_when_candidate }
+                       strategy_else_candidate
+                     "}" ;
+
+strategy_when_candidate
+                   = when_clause
+                     [ kill_switch_clause ]
+                     [ rollout_clause ]
+                     "then" action_block ;
+
+strategy_else_candidate
+                   = "else" action_block ;
 ```
 
 ## Rules

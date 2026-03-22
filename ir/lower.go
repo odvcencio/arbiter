@@ -97,6 +97,12 @@ func (l *lowerer) lowerSourceFile(root *gotreesitter.Node) error {
 			l.program.FactSchemas = append(l.program.FactSchemas, l.lowerFactSchema(child))
 		case "outcome_declaration":
 			l.program.OutcomeSchemas = append(l.program.OutcomeSchemas, l.lowerOutcomeSchema(child))
+		case "strategy_declaration":
+			strategy, err := l.lowerStrategy(child)
+			if err != nil {
+				return err
+			}
+			l.program.Strategies = append(l.program.Strategies, strategy)
 		case "segment_declaration":
 			segment, err := l.lowerSegment(child)
 			if err != nil {
@@ -316,6 +322,95 @@ func (l *lowerer) lowerRule(n *gotreesitter.Node) (Rule, error) {
 	}
 
 	return rule, nil
+}
+
+func (l *lowerer) lowerStrategy(n *gotreesitter.Node) (Strategy, error) {
+	strategy := Strategy{
+		Span: spanForNode(n),
+	}
+	if nameNode := n.ChildByFieldName("name", l.lang); nameNode != nil {
+		strategy.Name = l.text(nameNode)
+	}
+	if returnsNode := n.ChildByFieldName("returns", l.lang); returnsNode != nil {
+		strategy.Returns = l.text(returnsNode)
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		child := n.NamedChild(i)
+		if child.Type(l.lang) == "strategy_candidate" && child.NamedChildCount() > 0 {
+			child = child.NamedChild(0)
+		}
+		switch child.Type(l.lang) {
+		case "strategy_when_candidate":
+			candidate, err := l.lowerStrategyWhenCandidate(child)
+			if err != nil {
+				return Strategy{}, err
+			}
+			strategy.Candidates = append(strategy.Candidates, candidate)
+		case "strategy_else_candidate":
+			strategy.Candidates = append(strategy.Candidates, l.lowerStrategyElseCandidate(child))
+		}
+	}
+	return strategy, nil
+}
+
+func (l *lowerer) lowerStrategyWhenCandidate(n *gotreesitter.Node) (StrategyCandidate, error) {
+	candidate := StrategyCandidate{
+		Span:       spanForNode(n),
+		KillSwitch: n.ChildByFieldName("kill_switch", l.lang) != nil,
+	}
+	if labelNode := n.ChildByFieldName("action_name", l.lang); labelNode != nil {
+		candidate.Label = l.text(labelNode)
+	}
+	whenNode := n.ChildByFieldName("condition", l.lang)
+	actionScope := newScope(nil)
+	if whenNode != nil {
+		if segNode := whenNode.ChildByFieldName("segment", l.lang); segNode != nil {
+			candidate.Segment = l.text(segNode)
+		}
+		for i := 0; i < int(whenNode.NamedChildCount()); i++ {
+			child := whenNode.NamedChild(i)
+			if child.Type(l.lang) != "let_binding" {
+				continue
+			}
+			nameNode := child.ChildByFieldName("name", l.lang)
+			valueNode := child.ChildByFieldName("value", l.lang)
+			if nameNode == nil || valueNode == nil {
+				continue
+			}
+			binding := LetBinding{
+				Name:  l.text(nameNode),
+				Span:  spanForNode(child),
+				Value: l.lowerExpr(valueNode, actionScope),
+			}
+			candidate.Lets = append(candidate.Lets, binding)
+			actionScope.define(binding.Name)
+		}
+		if exprNode := whenNode.ChildByFieldName("expr", l.lang); exprNode != nil {
+			candidate.Condition = l.lowerExpr(exprNode, actionScope)
+			candidate.HasCondition = true
+		}
+	}
+	candidate.Params = l.lowerParamAssignments(n, actionScope)
+	if rolloutNode := n.ChildByFieldName("rollout", l.lang); rolloutNode != nil {
+		rollout, err := l.lowerRollout(rolloutNode)
+		if err != nil {
+			return StrategyCandidate{}, err
+		}
+		candidate.Rollout = rollout
+	}
+	return candidate, nil
+}
+
+func (l *lowerer) lowerStrategyElseCandidate(n *gotreesitter.Node) StrategyCandidate {
+	candidate := StrategyCandidate{
+		Span:   spanForNode(n),
+		IsElse: true,
+	}
+	if labelNode := n.ChildByFieldName("action_name", l.lang); labelNode != nil {
+		candidate.Label = l.text(labelNode)
+	}
+	candidate.Params = l.lowerParamAssignments(n, nil)
+	return candidate
 }
 
 func (l *lowerer) lowerFlag(n *gotreesitter.Node) (Flag, error) {

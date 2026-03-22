@@ -79,10 +79,10 @@ type ExpertDecision struct {
 
 // OverrideChange captures one runtime override mutation.
 type OverrideChange struct {
-	Scope      string `json:"scope"`
-	Target     string `json:"target"`
-	RuleIndex  *int   `json:"rule_index,omitempty"`
-	KillSwitch *bool  `json:"kill_switch,omitempty"`
+	Scope      string  `json:"scope"`
+	Target     string  `json:"target"`
+	RuleIndex  *int    `json:"rule_index,omitempty"`
+	KillSwitch *bool   `json:"kill_switch,omitempty"`
 	Rollout    *uint16 `json:"rollout,omitempty"`
 }
 

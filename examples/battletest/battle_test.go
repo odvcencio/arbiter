@@ -228,7 +228,7 @@ func TestFlags(t *testing.T) {
 
 	t.Run("dark mode enabled for everyone", func(t *testing.T) {
 		resp := resolveFlag(t, client, bundle, "dark_mode", map[string]any{
-			"user": map[string]any{"cohort": "anyone", "plan": "free", "country": "XX"},
+			"user":    map[string]any{"cohort": "anyone", "plan": "free", "country": "XX"},
 			"user_id": "dark_mode_anyone",
 		})
 		if resp.Variant != "true" {

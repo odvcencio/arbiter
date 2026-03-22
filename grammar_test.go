@@ -257,6 +257,35 @@ outcome WaterAction {
 	}
 }
 
+func TestParseStrategy(t *testing.T) {
+	sexp := parseArb(t, `
+outcome CheckoutPath {
+	target: string
+}
+
+strategy CheckoutRouting returns CheckoutPath {
+	when {
+		user.country == "US"
+	} then Domestic {
+		target: "domestic"
+	}
+
+	else Global {
+		target: "global"
+	}
+}
+`)
+	if !strings.Contains(sexp, "strategy_declaration") {
+		t.Fatal("expected strategy_declaration")
+	}
+	if strings.Count(sexp, "strategy_when_candidate") != 1 {
+		t.Fatalf("expected 1 strategy_when_candidate node, got: %s", sexp)
+	}
+	if strings.Count(sexp, "strategy_else_candidate") != 1 {
+		t.Fatalf("expected 1 strategy_else_candidate node, got: %s", sexp)
+	}
+}
+
 func TestParseQuantityLiteral(t *testing.T) {
 	sexp := parseArb(t, `rule HeatStress { when { reading.temperature > 28 C } then Alert {} }`)
 	if !strings.Contains(sexp, "quantity_literal") {

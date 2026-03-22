@@ -9,6 +9,7 @@ import (
 	"github.com/odvcencio/arbiter/govern"
 	"github.com/odvcencio/arbiter/ir"
 	"github.com/odvcencio/arbiter/overrides"
+	"github.com/odvcencio/arbiter/strategy"
 	"github.com/odvcencio/arbiter/vm"
 )
 
@@ -21,12 +22,13 @@ func Compile(source []byte) (*compiler.CompiledRuleset, error) {
 	return CompileParsed(parsed)
 }
 
-// CompileResult includes a ruleset, top-level segments, and arbiter declarations.
+// CompileResult includes compiled rule/runtime artifacts for one .arb program.
 type CompileResult struct {
-	Ruleset  *compiler.CompiledRuleset
-	Segments *govern.SegmentSet
-	Arbiters []ArbiterDeclaration
-	Program  *ir.Program
+	Ruleset    *compiler.CompiledRuleset
+	Segments   *govern.SegmentSet
+	Strategies *strategy.Strategies
+	Arbiters   []ArbiterDeclaration
+	Program    *ir.Program
 }
 
 // CompileFull compiles .arb source and extracts top-level segments.

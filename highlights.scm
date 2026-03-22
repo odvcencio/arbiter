@@ -26,6 +26,15 @@
 (const_declaration "const" @keyword)
 (const_declaration name: (identifier) @constant)
 
+(strategy_declaration "strategy" @keyword)
+(strategy_declaration "returns" @keyword)
+(strategy_declaration name: (identifier) @function)
+(strategy_declaration returns: (identifier) @type)
+(strategy_when_candidate "then" @keyword)
+(strategy_when_candidate action_name: (identifier) @function)
+(strategy_else_candidate "else" @keyword)
+(strategy_else_candidate action_name: (identifier) @function)
+
 (arbiter_declaration "arbiter" @keyword)
 (arbiter_declaration name: (identifier) @type.definition)
 (arbiter_poll_clause "poll" @keyword)

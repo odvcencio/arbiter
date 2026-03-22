@@ -46,6 +46,7 @@ func ArbiterGrammar() *Grammar {
 		Sym("feature_declaration"),
 		Sym("fact_declaration"),
 		Sym("outcome_declaration"),
+		Sym("strategy_declaration"),
 		Sym("const_declaration"),
 		Sym("arbiter_declaration"),
 		Sym("rule_declaration"),
@@ -104,6 +105,40 @@ func ArbiterGrammar() *Grammar {
 		Optional(Field("optional", Str("?"))),
 		Str(":"),
 		Field("type", Sym("schema_type_name")),
+	))
+
+	g.Define("strategy_declaration", Seq(
+		Str("strategy"),
+		Field("name", Sym("identifier")),
+		Str("returns"),
+		Field("returns", Sym("identifier")),
+		Str("{"),
+		Repeat1(Sym("strategy_candidate")),
+		Str("}"),
+	))
+
+	g.Define("strategy_candidate", Choice(
+		Sym("strategy_when_candidate"),
+		Sym("strategy_else_candidate"),
+	))
+
+	g.Define("strategy_when_candidate", Seq(
+		Field("condition", Sym("when_block")),
+		Optional(Field("kill_switch", Sym("kill_switch"))),
+		Optional(Field("rollout", Sym("rule_rollout"))),
+		Str("then"),
+		Field("action_name", Sym("identifier")),
+		Str("{"),
+		Repeat(Sym("param_assignment")),
+		Str("}"),
+	))
+
+	g.Define("strategy_else_candidate", Seq(
+		Str("else"),
+		Field("action_name", Sym("identifier")),
+		Str("{"),
+		Repeat(Sym("param_assignment")),
+		Str("}"),
 	))
 
 	g.Define("type_name", Choice(

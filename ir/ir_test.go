@@ -186,6 +186,57 @@ outcome WaterAction {
 	}
 }
 
+func TestLowerCollectsStrategies(t *testing.T) {
+	program := lowerSource(t, `
+outcome CheckoutPath {
+	target: string
+	reason: string
+}
+
+strategy CheckoutRouting returns CheckoutPath {
+	when segment US {
+		let new_stack = user.country == "US"
+		new_stack
+	} rollout 20 then Domestic {
+		target: "domestic"
+		reason: "local"
+	}
+
+	else Global {
+		target: "global"
+		reason: "fallback"
+	}
+}
+`)
+
+	if got := len(program.Strategies); got != 1 {
+		t.Fatalf("len(Strategies) = %d, want 1", got)
+	}
+	strategy := program.Strategies[0]
+	if strategy.Name != "CheckoutRouting" {
+		t.Fatalf("strategy.Name = %q, want CheckoutRouting", strategy.Name)
+	}
+	if strategy.Returns != "CheckoutPath" {
+		t.Fatalf("strategy.Returns = %q, want CheckoutPath", strategy.Returns)
+	}
+	if len(strategy.Candidates) != 2 {
+		t.Fatalf("len(strategy.Candidates) = %d, want 2", len(strategy.Candidates))
+	}
+	first := strategy.Candidates[0]
+	if first.Label != "Domestic" || first.Segment != "US" || !first.HasCondition {
+		t.Fatalf("unexpected first candidate: %+v", first)
+	}
+	if len(first.Lets) != 1 {
+		t.Fatalf("expected let bindings on first candidate, got %+v", first.Lets)
+	}
+	if first.Rollout == nil || first.Rollout.Bps != 2000 {
+		t.Fatalf("unexpected rollout on first candidate: %+v", first.Rollout)
+	}
+	if strategy.Candidates[1].Label != "Global" || !strategy.Candidates[1].IsElse {
+		t.Fatalf("unexpected else candidate: %+v", strategy.Candidates[1])
+	}
+}
+
 func TestLowerQuantityLiteral(t *testing.T) {
 	program := lowerSource(t, `rule HeatStress { when { reading.temperature > 28 C } then Alert {} }`)
 	found := false

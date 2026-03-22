@@ -200,6 +200,85 @@ expert rule LargeTransfer {
 	}
 }
 
+func TestCompileFullAcceptsStrategy(t *testing.T) {
+	_, err := CompileFull([]byte(`
+segment US {
+	user.country == "US"
+}
+
+outcome CheckoutPath {
+	target: string
+	reason: string
+}
+
+strategy CheckoutRouting returns CheckoutPath {
+	when segment US {
+		let local = user.country == "US"
+		local
+	} then Domestic {
+		target: "domestic",
+		reason: "local routing",
+	}
+
+	else Global {
+		target: "global",
+		reason: "fallback",
+	}
+}
+`))
+	if err != nil {
+		t.Fatalf("CompileFull: %v", err)
+	}
+}
+
+func TestCompileFullRejectsStrategyWithoutElse(t *testing.T) {
+	_, err := CompileFull([]byte(`
+outcome CheckoutPath {
+	target: string
+}
+
+strategy CheckoutRouting returns CheckoutPath {
+	when {
+		true
+	} then Domestic {
+		target: "domestic"
+	}
+}
+`))
+	if err == nil {
+		t.Fatal("expected strategy without else to fail compilation")
+	}
+	if !strings.Contains(err.Error(), "else arm is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCompileFullRejectsStrategyPayloadMismatch(t *testing.T) {
+	_, err := CompileFull([]byte(`
+outcome CheckoutPath {
+	target: string
+}
+
+strategy CheckoutRouting returns CheckoutPath {
+	when {
+		true
+	} then Domestic {
+		target: 42
+	}
+
+	else Global {
+		target: "global"
+	}
+}
+`))
+	if err == nil {
+		t.Fatal("expected strategy payload mismatch to fail compilation")
+	}
+	if !strings.Contains(err.Error(), `field "target" expects string`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestCompileFullRejectsMismatchedDecimalUnits(t *testing.T) {
 	_, err := CompileFull([]byte(`
 rule Broken {

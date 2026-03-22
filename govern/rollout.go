@@ -24,14 +24,14 @@ type PercentRollout struct {
 
 // RolloutDecision records how a rollout check resolved.
 type RolloutDecision struct {
-	Allowed       bool
+	Allowed        bool
 	MissingSubject bool
-	SubjectKey    string
-	SubjectValue  string
-	Namespace     string
-	Bucket        uint16
-	Threshold     uint16
-	Resolution    uint16
+	SubjectKey     string
+	SubjectValue   string
+	Namespace      string
+	Bucket         uint16
+	Threshold      uint16
+	Resolution     uint16
 }
 
 // Bucket returns a deterministic legacy 0-99 bucket for a subject.
