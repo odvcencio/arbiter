@@ -11,7 +11,7 @@ import (
 
 func parseArb(t *testing.T, input string) string {
 	t.Helper()
-	lang, err := getArbiterLanguage()
+	lang, err := GetLanguage()
 	if err != nil {
 		t.Fatalf("language generation: %v", err)
 	}
@@ -30,7 +30,7 @@ func parseArb(t *testing.T, input string) string {
 
 func parseArbExpectError(t *testing.T, input string) string {
 	t.Helper()
-	lang, err := getArbiterLanguage()
+	lang, err := GetLanguage()
 	if err != nil {
 		t.Fatalf("language generation: %v", err)
 	}

@@ -1,4 +1,4 @@
-package arbiter
+package dsl
 
 import (
 	"github.com/odvcencio/gotreesitter/grammargen"

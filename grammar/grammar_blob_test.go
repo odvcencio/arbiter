@@ -1,4 +1,4 @@
-package arbiter
+package grammar
 
 import (
 	"bytes"
@@ -6,12 +6,13 @@ import (
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammargen"
+	"m31labs.dev/arbiter/grammar/dsl"
 )
 
 // TestGrammarBinIsCurrent fails if the embedded grammar.bin has drifted from
-// ArbiterGrammar(). If it fails, run: go generate ./...
+// dsl.ArbiterGrammar(). If it fails, run: go generate ./...
 func TestGrammarBinIsCurrent(t *testing.T) {
-	_, fresh, err := grammargen.GenerateLanguageAndBlob(ArbiterGrammar())
+	_, fresh, err := grammargen.GenerateLanguageAndBlob(dsl.ArbiterGrammar())
 	if err != nil {
 		t.Fatalf("GenerateLanguageAndBlob: %v", err)
 	}
@@ -31,7 +32,12 @@ func TestLanguageLoadsFromEmbeddedBlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLanguage(embedded grammar.bin): %v", err)
 	}
-	if _, err := parseTreeWithLanguage([]byte(`rule R { when { x > 1 } then A {} }`), lang); err != nil {
+	parser := gotreesitter.NewParser(lang)
+	tree, err := parser.Parse([]byte(`rule R { when { x > 1 } then A {} }`))
+	if err != nil {
 		t.Fatalf("parse with embedded language: %v", err)
+	}
+	if tree.RootNode().HasError() {
+		t.Fatal("parse with embedded language produced ERROR nodes")
 	}
 }

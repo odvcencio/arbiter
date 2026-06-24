@@ -15,18 +15,18 @@ import (
 	"os"
 
 	"github.com/odvcencio/gotreesitter/grammargen"
-	arbiter "m31labs.dev/arbiter"
+	"m31labs.dev/arbiter/grammar/dsl"
 )
 
 func main() {
-	g := arbiter.ArbiterGrammar()
+	g := dsl.ArbiterGrammar()
 
 	_, blob, err := grammargen.GenerateLanguageAndBlob(g)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "arbiter-grammar: generate parse table:", err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile("grammar.bin", blob, 0o644); err != nil {
+	if err := os.WriteFile("grammar/grammar.bin", blob, 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "arbiter-grammar: write grammar.bin:", err)
 		os.Exit(1)
 	}
@@ -36,7 +36,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "arbiter-grammar: export grammar json:", err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile("grammar.json", jsonBytes, 0o644); err != nil {
+	if err := os.WriteFile("grammar/grammar.json", jsonBytes, 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "arbiter-grammar: write grammar.json:", err)
 		os.Exit(1)
 	}
