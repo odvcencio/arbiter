@@ -51,3 +51,9 @@ go run ./cmd/arbiter check testdata/fraud.arb   # validate a rule file
 | `cmd/arbiter/` | CLI (check, compile, eval, diff, replay, serve, etc.) |
 | `sdks/` | Node, Python, Rust client SDKs |
 | `examples/` | Example `.arb` files |
+
+## Prose: ASD-STE100
+
+Write agent prose in ASD-STE100 style (decision 0011, hypha://m31labs/hyphae). Three rules
+matter most: use the active voice; keep sentences at or below 20-25 words; give each word one
+meaning. This rule covers commit messages, PR text, review output, and documentation.
