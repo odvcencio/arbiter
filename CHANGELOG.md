@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## [1.10.0] — 2026-09-21
+
+### Added
+
+- **Prepared tag-filtered evaluation** — `vm.NewPreparedEvaluator` selects an ordered rule window once and reuses one bounded VM across evaluations. It preserves the existing tag, active-window, action, error, and output semantics.
+
 ## [1.8.1] — 2026-06-10
 
 ### Added

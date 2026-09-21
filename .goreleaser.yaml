@@ -57,5 +57,7 @@ homebrew_casks:
     repository:
       owner: odvcencio
       name: homebrew-tap
+      token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
+    skip_upload: '{{ not (isEnvSet "HOMEBREW_TAP_TOKEN") }}'
     homepage: "https://arbiter.m31labs.dev/"
     description: "Compiled, bytecode-evaluated decision language for Go."
