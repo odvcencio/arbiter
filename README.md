@@ -1,10 +1,10 @@
 # arbiter
 
-## What's new in v1.8.1
+## What's new in v1.10.0
 
-**Segment-only rule syntax** — `when segment NAME` (no inline condition block) is now a valid rule form. Previously this was a parse error; the only supported form was `when segment NAME { expr }`. Use it when the segment gate alone decides the outcome and no additional inline condition is needed.
+**Prepared tag-filtered evaluation** — `vm.NewPreparedEvaluator` selects matching rule headers once for repeated decisions with the same rules, string pool, and tags.
 
-**Engine-wide empty-condition consistency** — a rule with no inline condition is now uniformly treated as unconditional across every eval entrypoint: `EvalGoverned`, `Eval`, `EvalDebug`, expert, and strategy paths. Previously this was inconsistent: some paths evaluated such rules as never-firing rather than always-firing.
+**Existing evaluation semantics** — prepared evaluation keeps rule order, active windows, actions, errors, and outputs consistent with `EvalWithTagFilter`.
 
 ---
 
