@@ -1,11 +1,47 @@
 package vm
 
-import "m31labs.dev/arbiter/compiler"
+import (
+	"fmt"
+
+	"m31labs.dev/arbiter/compiler"
+)
 
 // Evaluator reuses a VM across multiple rule evaluations.
 type Evaluator struct {
 	rs *compiler.CompiledRuleset
 	vm *VM
+}
+
+// PreparedEvaluator evaluates one immutable ruleset and tag selection.
+// It reuses VM scratch state and is not safe for concurrent use.
+type PreparedEvaluator struct {
+	rs    *compiler.CompiledRuleset
+	rules []compiler.RuleHeader
+	vm    *VM
+}
+
+// NewPreparedEvaluator selects matching rules once. The caller must not mutate
+// the ruleset or string pool while the evaluator is in use.
+func NewPreparedEvaluator(rs *compiler.CompiledRuleset, sp *StringPool, tags []string) (*PreparedEvaluator, error) {
+	if rs == nil {
+		return nil, fmt.Errorf("nil ruleset")
+	}
+	rules := make([]compiler.RuleHeader, 0, len(rs.Rules))
+	for _, rule := range rs.Rules {
+		if rs.RuleMatchesTags(rule, tags) {
+			rules = append(rules, rule)
+		}
+	}
+	return &PreparedEvaluator{rs: rs, rules: rules, vm: newVM(rs, sp)}, nil
+}
+
+// Eval evaluates the prepared rule selection. Active windows are checked
+// against the current data context on every call.
+func (e *PreparedEvaluator) Eval(dc DataContext) ([]MatchedRule, error) {
+	if e == nil || e.rs == nil || e.vm == nil {
+		return nil, fmt.Errorf("nil prepared evaluator")
+	}
+	return evalRuleSelection(e.rs, dc, e.vm, e.rules, nil)
 }
 
 // NewEvaluator creates a reusable evaluator for a compiled ruleset.

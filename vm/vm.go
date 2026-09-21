@@ -58,19 +58,20 @@ type iterState struct {
 
 // VM is the bytecode evaluator.
 type VM struct {
-	stack    [maxStack]Value
-	sp       int
-	pool     *intern.Pool
-	strPool  *StringPool
-	rs       *compiler.CompiledRuleset
-	locals   map[string]any // iterator variable bindings
-	iters    []iterState
-	regexes  map[string]*regexp.Regexp
-	regexLRU []string
-	badRe    map[string]struct{}
-	badReLRU []string
-	err      error
-	ip       uint32
+	stack     [maxStack]Value
+	sp        int
+	stackHigh int
+	pool      *intern.Pool
+	strPool   *StringPool
+	rs        *compiler.CompiledRuleset
+	locals    map[string]any // iterator variable bindings
+	iters     []iterState
+	regexes   map[string]*regexp.Regexp
+	regexLRU  []string
+	badRe     map[string]struct{}
+	badReLRU  []string
+	err       error
+	ip        uint32
 }
 
 func newVM(rs *compiler.CompiledRuleset, sp *StringPool) *VM {
@@ -90,6 +91,9 @@ func (vm *VM) push(v Value) {
 	}
 	vm.stack[vm.sp] = v
 	vm.sp++
+	if vm.sp > vm.stackHigh {
+		vm.stackHigh = vm.sp
+	}
 }
 
 func (vm *VM) pop() Value {
@@ -131,36 +135,37 @@ func EvalWithTagFilter(rs *compiler.CompiledRuleset, dc DataContext, sp *StringP
 		return nil, fmt.Errorf("nil ruleset")
 	}
 
-	vm := newVM(rs, sp)
+	return evalRuleSelection(rs, dc, newVM(rs, sp), rs.Rules, tags)
+}
+
+func evalRuleSelection(rs *compiler.CompiledRuleset, dc DataContext, evaluator *VM, rules []compiler.RuleHeader, tags []string) ([]MatchedRule, error) {
 	var matched []MatchedRule
 	evalTime := resolveEvalTime(dc)
+	defer evaluator.resetTransient()
 
-	for _, rule := range rs.Rules {
+	for _, rule := range rules {
 		if !rs.RuleMatchesTags(rule, tags) {
 			continue
 		}
 		if !ruleWithinActiveWindow(rule, evalTime) {
 			continue
 		}
-		vm.sp = 0 // reset stack per rule
-		clear(vm.locals)
-		vm.iters = vm.iters[:0]
-		vm.err = nil
+		evaluator.resetTransient()
 
-		result := vm.evalCondition(rs.Instructions, rule.ConditionOff, rule.ConditionLen, dc)
-		if vm.err != nil {
-			return nil, fmt.Errorf("rule %s: %w", vm.strPool.Get(rule.NameIdx), vm.err)
+		result := evaluator.evalCondition(rs.Instructions, rule.ConditionOff, rule.ConditionLen, dc)
+		if evaluator.err != nil {
+			return nil, fmt.Errorf("rule %s: %w", evaluator.strPool.Get(rule.NameIdx), evaluator.err)
 		}
 
 		if result {
 			mr := MatchedRule{
-				Name:     vm.strPool.Get(rule.NameIdx),
+				Name:     evaluator.strPool.Get(rule.NameIdx),
 				Priority: int(rule.Priority),
 			}
 			if int(rule.ActionIdx) < len(rs.Actions) {
 				action := rs.Actions[rule.ActionIdx]
-				mr.Action = vm.strPool.Get(action.NameIdx)
-				params, err := vm.evalActionParams(rs.Instructions, action.Params, dc)
+				mr.Action = evaluator.strPool.Get(action.NameIdx)
+				params, err := evaluator.evalActionParams(rs.Instructions, action.Params, dc)
 				if err != nil {
 					return nil, fmt.Errorf("rule %s action %s: %w", mr.Name, mr.Action, err)
 				}
@@ -170,12 +175,12 @@ func EvalWithTagFilter(rs *compiler.CompiledRuleset, dc DataContext, sp *StringP
 		} else if rule.FallbackIdx != 0 && int(rule.FallbackIdx) < len(rs.Actions) {
 			action := rs.Actions[rule.FallbackIdx]
 			mr := MatchedRule{
-				Name:     vm.strPool.Get(rule.NameIdx),
+				Name:     evaluator.strPool.Get(rule.NameIdx),
 				Priority: int(rule.Priority),
-				Action:   vm.strPool.Get(action.NameIdx),
+				Action:   evaluator.strPool.Get(action.NameIdx),
 				Fallback: true,
 			}
-			params, err := vm.evalActionParams(rs.Instructions, action.Params, dc)
+			params, err := evaluator.evalActionParams(rs.Instructions, action.Params, dc)
 			if err != nil {
 				return nil, fmt.Errorf("rule %s fallback %s: %w", mr.Name, mr.Action, err)
 			}
@@ -185,6 +190,17 @@ func EvalWithTagFilter(rs *compiler.CompiledRuleset, dc DataContext, sp *StringP
 	}
 
 	return matched, nil
+}
+
+func (vm *VM) resetTransient() {
+	if vm.stackHigh > 0 {
+		clear(vm.stack[:vm.stackHigh])
+	}
+	vm.sp, vm.stackHigh = 0, 0
+	clear(vm.locals)
+	clear(vm.iters[:cap(vm.iters)])
+	vm.iters = vm.iters[:0]
+	vm.err = nil
 }
 
 // EvalDebug evaluates with full tracing.
