@@ -4,6 +4,17 @@ import (
 	"testing"
 )
 
+// nestedAddFuzzSeed builds `rule R { when { true } then D { v: x + (x + (x + ...)) } }`
+// with 300 levels of right-nested addition — see
+// TestCompileRejectsExcessiveStackDepth.
+func nestedAddFuzzSeed() []byte {
+	expr := "x"
+	for i := 0; i < 300; i++ {
+		expr = "x + (" + expr + ")"
+	}
+	return []byte("rule R { when { true } then D { v: " + expr + " } }\n")
+}
+
 func FuzzCompile(f *testing.F) {
 	// Seed with valid .arb patterns.
 	f.Add([]byte(`rule X { when { a > 1 } then Y { z: 1 } }`))
@@ -28,6 +39,10 @@ rule R { when { user.score >= A } then Deny {} }`))
 	f.Add([]byte(`const A = B + 1
 const B = A
 rule R { when { user.score >= A } then Deny {} }`))
+	// 300 nested `+` compiled fine and only failed at Eval with a VM stack
+	// overflow error, depending on runtime data; see
+	// TestCompileRejectsExcessiveStackDepth.
+	f.Add(nestedAddFuzzSeed())
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// Must not panic on any input.

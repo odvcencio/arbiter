@@ -15,7 +15,12 @@ import (
 )
 
 const (
-	maxStack               = 256
+	// maxStack must match compiler.MaxValueStackDepth: the compiler's static
+	// stack-depth check (compiler/stackdepth.go) rejects any expression that
+	// would need to push more values than this at once, so that pathological
+	// nesting fails at compile time with a clear diagnostic instead of here,
+	// unpredictably, depending on runtime data.
+	maxStack               = compiler.MaxValueStackDepth
 	maxInstructionsPerEval = 1 << 20
 	maxRegexCacheEntries   = 256
 	maxBadRegexEntries     = 256

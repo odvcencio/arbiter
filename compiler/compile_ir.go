@@ -149,6 +149,9 @@ func (c *irCompiler) compileRule(rule *ir.Rule, rs *CompiledRuleset) (RuleHeader
 	}
 
 	if rule.HasCondition {
+		if err := checkExprStackDepth(c.program, fmt.Sprintf("rule %s condition", rule.Name), rule.Lets, rule.Condition); err != nil {
+			return RuleHeader{}, err
+		}
 		condOff := uint32(len(rs.Instructions))
 		var code []byte
 		for _, binding := range rule.Lets {
@@ -201,6 +204,16 @@ func (c *irCompiler) compileAction(action ir.Action, rs *CompiledRuleset) Action
 	}
 
 	for i, param := range action.Params {
+		paramLets := action.Lets
+		if i != 0 {
+			paramLets = nil // only prepended to the first param, see below
+		}
+		if err := checkExprStackDepth(c.program, fmt.Sprintf("rule action %s param %s", action.Name, param.Key), paramLets, param.Value); err != nil {
+			if c.err == nil {
+				c.err = err
+			}
+			return entry
+		}
 		paramOff := uint32(len(rs.Instructions))
 		var code []byte
 		// Prepend let bindings to the first param so locals are set up.
