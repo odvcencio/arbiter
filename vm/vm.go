@@ -270,6 +270,23 @@ func EvalDebugWithTagFilter(rs *compiler.CompiledRuleset, dc DataContext, sp *St
 				mr.Params = params
 			}
 			result.Matched = append(result.Matched, mr)
+		} else if rule.FallbackIdx != 0 && int(rule.FallbackIdx) < len(rs.Actions) {
+			action := rs.Actions[rule.FallbackIdx]
+			mr := MatchedRule{
+				Name:     vm.strPool.Get(rule.NameIdx),
+				Priority: int(rule.Priority),
+				Action:   vm.strPool.Get(action.NameIdx),
+				Fallback: true,
+			}
+			params, err := vm.evalActionParams(rs.Instructions, action.Params, dc)
+			if err != nil {
+				result.Error = fmt.Errorf("rule %s fallback %s: %w", mr.Name, mr.Action, err)
+				result.Failed = append(result.Failed, FailedRule{Name: mr.Name})
+				result.Elapsed = time.Since(start)
+				return result
+			}
+			mr.Params = params
+			result.Matched = append(result.Matched, mr)
 		} else {
 			result.Failed = append(result.Failed, FailedRule{
 				Name: vm.strPool.Get(rule.NameIdx),
