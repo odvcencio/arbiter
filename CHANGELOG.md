@@ -8,6 +8,13 @@
 
 - **Prepared tag-filtered evaluation** — `vm.NewPreparedEvaluator` selects an ordered rule window once and reuses one bounded VM across evaluations. It preserves the existing tag, active-window, action, error, and output semantics.
 
+## [1.9.0] — 2026-06-24
+
+### Changed
+
+- **Consumable grammar package** — the grammar DSL moved to `grammar/dsl` (it pulls in the `grammargen`/`grammars` registry). `grammar/` now loads the embedded parse table and exposes `Highlights`/`Highlighter()` with zero `grammargen`/`grammars` dependencies, so a highlighter that imports `m31labs.dev/arbiter/grammar` links about 22MB less (no 200-grammar payload). The root package keeps `GetLanguage`/`ArbiterGrammar`/`Grammar`/`Rule` shims for compatibility.
+- Refreshed dependencies: `gotreesitter` to v0.20.1, `grpc` to v1.80.0, and `golang.org/x/*`.
+
 ## [1.8.1] — 2026-06-10
 
 ### Added
