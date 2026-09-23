@@ -159,6 +159,50 @@ func TestCompileJSONRulesAndEvalQuantifier(t *testing.T) {
 	}
 }
 
+// TestEvalDebugBuildsFallbackAction guards against EvalDebug silently
+// dropping a rule's `otherwise` fallback action. SPEC.md 2.1 says a fallback
+// is always built on non-match, and Eval already does this (vm.go
+// evalRuleSelection); EvalDebug's trace must report the same match.
+func TestEvalDebugBuildsFallbackAction(t *testing.T) {
+	prog, err := Compile([]byte(`
+rule T {
+	when { name == "alice" }
+	then Greet { who: name }
+	otherwise Greet { who: "stranger" }
+}
+`))
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	dc := DataFromMap(map[string]any{"name": "bob"}, prog)
+
+	matched, err := Eval(prog, dc)
+	if err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	if len(matched) != 1 || !matched[0].Fallback {
+		t.Fatalf("Eval: expected 1 fallback match, got %+v", matched)
+	}
+
+	debug := EvalDebug(prog, dc)
+	if debug.Error != nil {
+		t.Fatalf("EvalDebug: unexpected error: %v", debug.Error)
+	}
+	if len(debug.Matched) != len(matched) {
+		t.Fatalf("EvalDebug: expected %d matched rules like Eval, got %d (%+v)", len(matched), len(debug.Matched), debug.Matched)
+	}
+	if len(debug.Matched) != 1 || !debug.Matched[0].Fallback {
+		t.Fatalf("EvalDebug: expected 1 fallback match, got %+v", debug.Matched)
+	}
+	if debug.Matched[0].Action != matched[0].Action {
+		t.Fatalf("EvalDebug: fallback action %q does not match Eval's %q", debug.Matched[0].Action, matched[0].Action)
+	}
+	if len(debug.Failed) != 0 {
+		t.Fatalf("EvalDebug: fallback match must not also appear in Failed, got %+v", debug.Failed)
+	}
+}
+
 func TestEvalDebugUsesWrappedPool(t *testing.T) {
 	prog, err := Compile([]byte(`rule T { when { name == "alice" } then A {} }`))
 	if err != nil {

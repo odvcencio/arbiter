@@ -503,6 +503,48 @@ func TestFlagExplainPrereqFail(t *testing.T) {
 	}
 }
 
+// TestFlagExplainSurfacesSegmentRuntimeError guards against a segment's
+// runtime error (a type mismatch in its condition) being silently treated as
+// "did not match" with no trace of what happened. Flag evaluation never
+// hard-fails (it always resolves to a variant), so the error must appear in
+// the arbitrace detail instead of aborting evaluation.
+func TestFlagExplainSurfacesSegmentRuntimeError(t *testing.T) {
+	f, err := Load([]byte(`
+segment bad_compare {
+	user.balance > 10.50 USD
+}
+
+flag dark_mode type boolean default false {
+	when bad_compare then true
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := map[string]any{
+		"user.balance": "enterprise", // comparing a string to a decimal is a VM runtime error
+	}
+	eval := f.Explain("dark_mode", ctx)
+
+	if eval.Variant.Name != "false" {
+		t.Fatalf("variant: got %q, want the default false (segment error must fail closed)", eval.Variant.Name)
+	}
+	if !eval.IsDefault {
+		t.Fatal("expected IsDefault=true when the segment errors")
+	}
+
+	var sawSegmentError bool
+	for _, step := range eval.Arbitrace {
+		if step.Kind == string(govern.ArbitraceKindSegment) && strings.Contains(step.Detail, "error") {
+			sawSegmentError = true
+		}
+	}
+	if !sawSegmentError {
+		t.Fatalf("expected a segment arbitrace step annotated with the error, got %#v", eval.Arbitrace)
+	}
+}
+
 func TestFlagMetadata(t *testing.T) {
 	f, err := Load([]byte(fullFlagSource))
 	if err != nil {

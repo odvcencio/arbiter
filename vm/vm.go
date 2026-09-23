@@ -15,7 +15,12 @@ import (
 )
 
 const (
-	maxStack               = 256
+	// maxStack must match compiler.MaxValueStackDepth: the compiler's static
+	// stack-depth check (compiler/stackdepth.go) rejects any expression that
+	// would need to push more values than this at once, so that pathological
+	// nesting fails at compile time with a clear diagnostic instead of here,
+	// unpredictably, depending on runtime data.
+	maxStack               = compiler.MaxValueStackDepth
 	maxInstructionsPerEval = 1 << 20
 	maxRegexCacheEntries   = 256
 	maxBadRegexEntries     = 256
@@ -72,6 +77,24 @@ type VM struct {
 	badReLRU  []string
 	err       error
 	ip        uint32
+
+	// budgetSteps accumulates instructions executed across every
+	// evalCondition call made on this VM instance since the last
+	// resetBudget. It is deliberately NOT cleared by resetTransient: the
+	// instruction budget is per request (every rule condition evaluated
+	// while answering one Eval/EvalDebug/PreparedEvaluator.Eval call), not
+	// per individual condition — otherwise a ruleset with many rules, each
+	// just under the cap, has no aggregate limit at all.
+	budgetSteps int
+}
+
+// resetBudget starts a new per-request instruction budget. Call it once at
+// the start of each logical request on a VM that may be reused across
+// requests (for example PreparedEvaluator, which explicitly reuses its VM
+// across repeated Eval calls). VMs created fresh per request via newVM
+// already start with a zero budget and do not need this.
+func (vm *VM) resetBudget() {
+	vm.budgetSteps = 0
 }
 
 func newVM(rs *compiler.CompiledRuleset, sp *StringPool) *VM {
@@ -270,6 +293,23 @@ func EvalDebugWithTagFilter(rs *compiler.CompiledRuleset, dc DataContext, sp *St
 				mr.Params = params
 			}
 			result.Matched = append(result.Matched, mr)
+		} else if rule.FallbackIdx != 0 && int(rule.FallbackIdx) < len(rs.Actions) {
+			action := rs.Actions[rule.FallbackIdx]
+			mr := MatchedRule{
+				Name:     vm.strPool.Get(rule.NameIdx),
+				Priority: int(rule.Priority),
+				Action:   vm.strPool.Get(action.NameIdx),
+				Fallback: true,
+			}
+			params, err := vm.evalActionParams(rs.Instructions, action.Params, dc)
+			if err != nil {
+				result.Error = fmt.Errorf("rule %s fallback %s: %w", mr.Name, mr.Action, err)
+				result.Failed = append(result.Failed, FailedRule{Name: mr.Name})
+				result.Elapsed = time.Since(start)
+				return result
+			}
+			mr.Params = params
+			result.Matched = append(result.Matched, mr)
 		} else {
 			result.Failed = append(result.Failed, FailedRule{
 				Name: vm.strPool.Get(rule.NameIdx),
@@ -334,11 +374,10 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 
 	end := off + length
 	ip := off
-	steps := 0
 
 	for ip < end {
-		steps++
-		if steps > maxInstructionsPerEval {
+		vm.budgetSteps++
+		if vm.budgetSteps > maxInstructionsPerEval {
 			vm.err = fmt.Errorf("instruction limit exceeded after %d steps", maxInstructionsPerEval)
 			return false
 		}

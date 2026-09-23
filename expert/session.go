@@ -1324,7 +1324,11 @@ func (s *Session) evalRule(rule Rule, header compiler.RuleHeader, evaluator *vm.
 	if !s.ruleAllowedByGovernance(rule, header, rc, trace) {
 		return false, false, vm.MatchedRule{}, trace.Steps, nil
 	}
-	if !ruleMatchesSegment(rule, header, evaluator, rc, trace) {
+	segOK, segErr := ruleMatchesSegment(rule, header, evaluator, rc, trace)
+	if segErr != nil {
+		return false, false, vm.MatchedRule{}, trace.Steps, segErr
+	}
+	if !segOK {
 		return false, false, vm.MatchedRule{}, trace.Steps, nil
 	}
 	condOK, pending, err := s.ruleConditionMatches(rule, header, evaluator, dc, trace)
@@ -1354,14 +1358,21 @@ func (s *Session) ruleAllowedByGovernance(rule Rule, header compiler.RuleHeader,
 	return rc.CheckExclusionsFor(govern.ArbitraceScopeExpertRule, rule.Name, rule.Excludes, trace)
 }
 
-func ruleMatchesSegment(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, rc *govern.RequestCache, trace *govern.Arbitrace) bool {
+func ruleMatchesSegment(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, rc *govern.RequestCache, trace *govern.Arbitrace) (bool, error) {
 	if !header.HasSegment {
-		return true
+		return true, nil
 	}
 	segName := evaluator.String(header.SegmentNameIdx)
-	segOK, _ := rc.EvalSegment(segName)
-	trace.AppendScoped(govern.ArbitracePhaseMatch, govern.ArbitraceScopeExpertRule, rule.Name, govern.ArbitraceKindSegment, segName, "", segOK, fmt.Sprintf("segment %s -> %v", segName, segOK))
-	return segOK
+	segOK, _, segErr := rc.EvalSegment(segName)
+	detail := fmt.Sprintf("segment %s -> %v", segName, segOK)
+	if segErr != nil {
+		detail = fmt.Sprintf("segment %s error: %v", segName, segErr)
+	}
+	trace.AppendScoped(govern.ArbitracePhaseMatch, govern.ArbitraceScopeExpertRule, rule.Name, govern.ArbitraceKindSegment, segName, "", segOK, detail)
+	if segErr != nil {
+		return false, fmt.Errorf("expert rule %s segment %s: %w", rule.Name, segName, segErr)
+	}
+	return segOK, nil
 }
 
 func (s *Session) ruleConditionMatches(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext, trace *govern.Arbitrace) (bool, bool, error) {

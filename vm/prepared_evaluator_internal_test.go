@@ -46,3 +46,25 @@ func TestPreparedEvaluatorClearsPoppedIteratorBackingAndRecoversAfterError(t *te
 		t.Fatalf("successful reuse after error = (%+v, %v)", matched, err)
 	}
 }
+
+// TestPreparedEvaluatorGivesEachCallAFreshInstructionBudget guards against
+// PreparedEvaluator's reused VM leaking instruction budget across calls: it
+// is documented to serve "repeated decisions," so each Eval call is its own
+// logical request and must not inherit budget consumption from prior calls.
+func TestPreparedEvaluatorGivesEachCallAFreshInstructionBudget(t *testing.T) {
+	pool := intern.NewPool()
+	code := straightLineBoolCondition((maxInstructionsPerEval * 3) / 4)
+	rs := makeRuleset(pool, code)
+	sp := NewStringPool(pool.Strings())
+	prepared, err := NewPreparedEvaluator(rs, sp, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dc := DataFromMap(map[string]any{}, sp)
+	for i := 0; i < 3; i++ {
+		if _, err := prepared.Eval(dc); err != nil {
+			t.Fatalf("call %d: unexpected error (budget leaked across calls?): %v", i, err)
+		}
+	}
+}

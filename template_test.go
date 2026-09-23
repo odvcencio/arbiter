@@ -48,7 +48,7 @@ func TestTemplateReusedWithDifferentArgs(t *testing.T) {
 	src := []byte(`
 template AtLeast(value, floor) = value >= floor
 
-input { a: number, b: number }
+input { a: number b: number }
 outcome Hit { which: string }
 rule A { when { AtLeast(a, 10) } then Hit { which: "a" } }
 rule B { when { AtLeast(b, 100) } then Hit { which: "b" } }

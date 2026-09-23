@@ -138,7 +138,7 @@ func TestRunFileImportedNamespacedStrategyAndFlag(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "lib"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "lib", "policy.arb"), []byte(`input { user: { country: string, plan: string } }
+	if err := os.WriteFile(filepath.Join(dir, "lib", "policy.arb"), []byte(`input { user: { country: string plan: string } }
 outcome Route { target: string }
 strategy Pick returns Route {
 	when { user.country == "US" } then Dom { target: "us" }

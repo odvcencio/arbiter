@@ -4,13 +4,24 @@ import (
 	"testing"
 )
 
+// nestedAddFuzzSeed builds `rule R { when { true } then D { v: x + (x + (x + ...)) } }`
+// with 300 levels of right-nested addition — see
+// TestCompileRejectsExcessiveStackDepth.
+func nestedAddFuzzSeed() []byte {
+	expr := "x"
+	for i := 0; i < 300; i++ {
+		expr = "x + (" + expr + ")"
+	}
+	return []byte("rule R { when { true } then D { v: " + expr + " } }\n")
+}
+
 func FuzzCompile(f *testing.F) {
 	// Seed with valid .arb patterns.
 	f.Add([]byte(`rule X { when { a > 1 } then Y { z: 1 } }`))
 	f.Add([]byte(`flag f type boolean default "false" { when { true } then "true" }`))
 	f.Add([]byte(`segment s { x == "y" }`))
 	f.Add([]byte(`const C = 42`))
-	f.Add([]byte(`fact F { key: string, value: number }`))
+	f.Add([]byte(`fact F { key: string value: number }`))
 	f.Add([]byte(`outcome O { status: string }`))
 	f.Add([]byte(`strategy S returns O { when { x > 0 } then A { status: "ok" } else B { status: "default" } }`))
 	f.Add([]byte(`expert rule E { when { x > 0 } then assert F { key: "k" } }`))
@@ -18,6 +29,20 @@ func FuzzCompile(f *testing.F) {
 	f.Add([]byte(``))
 	f.Add([]byte(`rule { }`))
 	f.Add([]byte(`rule X { when { } then Y { } }`))
+	// Constant reference cycles used to overflow the stack (fatal, unrecoverable)
+	// in validateExpr's ExprConstRef case; see TestConstSelfCycleRejected et al.
+	f.Add([]byte(`const C = C
+rule R { when { user.score >= C } then Deny {} }`))
+	f.Add([]byte(`const A = B
+const B = A
+rule R { when { user.score >= A } then Deny {} }`))
+	f.Add([]byte(`const A = B + 1
+const B = A
+rule R { when { user.score >= A } then Deny {} }`))
+	// 300 nested `+` compiled fine and only failed at Eval with a VM stack
+	// overflow error, depending on runtime data; see
+	// TestCompileRejectsExcessiveStackDepth.
+	f.Add(nestedAddFuzzSeed())
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// Must not panic on any input.

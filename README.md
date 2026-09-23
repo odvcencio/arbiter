@@ -37,7 +37,6 @@ The parser is built on [gotreesitter](https://github.com/odvcencio/gotreesitter)
 Standalone reference material lives under [`docs/`](docs):
 
 - [`docs/language/grammar.ebnf`](docs/language/grammar.ebnf) is the tooling-facing language specification.
-- [`docs/architecture/compiler.md`](docs/architecture/compiler.md) explains the compiler pipeline, compiled ruleset layout, and the compile-time/runtime string-pool split.
 - [`docs/self-hosted.md`](docs/self-hosted.md) is the recommended self-hosted profile for a single team or trust boundary.
 
 ## Performance
@@ -1397,7 +1396,7 @@ expert rule EmitDetermination priority 90 {
 
 ## Status
 
-**v1.5.0** — language contract frozen, compiler and VM stable, full IDE experience.
+**v1.10.0** — language contract frozen, compiler and VM stable, full IDE experience.
 
 What you can rely on:
 

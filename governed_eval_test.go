@@ -332,3 +332,53 @@ rule Second {
 		t.Fatalf("unexpected deferred step semantics: %+v", deferred)
 	}
 }
+
+// TestEvalGovernedSurfacesSegmentRuntimeError guards against a segment's
+// runtime error (a type mismatch in its condition) being silently swallowed
+// as "segment did not match". It must be reported the same way a rule
+// condition error is: as a returned error, with the partial arbitrace
+// annotating what happened.
+func TestEvalGovernedSurfacesSegmentRuntimeError(t *testing.T) {
+	src := []byte(`
+segment bad_compare {
+	user.balance > 10.50 USD
+}
+
+rule Gated {
+	when segment bad_compare {
+		true
+	}
+	then Allow {}
+}
+`)
+
+	result, err := CompileFull(src)
+	if err != nil {
+		t.Fatalf("CompileFull: %v", err)
+	}
+
+	ctx := map[string]any{
+		"user": map[string]any{
+			"balance": "enterprise", // comparing a string to a decimal is a VM runtime error
+		},
+	}
+	dc := DataFromMap(ctx, &Program{Ruleset: result.Ruleset, Segments: result.Segments})
+
+	matched, arbitrace, err := EvalGoverned(&Program{Ruleset: result.Ruleset, Segments: result.Segments}, dc, result.Segments, ctx)
+	if err == nil {
+		t.Fatal("EvalGoverned: expected an error for a segment runtime failure, got nil")
+	}
+	if matched != nil {
+		t.Fatalf("EvalGoverned: expected no matches alongside the error, got %+v", matched)
+	}
+
+	var sawSegmentError bool
+	for _, step := range arbitrace.Steps {
+		if step.Kind == govern.ArbitraceKindSegment && strings.Contains(step.Detail, "error") {
+			sawSegmentError = true
+		}
+	}
+	if !sawSegmentError {
+		t.Fatalf("expected a segment arbitrace step annotated with the error, got %+v", arbitrace.Steps)
+	}
+}

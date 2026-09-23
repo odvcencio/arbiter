@@ -205,6 +205,68 @@ func TestEvalInstructionLimitReturnsError(t *testing.T) {
 	}
 }
 
+// straightLineBoolCondition builds a jump-free condition that pushes a bool
+// and negates it n times before matching: exactly n+2 steps, deterministic,
+// with a constant stack depth of 1 throughout (no infinite loop, unlike
+// TestEvalInstructionLimitReturnsError's jump-back trick).
+func straightLineBoolCondition(n int) []byte {
+	var code []byte
+	code = compiler.Emit(code, compiler.OpLoadBool, 0, 1)
+	for i := 0; i < n; i++ {
+		code = compiler.Emit(code, compiler.OpNot, 0, 0)
+	}
+	code = compiler.Emit(code, compiler.OpRuleMatch, 0, 0)
+	return code
+}
+
+// TestEvalInstructionBudgetIsPerRequestNotPerCondition guards the fix to
+// vm/vm.go's instruction budget: it used to reset on every evalCondition
+// call, so N rules could each individually stay under the cap while their
+// combined cost was unbounded. Two rules here each cost well under half of
+// maxInstructionsPerEval alone; only their sum exceeds it.
+func TestEvalInstructionBudgetIsPerRequestNotPerCondition(t *testing.T) {
+	pool := intern.NewPool()
+	perRuleSteps := (maxInstructionsPerEval * 2) / 3 // > half, so 2x this exceeds the cap
+	cond1 := straightLineBoolCondition(perRuleSteps)
+	cond2 := straightLineBoolCondition(perRuleSteps)
+
+	code := append(append([]byte{}, cond1...), cond2...)
+	rs := &compiler.CompiledRuleset{
+		Constants:    pool,
+		Instructions: code,
+		Rules: []compiler.RuleHeader{
+			{
+				NameIdx:      pool.String("rule-1"),
+				ConditionOff: 0,
+				ConditionLen: uint32(len(cond1)),
+				ActionIdx:    0,
+			},
+			{
+				NameIdx:      pool.String("rule-2"),
+				ConditionOff: uint32(len(cond1)),
+				ConditionLen: uint32(len(cond2)),
+				ActionIdx:    0,
+			},
+		},
+		Actions: []compiler.ActionEntry{{NameIdx: pool.String("TestAction")}},
+	}
+	dc := DataFromMap(map[string]any{}, NewStringPool(pool.Strings()))
+
+	// Each condition alone is well under the cap.
+	soloVM := newVM(rs, NewStringPool(pool.Strings()))
+	if !soloVM.evalCondition(rs.Instructions, 0, uint32(len(cond1)), dc) {
+		t.Fatalf("a single condition of %d steps unexpectedly failed to match", perRuleSteps)
+	}
+	if soloVM.err != nil {
+		t.Fatalf("a single condition of %d steps unexpectedly errored: %v", perRuleSteps, soloVM.err)
+	}
+
+	// But evaluating both rules in one request must trip the shared budget.
+	if _, err := Eval(rs, dc); err == nil || !strings.Contains(err.Error(), "instruction limit exceeded") {
+		t.Fatalf("Eval error = %v, want instruction limit exceeded (budget must accumulate across rules)", err)
+	}
+}
+
 func TestDynamicStringsCompareAgainstPooledStrings(t *testing.T) {
 	pool := intern.NewPool()
 	helloIdx := pool.String("hello")

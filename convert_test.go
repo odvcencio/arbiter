@@ -104,8 +104,9 @@ func TestConvertJSONRules(t *testing.T) {
 func TestConvertJSONEmptyAction(t *testing.T) {
 	condJSON := `{"Operator":"==","Lhs":{"VarExpr":"x"},"Rhs":{"Const":{"NumConst":1}}}`
 
-	// ConvertJSON with an empty action string should still produce parseable .arb.
-	// A rule without a then-block is syntactically valid but emits no bytecode rules.
+	// ConvertJSON with an empty action string should still produce parseable
+	// .arb. `then` is a required clause, so the converter must fall back to a
+	// placeholder action rather than omitting the clause.
 	src, err := arbiter.ConvertJSON(condJSON, "")
 	if err != nil {
 		t.Fatalf("ConvertJSON(empty action): %v", err)
@@ -113,9 +114,16 @@ func TestConvertJSONEmptyAction(t *testing.T) {
 
 	t.Logf("ConvertJSON empty action output:\n%s", src)
 
-	_, err = arbiter.Compile(src)
+	if !strings.Contains(string(src), "then Noop") {
+		t.Fatalf("expected a placeholder then-clause, got:\n%s", src)
+	}
+
+	prog, err := arbiter.Compile(src)
 	if err != nil {
 		t.Fatalf("Compile(ConvertJSON empty action): %v", err)
+	}
+	if prog == nil || prog.Ruleset == nil || len(prog.Ruleset.Rules) != 1 {
+		t.Fatalf("expected 1 compiled rule, got %v", prog)
 	}
 }
 

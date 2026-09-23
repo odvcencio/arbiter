@@ -43,13 +43,17 @@ func ArishemToArb(rules []ArishemRule) (string, error) {
 			buf.WriteString("    }\n")
 		}
 
-		// Action
+		// Action. `then` is a required clause in the grammar (unlike
+		// `otherwise`, which is optional), so an empty action JSON still
+		// needs a syntactically valid placeholder block.
 		if r.Action != "" {
 			var act map[string]any
 			if err := json.Unmarshal([]byte(r.Action), &act); err != nil {
 				return "", fmt.Errorf("rule %s: parse action: %w", r.Name, err)
 			}
 			buf.WriteString(emitAction(act, "then", 1))
+		} else {
+			buf.WriteString(emitAction(map[string]any{"ActionName": "Noop"}, "then", 1))
 		}
 
 		// Fallback

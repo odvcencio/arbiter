@@ -700,6 +700,12 @@ func parseTree(source []byte) (*gotreesitter.Language, *gotreesitter.Node, error
 }
 
 func parseTreeWithLanguage(source []byte, lang *gotreesitter.Language) (*gotreesitter.Node, error) {
+	// Reject oversized or pathologically nested source before it reaches
+	// the parser — see source_limits.go. This is the single chokepoint for
+	// ParseSource, Compile, and include expansion.
+	if err := checkSourceLimits(source); err != nil {
+		return nil, err
+	}
 	parser := gotreesitter.NewParser(lang)
 	tree, err := parser.Parse(source)
 	if err != nil {

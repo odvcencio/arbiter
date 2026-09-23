@@ -502,15 +502,22 @@ func (f *Flags) ruleMatches(flagKey string, ruleIndex int, rule FlagRule, rc *go
 		return false
 	}
 	if rule.SegmentName != "" {
-		segOK, detail := rc.EvalSegment(rule.SegmentName)
+		// Flag evaluation always resolves to a variant (fail-closed to the
+		// default), so a segment runtime error is surfaced in the trace
+		// detail rather than as a Go error; it still yields segOK=false.
+		segOK, detail, _ := rc.EvalSegment(rule.SegmentName)
 		trace.AppendScoped(govern.ArbitracePhaseMatch, govern.ArbitraceScopeFlagRule, subject, govern.ArbitraceKindSegment, rule.SegmentName, "", segOK, detail)
 		if !segOK {
 			return false
 		}
 	}
 	if rule.CompiledInline != nil {
-		matched := rule.CompiledInline.Eval(rc.NestedContext())
-		trace.AppendScoped(govern.ArbitracePhaseMatch, govern.ArbitraceScopeFlagRule, subject, govern.ArbitraceKindCondition, "", "inline condition", matched, fmt.Sprintf("%s -> %v", rule.InlineExpr, matched))
+		matched, err := rule.CompiledInline.Eval(rc.NestedContext())
+		detail := fmt.Sprintf("%s -> %v", rule.InlineExpr, matched)
+		if err != nil {
+			detail = fmt.Sprintf("%s error: %v", rule.InlineExpr, err)
+		}
+		trace.AppendScoped(govern.ArbitracePhaseMatch, govern.ArbitraceScopeFlagRule, subject, govern.ArbitraceKindCondition, "", "inline condition", matched, detail)
 		return matched
 	}
 	if rule.SegmentName == "" {

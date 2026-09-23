@@ -288,8 +288,11 @@ func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *v
 
 		if rule.HasSegment {
 			segName := evaluator.String(rule.SegmentNameIdx)
-			segOK, detail := rc.EvalSegment(segName)
+			segOK, detail, segErr := rc.EvalSegment(segName)
 			trace.AppendScoped(govern.ArbitracePhaseMatch, govern.ArbitraceScopeRule, ruleName, govern.ArbitraceKindSegment, segName, "", segOK, detail)
+			if segErr != nil {
+				return nil, trace, fmt.Errorf("rule %s segment %s: %w", ruleName, segName, segErr)
+			}
 			if !segOK {
 				rc.RecordRuleResult(ruleName, false)
 				continue

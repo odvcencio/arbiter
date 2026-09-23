@@ -12,15 +12,21 @@ type CompiledSegment struct {
 	Ruleset *compiler.CompiledRuleset
 }
 
-// Eval evaluates a compiled segment against a nested context map.
-func (s *CompiledSegment) Eval(nestedCtx map[string]any) bool {
+// Eval evaluates a compiled segment against a nested context map. A runtime
+// error from the underlying condition (a type mismatch, a bad builtin call,
+// and so on) is returned rather than silently treated as "did not match", so
+// callers can surface it the same way they surface a rule condition error.
+func (s *CompiledSegment) Eval(nestedCtx map[string]any) (bool, error) {
 	if s == nil || s.Ruleset == nil {
-		return false
+		return false, nil
 	}
 	sp := vm.NewStringPool(s.Ruleset.Constants.Strings())
 	dc := vm.DataFromMap(nestedCtx, sp)
 	matched, err := vm.EvalWithPool(s.Ruleset, dc, sp)
-	return err == nil && len(matched) > 0
+	if err != nil {
+		return false, err
+	}
+	return len(matched) > 0, nil
 }
 
 // SegmentSet holds compiled segments shared across rules and flags.
