@@ -10,7 +10,7 @@ func FuzzCompile(f *testing.F) {
 	f.Add([]byte(`flag f type boolean default "false" { when { true } then "true" }`))
 	f.Add([]byte(`segment s { x == "y" }`))
 	f.Add([]byte(`const C = 42`))
-	f.Add([]byte(`fact F { key: string, value: number }`))
+	f.Add([]byte(`fact F { key: string value: number }`))
 	f.Add([]byte(`outcome O { status: string }`))
 	f.Add([]byte(`strategy S returns O { when { x > 0 } then A { status: "ok" } else B { status: "default" } }`))
 	f.Add([]byte(`expert rule E { when { x > 0 } then assert F { key: "k" } }`))
