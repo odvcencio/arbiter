@@ -72,6 +72,24 @@ type VM struct {
 	badReLRU  []string
 	err       error
 	ip        uint32
+
+	// budgetSteps accumulates instructions executed across every
+	// evalCondition call made on this VM instance since the last
+	// resetBudget. It is deliberately NOT cleared by resetTransient: the
+	// instruction budget is per request (every rule condition evaluated
+	// while answering one Eval/EvalDebug/PreparedEvaluator.Eval call), not
+	// per individual condition — otherwise a ruleset with many rules, each
+	// just under the cap, has no aggregate limit at all.
+	budgetSteps int
+}
+
+// resetBudget starts a new per-request instruction budget. Call it once at
+// the start of each logical request on a VM that may be reused across
+// requests (for example PreparedEvaluator, which explicitly reuses its VM
+// across repeated Eval calls). VMs created fresh per request via newVM
+// already start with a zero budget and do not need this.
+func (vm *VM) resetBudget() {
+	vm.budgetSteps = 0
 }
 
 func newVM(rs *compiler.CompiledRuleset, sp *StringPool) *VM {
@@ -351,11 +369,10 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 
 	end := off + length
 	ip := off
-	steps := 0
 
 	for ip < end {
-		steps++
-		if steps > maxInstructionsPerEval {
+		vm.budgetSteps++
+		if vm.budgetSteps > maxInstructionsPerEval {
 			vm.err = fmt.Errorf("instruction limit exceeded after %d steps", maxInstructionsPerEval)
 			return false
 		}

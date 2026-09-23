@@ -41,6 +41,9 @@ func (e *PreparedEvaluator) Eval(dc DataContext) ([]MatchedRule, error) {
 	if e == nil || e.rs == nil || e.vm == nil {
 		return nil, fmt.Errorf("nil prepared evaluator")
 	}
+	// PreparedEvaluator reuses its VM across repeated calls, so each call is
+	// its own logical request and needs its own instruction budget.
+	e.vm.resetBudget()
 	return evalRuleSelection(e.rs, dc, e.vm, e.rules, nil)
 }
 
