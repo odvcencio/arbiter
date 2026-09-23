@@ -18,6 +18,16 @@ func FuzzCompile(f *testing.F) {
 	f.Add([]byte(``))
 	f.Add([]byte(`rule { }`))
 	f.Add([]byte(`rule X { when { } then Y { } }`))
+	// Constant reference cycles used to overflow the stack (fatal, unrecoverable)
+	// in validateExpr's ExprConstRef case; see TestConstSelfCycleRejected et al.
+	f.Add([]byte(`const C = C
+rule R { when { user.score >= C } then Deny {} }`))
+	f.Add([]byte(`const A = B
+const B = A
+rule R { when { user.score >= A } then Deny {} }`))
+	f.Add([]byte(`const A = B + 1
+const B = A
+rule R { when { user.score >= A } then Deny {} }`))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// Must not panic on any input.

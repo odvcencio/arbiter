@@ -45,7 +45,19 @@ type lowerer struct {
 	constNames map[string]struct{}
 	curParams  map[string]struct{} // parameter names of the template body currently being lowered
 	errs       []error
+
+	exprDepth      int
+	exprDepthLimit bool // set once maxExprDepth is exceeded, so we report it only once
 }
+
+// maxExprDepth bounds recursive descent through nested expression syntax
+// (parens, boolean/arithmetic operators, etc.) during lowering. Without it, a
+// source file built from thousands of nested operators can recurse until the
+// goroutine stack overflows — a crash, not a diagnostic. The limit is well
+// above anything a hand-written or generated rule needs, and below the depth
+// at which the current gotreesitter grammar's GLR parsing already becomes
+// impractically slow on nested parens (a separate, tracked upstream issue).
+const maxExprDepth = 2000
 
 type scope struct {
 	parent *scope
@@ -1323,6 +1335,16 @@ func (l *lowerer) lowerExpr(n *gotreesitter.Node, scope *scope) ExprID {
 			Kind: ExprNullLit,
 			Span: Span{},
 		})
+	}
+
+	l.exprDepth++
+	defer func() { l.exprDepth-- }()
+	if l.exprDepth > maxExprDepth {
+		if !l.exprDepthLimit {
+			l.exprDepthLimit = true
+			l.errs = append(l.errs, fmt.Errorf("expression nesting exceeds maximum depth (%d)", maxExprDepth))
+		}
+		return l.addExpr(Expr{Kind: ExprNullLit, Span: spanForNode(n)})
 	}
 
 	switch n.Type(l.lang) {

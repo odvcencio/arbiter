@@ -37,9 +37,19 @@ func validateProgram(program *ir.Program) ([]Diagnostic, error) {
 	return validator.warnings, nil
 }
 
+// maxConstRefChain bounds how many const declarations one reference can chain
+// through. It catches pathological (but acyclic) chains without rejecting any
+// realistic program; it is not user-configurable.
+const maxConstRefChain = 256
+
 type programValidator struct {
 	program  *ir.Program
 	warnings []Diagnostic
+
+	// constRefStack tracks the names of const declarations currently being
+	// resolved, so a self- or mutually-referential const chain is reported as
+	// a diagnostic instead of recursing until the goroutine stack overflows.
+	constRefStack []string
 }
 
 func (v *programValidator) warn(span ir.Span, msg string) {
@@ -1025,7 +1035,19 @@ func (v *programValidator) validateExpr(exprID ir.ExprID, env *validationEnv) (e
 		if !ok {
 			return exprType{}, nil
 		}
-		return v.validateExpr(decl.Value, env)
+		for _, seen := range v.constRefStack {
+			if seen == expr.Name {
+				chain := append(append([]string{}, v.constRefStack...), expr.Name)
+				return exprType{}, spanError(expr.Span, "constant cycle: %s", strings.Join(chain, " -> "))
+			}
+		}
+		if len(v.constRefStack) >= maxConstRefChain {
+			return exprType{}, spanError(expr.Span, "constant reference chain exceeds maximum depth (%d) starting at %q", maxConstRefChain, v.constRefStack[0])
+		}
+		v.constRefStack = append(v.constRefStack, expr.Name)
+		result, err := v.validateExpr(decl.Value, env)
+		v.constRefStack = v.constRefStack[:len(v.constRefStack)-1]
+		return result, err
 	case ir.ExprLocalRef:
 		if binding, ok := env.lookup(expr.Name); ok {
 			return binding.typ, nil
