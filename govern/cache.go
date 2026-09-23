@@ -16,6 +16,7 @@ type RequestCache struct {
 	ctx         map[string]any
 	nestedCtx   map[string]any
 	segResults  map[string]bool
+	segErrs     map[string]error
 	ruleResults map[string]bool
 	flagResults map[string]flagResult
 	evalStack   map[string]bool
@@ -33,6 +34,7 @@ func NewRequestCache(segments *SegmentSet, ctx map[string]any) *RequestCache {
 		ctx:         ctx,
 		nestedCtx:   NestDottedKeys(ctx),
 		segResults:  make(map[string]bool),
+		segErrs:     make(map[string]error),
 		ruleResults: make(map[string]bool),
 		flagResults: make(map[string]flagResult),
 		evalStack:   make(map[string]bool),
@@ -76,6 +78,9 @@ func (rc *RequestCache) EvalSegment(name string) (bool, string, error) {
 		return false, fmt.Sprintf("%s -> false", name), nil
 	}
 	if result, ok := rc.segResults[name]; ok {
+		if err := rc.segErrs[name]; err != nil {
+			return false, fmt.Sprintf("segment %q error: %v (cached)", name, err), err
+		}
 		return result, fmt.Sprintf("%s -> %v (cached)", name, result), nil
 	}
 	seg, ok := rc.segments.Get(name)
@@ -86,6 +91,7 @@ func (rc *RequestCache) EvalSegment(name string) (bool, string, error) {
 	matched, err := seg.Eval(rc.nestedCtx)
 	if err != nil {
 		rc.segResults[name] = false
+		rc.segErrs[name] = err
 		return false, fmt.Sprintf("segment %q error: %v", name, err), err
 	}
 	rc.segResults[name] = matched
