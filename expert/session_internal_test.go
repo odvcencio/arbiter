@@ -583,6 +583,44 @@ expert rule RouteReview {
 	}
 }
 
+// TestEvalRuleSurfacesSegmentRuntimeError guards against a segment's runtime
+// error (a type mismatch in its condition) being silently treated as "did
+// not match". It must be reported the same way ruleConditionMatches already
+// reports a rule condition error: as a returned error.
+func TestEvalRuleSurfacesSegmentRuntimeError(t *testing.T) {
+	program := mustCompiledProgram(t, []byte(`
+segment bad_compare { applicant.score > 10.50 USD }
+
+expert rule RouteReview {
+	when segment bad_compare { true }
+	then emit ManualReview {
+		queue: "risk",
+	}
+}
+`))
+
+	session := NewSession(program, map[string]any{
+		"applicant": map[string]any{
+			"score": "not-a-number", // comparing a string to a decimal is a VM runtime error
+		},
+	}, nil, Options{})
+	session.refreshContextView(true, nil)
+
+	ok, _, match, _, err := session.evalRule(
+		program.rules[0],
+		program.ruleset.Rules[0],
+		session.evaluator,
+		session.dc,
+		govern.NewRequestCache(program.segments, session.evalCtx),
+	)
+	if err == nil {
+		t.Fatalf("evalRule: expected a segment runtime error, got nil (match=%+v)", match)
+	}
+	if ok {
+		t.Fatalf("evalRule: expected ok=false alongside the error, got match %+v", match)
+	}
+}
+
 func TestEvalRuleSkipsWhenRolloutSubjectMissing(t *testing.T) {
 	program := mustCompiledProgram(t, []byte(`
 expert rule RouteReview {

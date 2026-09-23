@@ -111,8 +111,11 @@ func (s *Strategies) EvaluateWithOverrides(name string, ctx map[string]any, bund
 		}
 
 		if candidate.Segment != "" {
-			ok, detail := rc.EvalSegment(candidate.Segment)
+			ok, detail, segErr := rc.EvalSegment(candidate.Segment)
 			trace.AppendScoped(govern.ArbitracePhaseMatch, govern.ArbitraceScopeStrategyCandidate, subject, govern.ArbitraceKindSegment, candidate.Segment, checkPrefix+"segment", ok, detail)
+			if segErr != nil {
+				return Result{}, fmt.Errorf("strategy %s candidate %s segment %s: %w", def.Name, candidate.Label, candidate.Segment, segErr)
+			}
 			if !ok {
 				continue
 			}

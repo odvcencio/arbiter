@@ -67,22 +67,29 @@ func (rc *RequestCache) EvalTime() time.Time {
 	return rc.evalTime
 }
 
-// EvalSegment evaluates a segment with memoization.
-func (rc *RequestCache) EvalSegment(name string) (bool, string) {
+// EvalSegment evaluates a segment with memoization. A non-nil error means the
+// segment's condition failed at runtime (not that it evaluated to false);
+// callers must surface it the same way they surface a rule condition error,
+// consistent with the rest of governed evaluation.
+func (rc *RequestCache) EvalSegment(name string) (bool, string, error) {
 	if rc == nil {
-		return false, fmt.Sprintf("%s -> false", name)
+		return false, fmt.Sprintf("%s -> false", name), nil
 	}
 	if result, ok := rc.segResults[name]; ok {
-		return result, fmt.Sprintf("%s -> %v (cached)", name, result)
+		return result, fmt.Sprintf("%s -> %v (cached)", name, result), nil
 	}
 	seg, ok := rc.segments.Get(name)
 	if !ok {
 		rc.segResults[name] = false
-		return false, fmt.Sprintf("segment %q not found", name)
+		return false, fmt.Sprintf("segment %q not found", name), nil
 	}
-	matched := seg.Eval(rc.nestedCtx)
+	matched, err := seg.Eval(rc.nestedCtx)
+	if err != nil {
+		rc.segResults[name] = false
+		return false, fmt.Sprintf("segment %q error: %v", name, err), err
+	}
 	rc.segResults[name] = matched
-	return matched, fmt.Sprintf("%s -> %v", seg.Source, matched)
+	return matched, fmt.Sprintf("%s -> %v", seg.Source, matched), nil
 }
 
 // RecordRuleResult records whether a rule matched.

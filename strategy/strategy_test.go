@@ -465,6 +465,39 @@ strategy CheckoutRouting returns CheckoutPath {
 	}
 }
 
+// TestEvalStrategySurfacesSegmentRuntimeError guards against a candidate
+// segment's runtime error (a type mismatch in its condition) being silently
+// treated as "candidate did not match". It must be reported the same way a
+// candidate condition error already is: as a returned error.
+func TestEvalStrategySurfacesSegmentRuntimeError(t *testing.T) {
+	full := compileStrategyBundle(t, `
+segment bad_compare { user.balance > 10.50 USD }
+
+outcome CheckoutPath {
+	target: string
+}
+
+strategy CheckoutRouting returns CheckoutPath {
+	when segment bad_compare {
+		true
+	} then Domestic {
+		target: "domestic",
+	}
+
+	else Global {
+		target: "global",
+	}
+}
+`)
+
+	_, err := arbiter.EvalStrategy(full, "CheckoutRouting", map[string]any{
+		"user": map[string]any{"balance": "enterprise"},
+	})
+	if err == nil {
+		t.Fatal("EvalStrategy: expected a segment runtime error, got nil")
+	}
+}
+
 func compileStrategyBundle(t *testing.T, source string) *arbiter.CompileResult {
 	t.Helper()
 	full, err := arbiter.CompileFull([]byte(source))
