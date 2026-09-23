@@ -40,6 +40,41 @@ jobs:
       - name: Check grammar
         run: go run ./cmd/arbiter check testdata/fraud.arb
 
+  # Runs each fuzz target for a bounded time. A failure means the fuzzer
+  # found a genuine input that panics or misbehaves — that is a real bug in
+  # this repo (not an external-dependency drift, unlike gotreesitter-latest
+  # below), so this job gates merges like the main test job.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Fuzz Compile
+        run: go test . -run '^$' -fuzz '^FuzzCompile$' -fuzztime=60s -timeout=120s
+
+      - name: Fuzz Parse
+        run: go test . -run '^$' -fuzz '^FuzzParse$' -fuzztime=60s -timeout=120s
+
+      - name: Fuzz Eval
+        run: go test . -run '^$' -fuzz '^FuzzEval$' -fuzztime=60s -timeout=120s
+
+      - name: Fuzz bundle Unmarshal
+        run: go test ./bundle -run '^$' -fuzz '^FuzzBundleUnmarshal$' -fuzztime=60s -timeout=120s
+
+      - name: Upload fuzz failure corpus
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: |
+            testdata/fuzz/
+            bundle/testdata/fuzz/
+          if-no-files-found: ignore
+
   # Advisory: probes the latest gotreesitter release against this repo's own
   # grammar. It regenerates grammar.bin with the latest toolchain (parse
   # tables are tied to the exact gotreesitter version that built them — see
