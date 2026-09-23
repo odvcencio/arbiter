@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## [1.11.0] — 2026-09-23
+
+### Breaking
+
+- **Segment evaluation reports runtime errors.** `govern.CompiledSegment.Eval` now returns `(bool, error)`, and `govern.RequestCache.EvalSegment` now returns `(bool, string, error)`. A segment condition that fails at runtime is no longer treated as "did not match". Governed evaluation, strategies, and expert sessions return the error. Flag evaluation stays fail-closed and records the error in the arbitrace. A cached segment result also returns its error. Callers that use `arbiter.Program` are not affected.
+
+### Added
+
+- **Compile-time limits.** `MaxSourceBytes` (default 8 MiB) and `MaxSourceNestingDepth` (default 512) reject oversized or deeply nested source before parsing. The compiler checks static value-stack depth, so an expression that would overflow the 256-slot VM stack fails at `Compile`, not at `Eval`.
+- **Per-request instruction budget.** The 1M-instruction budget now covers one whole evaluation request, not each condition. `PreparedEvaluator` resets the budget for each call.
+- **Fuzzing in CI.** `FuzzCompile`, `FuzzParse`, `FuzzEval`, and a new `FuzzBundleUnmarshal` run for 60 seconds each in a blocking CI job.
+- **Grammar drift detection.** Golden parse snapshots for 21 representative sources fail when gotreesitter changes parse results. An advisory CI job builds against the latest gotreesitter.
+
+### Fixed
+
+- **Constant cycles.** `const C = C` and mutual or indirect constant cycles now produce a `constant cycle` diagnostic instead of an unrecoverable stack overflow. Constant chains and IR expression nesting are depth-limited.
+- **`EvalDebug` fallback.** `EvalDebug` now builds the `otherwise` action on a non-match, the same as `Eval`.
+- **Decompiled empty actions.** `decompile.ArishemToArb` emits a `then Noop {}` placeholder for an empty action, so the output is valid `.arb`.
+- **Documentation.** The README status and version lines are current, a broken link is removed, and the missing 1.9.0 changelog entry is added.
+
 ## [1.10.0] — 2026-09-21
 
 ### Added
