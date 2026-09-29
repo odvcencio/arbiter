@@ -112,4 +112,4 @@ const plugin = new CapabilityServer({ name: "ops-plugin", version: "1.0.0" })
 plugin.listen("127.0.0.1:7090", grpc.ServerCredentials.createInsecure());
 ```
 
-See [src/index.js](/home/draco/work/arbiter/sdks/node/src/index.js) and [examples/smoke.js](/home/draco/work/arbiter/sdks/node/examples/smoke.js).
+See [src/index.js](src/index.js) and [examples/smoke.js](examples/smoke.js).

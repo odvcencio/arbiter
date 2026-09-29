@@ -78,4 +78,4 @@ Server::builder()
 # }
 ```
 
-See [src/lib.rs](/home/draco/work/arbiter/sdks/rust/src/lib.rs) and [examples/smoke.rs](/home/draco/work/arbiter/sdks/rust/examples/smoke.rs).
+See [src/lib.rs](src/lib.rs) and [examples/smoke.rs](examples/smoke.rs).
