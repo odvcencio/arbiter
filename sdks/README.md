@@ -1,8 +1,8 @@
 # SDKs
 
 Thin Arbiter clients live here, generated or packaged off the gRPC APIs in
-[service.proto](/home/draco/work/arbiter/proto/arbiter/v1/service.proto) and
-[capability.proto](/home/draco/work/arbiter/proto/arbiter/v1/capability.proto).
+[service.proto](../proto/arbiter/v1/service.proto) and
+[capability.proto](../proto/arbiter/v1/capability.proto).
 
 Current SDKs:
 

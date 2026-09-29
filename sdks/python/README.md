@@ -89,4 +89,4 @@ server = plugin.serve("127.0.0.1:7090")
 server.wait_for_termination()
 ```
 
-See [examples/smoke.py](/home/draco/work/arbiter/sdks/python/examples/smoke.py) for a runnable end-to-end example.
+See [examples/smoke.py](examples/smoke.py) for a runnable end-to-end example.

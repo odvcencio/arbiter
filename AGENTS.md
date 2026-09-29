@@ -32,7 +32,7 @@ go run ./cmd/arbiter check testdata/fraud.arb   # validate a rule file
 ## Deploy
 
 - Dockerfile: `deploy/Dockerfile` — multi-stage Alpine build, entry point `arbiter serve --grpc :8081`
-- K8s manifests: `deploy/k8s.yaml` — Harbor registry at `harbor.draco.quest/orchard/arbiter:latest`
+- K8s manifests: `deploy/k8s.yaml` — the image ships as `replace-with-your-registry/arbiter:latest`; set it to your own registry before applying
 - Use `kubectl`, not docker compose or Helm.
 
 ## Key Directories
