@@ -1,4 +1,4 @@
-package expert
+package engine
 
 import (
 	"context"
@@ -766,4 +766,18 @@ func mustCompiledProgram(t *testing.T, source []byte) *Program {
 		t.Fatalf("expected compiled expert program, got %+v", program)
 	}
 	return program
+}
+
+// Compile parses source with the full compiler. The engine package itself
+// never imports the parser; only its tests do.
+func Compile(source []byte) (*Program, error) {
+	parsed, err := arbiter.ParseSource(source)
+	if err != nil {
+		return nil, err
+	}
+	base, err := arbiter.CompileFullParsed(parsed)
+	if err != nil {
+		return nil, err
+	}
+	return NewProgram(base.Program, base.Segments)
 }

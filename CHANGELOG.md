@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- **Parser-free expert runtime.** Package `expert/engine` holds the expert `Program` and `Session`. It does not import the `.arb` parser or the tree-sitter grammars. `Program.MarshalBinary` encodes a compiled program and `engine.UnmarshalProgram` loads it, so a program can ship precompiled rules. Package `expert` keeps its API through type aliases. Package `bundle/wire` holds the bundle codec for the same reason, and `bundle` re-exports it.
+
 ## [1.11.0] — 2026-09-23
 
 ### Breaking

@@ -1,7 +1,7 @@
-// Package bundle provides binary serialization and obfuscation for compiled
-// Arbiter rulesets. Use this to ship pre-compiled bundles to browsers and edge
-// runtimes without exposing .arb source, governance parameters, or rule internals.
-package bundle
+// Package wire is the binary codec for compiled Arbiter rulesets. It does not
+// import the .arb parser or grammar packages, so a program that only loads
+// precompiled bundles stays small. Package bundle re-exports it.
+package wire
 
 import (
 	"bytes"
