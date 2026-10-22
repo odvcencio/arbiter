@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [1.12.0] — 2026-10-22
+
 ### Added
 
 - **Integer numeric profile.** `compiler.CheckIntegerProfile`, `arbiter check --numeric-profile integer` and `expert.Program.NumericProfileViolations` reject non-integer or oversized number literals, decimals, and any `/` or `avg` result that does not go straight through `floor`, `ceil` or `round`. `vm.NumericInteger` (via `SetNumericProfile` on `Evaluator` and `PreparedEvaluator`, or `expert.Options.NumericProfile`) makes every arithmetic operand and result an exact integer with magnitude at most 2^53, and makes division or modulo by zero an error. See SPEC.md section 3.7.
