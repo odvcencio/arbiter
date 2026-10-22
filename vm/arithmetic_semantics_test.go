@@ -16,8 +16,11 @@ func TestArithmeticPrecedenceAndRemainder(t *testing.T) {
 		want float64
 	}{
 		{"multiply before add", "1 + 2 * 3", nil, 7},
+		{"adjacent precedence", "1+2*3", nil, 7},
+		{"adjacent left associative division", "24/3*2", nil, 16},
 		{"divide before subtract", "8 - 6 / 2", nil, 5},
 		{"both products", "2 * 3 + 4 * 5", nil, 26},
+		{"runtime product chains", "a * b * c - b * c", map[string]any{"a": 2.0, "b": 3.0, "c": 4.0}, 12},
 		{"parentheses", "(1 + 2) * 3", nil, 9},
 		{"left associative division", "24 / 3 * 2", nil, 16},
 		{"left associative subtraction", "10 - 3 - 2", nil, 5},

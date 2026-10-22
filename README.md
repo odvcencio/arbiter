@@ -839,6 +839,8 @@ matched, _ := arbiter.Eval(prog, dc)
 Multiplication, division and remainder (`* / %`) bind tighter than addition and
 subtraction (`+ -`). Operators within either tier associate left to right.
 Parentheses override that order: `1 + 2 * 3` is `7`, while `(1 + 2) * 3` is `9`.
+Keep spaces around subtraction between numeric literals (`10 - 3 - 2`); the
+existing signed-number lexer can consume `10-3-2` incorrectly.
 
 `%` always means remainder, regardless of whitespace. Both `7%3` and `7 % 3`
 produce `1`. The default numeric profile retains fractional remainders and the
@@ -853,7 +855,8 @@ These are breaking source-language changes after v1.12.0. To preserve a former
 left-to-right expression, add explicit parentheses before recompiling. Replace
 percentage suffixes with `pct`, audit mixed arithmetic and rebuild affected
 policies. Existing bytecode retains its compiled meaning; this change does not
-change the bundle or precompiled-program wire format.
+change the bundle or precompiled-program wire format. Parser integrations must
+recognize `product_expr` for `* / %`; `math_expr` now represents the `+ -` tier.
 
 ### Typed Data Declarations
 

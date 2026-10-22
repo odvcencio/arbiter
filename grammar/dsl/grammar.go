@@ -773,12 +773,10 @@ func ArbiterGrammar() *Grammar {
 		Sym("_value_expr"),
 	))
 
-	// _value_expr: math and primaries only
-	g.Define("_value_expr", Choice(
-		Sym("math_expr"),
-		Sym("aggregate_expr"),
-		Sym("_primary"),
-	))
+	// _value_expr: arithmetic tiers, aggregates and primaries only
+	g.Define("_value_expr", Choice(Sym("math_expr"), Sym("_product_value")))
+	g.Define("_product_value", Choice(Sym("product_expr"), Sym("_arithmetic_primary")))
+	g.Define("_arithmetic_primary", Choice(Sym("aggregate_expr"), Sym("_primary")))
 
 	// Logical — operate on _expr (full expressions)
 	g.Define("or_expr", PrecLeft(1, Seq(
@@ -872,21 +870,19 @@ func ArbiterGrammar() *Grammar {
 		Field("left", Sym("_value_expr")), Str("is"), Str("not"), Str("null"),
 	)))
 
-	// Math binds tighter than comparisons. Multiplication, division and
-	// remainder bind tighter than addition and subtraction. Each tier is
-	// left-associative; preserve math_expr for the lowering and editor APIs.
-	g.Define("math_expr", Choice(
-		PrecLeft(5, Seq(
-			Field("left", Sym("_value_expr")),
-			Field("op", Choice(Str("+"), Str("-"))),
-			Field("right", Sym("_value_expr")),
-		)),
-		PrecLeft(6, Seq(
-			Field("left", Sym("_value_expr")),
-			Field("op", Choice(Str("*"), Str("/"), Str("%"))),
-			Field("right", Sym("_value_expr")),
-		)),
-	))
+	// Math binds tighter than comparisons. Restrict each right operand to
+	// the next tier so precedence and left associativity do not depend on
+	// the parser generator resolving ambiguous recursive productions.
+	g.Define("math_expr", PrecLeft(5, Seq(
+		Field("left", Sym("_value_expr")),
+		Field("op", Choice(Str("+"), Str("-"))),
+		Field("right", Sym("_product_value")),
+	)))
+	g.Define("product_expr", PrecLeft(6, Seq(
+		Field("left", Sym("_product_value")),
+		Field("op", Choice(Str("*"), Str("/"), Str("%"))),
+		Field("right", Sym("_arithmetic_primary")),
+	)))
 
 	// Quantifiers: any/all/none x in collection { body }
 	g.Define("quantifier_expr", Seq(

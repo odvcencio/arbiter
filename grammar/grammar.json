@@ -3420,6 +3420,28 @@
           "type": "SYMBOL"
         },
         {
+          "name": "_product_value",
+          "type": "SYMBOL"
+        }
+      ],
+      "type": "CHOICE"
+    },
+    "_product_value": {
+      "members": [
+        {
+          "name": "product_expr",
+          "type": "SYMBOL"
+        },
+        {
+          "name": "_arithmetic_primary",
+          "type": "SYMBOL"
+        }
+      ],
+      "type": "CHOICE"
+    },
+    "_arithmetic_primary": {
+      "members": [
+        {
           "name": "aggregate_expr",
           "type": "SYMBOL"
         },
@@ -4105,97 +4127,92 @@
       "value": 4
     },
     "math_expr": {
-      "members": [
-        {
-          "content": {
-            "members": [
-              {
-                "content": {
-                  "name": "_value_expr",
-                  "type": "SYMBOL"
-                },
-                "name": "left",
-                "type": "FIELD"
-              },
-              {
-                "content": {
-                  "members": [
-                    {
-                      "type": "STRING",
-                      "value": "+"
-                    },
-                    {
-                      "type": "STRING",
-                      "value": "-"
-                    }
-                  ],
-                  "type": "CHOICE"
-                },
-                "name": "op",
-                "type": "FIELD"
-              },
-              {
-                "content": {
-                  "name": "_value_expr",
-                  "type": "SYMBOL"
-                },
-                "name": "right",
-                "type": "FIELD"
-              }
-            ],
-            "type": "SEQ"
+      "content": {
+        "members": [
+          {
+            "content": {
+              "name": "_value_expr",
+              "type": "SYMBOL"
+            },
+            "name": "left",
+            "type": "FIELD"
           },
-          "type": "PREC_LEFT",
-          "value": 5
-        },
-        {
-          "content": {
-            "members": [
-              {
-                "content": {
-                  "name": "_value_expr",
-                  "type": "SYMBOL"
+          {
+            "content": {
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "+"
                 },
-                "name": "left",
-                "type": "FIELD"
-              },
-              {
-                "content": {
-                  "members": [
-                    {
-                      "type": "STRING",
-                      "value": "*"
-                    },
-                    {
-                      "type": "STRING",
-                      "value": "/"
-                    },
-                    {
-                      "type": "STRING",
-                      "value": "%"
-                    }
-                  ],
-                  "type": "CHOICE"
-                },
-                "name": "op",
-                "type": "FIELD"
-              },
-              {
-                "content": {
-                  "name": "_value_expr",
-                  "type": "SYMBOL"
-                },
-                "name": "right",
-                "type": "FIELD"
-              }
-            ],
-            "type": "SEQ"
+                {
+                  "type": "STRING",
+                  "value": "-"
+                }
+              ],
+              "type": "CHOICE"
+            },
+            "name": "op",
+            "type": "FIELD"
           },
-          "type": "PREC_LEFT",
-          "value": 6
-        }
-      ],
-      "type": "CHOICE"
+          {
+            "content": {
+              "name": "_product_value",
+              "type": "SYMBOL"
+            },
+            "name": "right",
+            "type": "FIELD"
+          }
+        ],
+        "type": "SEQ"
+      },
+      "type": "PREC_LEFT",
+      "value": 5
+    },
+    "product_expr": {
+      "content": {
+        "members": [
+          {
+            "content": {
+              "name": "_product_value",
+              "type": "SYMBOL"
+            },
+            "name": "left",
+            "type": "FIELD"
+          },
+          {
+            "content": {
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "*"
+                },
+                {
+                  "type": "STRING",
+                  "value": "/"
+                },
+                {
+                  "type": "STRING",
+                  "value": "%"
+                }
+              ],
+              "type": "CHOICE"
+            },
+            "name": "op",
+            "type": "FIELD"
+          },
+          {
+            "content": {
+              "name": "_arithmetic_primary",
+              "type": "SYMBOL"
+            },
+            "name": "right",
+            "type": "FIELD"
+          }
+        ],
+        "type": "SEQ"
+      },
+      "type": "PREC_LEFT",
+      "value": 6
     },
     "quantifier_expr": {
       "members": [

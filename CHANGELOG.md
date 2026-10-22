@@ -4,7 +4,7 @@
 
 ### Breaking
 
-- **Arithmetic precedence.** `*`, `/` and `%` now bind tighter than `+` and `-`. Each tier remains left-associative. `1 + 2 * 3` now evaluates to 7 instead of 9. Add parentheses to preserve former left-to-right policies before recompiling.
+- **Arithmetic precedence.** `*`, `/` and `%` now bind tighter than `+` and `-`. Each tier remains left-associative. `1 + 2 * 3` now evaluates to 7 instead of 9. Add parentheses to preserve former left-to-right policies before recompiling. Parser integrations must handle the new `product_expr` CST node for `* / %`.
 - **Unambiguous remainder.** `%` is reserved for remainder with or without spaces. `7 % 3` now evaluates to 1 instead of being consumed as a percentage quantity. Write percentage quantities as `50 pct`, replacing `50 %`. Incomplete percent expressions are rejected; strings and comments are unchanged. Rebuild and audit affected policies. Existing bytecode and wire-format versions are unchanged. These source-language changes are separate from v1.12.0.
 
 ## [1.12.0] — 2026-10-22

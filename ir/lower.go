@@ -62,7 +62,7 @@ func checkRemainderTokens(root *gotreesitter.Node, source []byte, lang *gotreesi
 			// Recovery can also retain a stray anonymous token outside the
 			// expression. A valid remainder token belongs to a complete binary.
 			if n.EndByte() == n.StartByte()+1 && source[n.StartByte()] == '%' {
-				if parent == nil || parent.Type(lang) != "math_expr" {
+				if parent == nil || parent.Type(lang) != "product_expr" {
 					return fmt.Errorf("invalid or incomplete %% expression; use pct for percentage quantities")
 				}
 				op := parent.ChildByFieldName("op", lang)
@@ -1438,7 +1438,7 @@ func (l *lowerer) lowerExpr(n *gotreesitter.Node, scope *scope) ExprID {
 		return l.lowerBinary(n, scope, BinaryEndsWith)
 	case "matches_expr":
 		return l.lowerBinary(n, scope, BinaryMatches)
-	case "math_expr":
+	case "math_expr", "product_expr":
 		return l.lowerBinary(n, scope, mathOp(n, l.source, l.lang))
 	case "between_expr":
 		return l.addExpr(Expr{
