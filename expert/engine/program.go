@@ -24,31 +24,31 @@ const modifySetPrefix = "__expert_set__"
 
 // Rule describes one compiled expert rule.
 type Rule struct {
-	Name            string
-	Tags            []string
-	Priority        int
-	Kind            ActionKind
-	Target          string
-	Segment         string
-	Condition       string
-	KillSwitch      ir.KillSwitchState
-	Prereqs         []string
-	Excludes        []string
-	FactDeps        []string
-	NoLoop          bool
-	Stable          bool
-	PerFact         bool
-	Group           string
-	ForDuration     time.Duration
-	HasFor          bool
-	WithinDuration  time.Duration
-	HasWithin       bool
-	StableCycles    int
-	HasStableCycles bool
-	Cooldown        time.Duration
-	HasCooldown     bool
-	Debounce        time.Duration
-	HasDebounce     bool
+	Name            string             `json:"name"`
+	Tags            []string           `json:"tags"`
+	Priority        int                `json:"priority"`
+	Kind            ActionKind         `json:"kind"`
+	Target          string             `json:"target"`
+	Segment         string             `json:"segment"`
+	Condition       string             `json:"condition"`
+	KillSwitch      ir.KillSwitchState `json:"kill_switch"`
+	Prereqs         []string           `json:"prereqs"`
+	Excludes        []string           `json:"excludes"`
+	FactDeps        []string           `json:"fact_deps"`
+	NoLoop          bool               `json:"no_loop"`
+	Stable          bool               `json:"stable"`
+	PerFact         bool               `json:"per_fact"`
+	Group           string             `json:"group"`
+	ForDuration     time.Duration      `json:"for_duration"`
+	HasFor          bool               `json:"has_for"`
+	WithinDuration  time.Duration      `json:"within_duration"`
+	HasWithin       bool               `json:"has_within"`
+	StableCycles    int                `json:"stable_cycles"`
+	HasStableCycles bool               `json:"has_stable_cycles"`
+	Cooldown        time.Duration      `json:"cooldown"`
+	HasCooldown     bool               `json:"has_cooldown"`
+	Debounce        time.Duration      `json:"debounce"`
+	HasDebounce     bool               `json:"has_debounce"`
 }
 
 func (r Rule) hasTemporal() bool {

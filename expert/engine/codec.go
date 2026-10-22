@@ -27,7 +27,7 @@ import (
 
 var programMagic = [4]byte{'A', 'R', 'X', 'P'}
 
-const programFormatVersion = 1
+const programFormatVersion = 2
 
 type programMeta struct {
 	Rules          []Rule             `json:"rules"`

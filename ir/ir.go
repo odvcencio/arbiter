@@ -52,12 +52,12 @@ type TagDeclaration struct {
 
 // Span stores byte and point ranges for a declaration or expression.
 type Span struct {
-	StartByte uint32
-	EndByte   uint32
-	StartRow  uint32
-	StartCol  uint32
-	EndRow    uint32
-	EndCol    uint32
+	StartByte uint32 `json:"start_byte"`
+	EndByte   uint32 `json:"end_byte"`
+	StartRow  uint32 `json:"start_row"`
+	StartCol  uint32 `json:"start_col"`
+	EndRow    uint32 `json:"end_row"`
+	EndCol    uint32 `json:"end_col"`
 }
 
 // Const is one top-level const declaration.
@@ -94,37 +94,37 @@ type FeatureField struct {
 
 // FactSchema is one top-level fact schema declaration.
 type FactSchema struct {
-	Name   string
-	Fields []SchemaField
-	Span   Span
+	Name   string        `json:"name"`
+	Fields []SchemaField `json:"fields"`
+	Span   Span          `json:"span"`
 }
 
 // OutcomeSchema is one top-level outcome schema declaration.
 type OutcomeSchema struct {
-	Name   string
-	Fields []SchemaField
-	Span   Span
+	Name   string        `json:"name"`
+	Fields []SchemaField `json:"fields"`
+	Span   Span          `json:"span"`
 }
 
 // SchemaField is one fact/outcome schema field declaration.
 type SchemaField struct {
-	Name     string
-	Type     FieldType
-	Required bool
-	Children []SchemaField // for nested objects in input schemas
-	Span     Span
+	Name     string        `json:"name"`
+	Type     FieldType     `json:"type"`
+	Required bool          `json:"required"`
+	Children []SchemaField `json:"children"` // for nested objects in input schemas
+	Span     Span          `json:"span"`
 }
 
 // FieldType is one schema field type.
 type FieldType struct {
-	Base      string     // "string", "number", "decimal", "boolean", "timestamp", "list", "object"
-	Dimension string     // for number<D>, decimal<D>
-	Element   *FieldType // for list<T> — element type; nil for non-list types
+	Base      string     `json:"base"`      // "string", "number", "decimal", "boolean", "timestamp", "list", "object"
+	Dimension string     `json:"dimension"` // for number<D>, decimal<D>
+	Element   *FieldType `json:"element"`   // for list<T> — element type; nil for non-list types
 	// Open marks an object whose keys are not statically known (e.g. a protobuf
 	// map or an unresolved/imported message type). Access to any sub-path under
 	// an open object resolves to an unknown (permissive) type rather than a
 	// "field not declared" error, even under a closed input schema.
-	Open bool
+	Open bool `json:"open"`
 }
 
 // InputRef is an external input-schema reference declared in source as
