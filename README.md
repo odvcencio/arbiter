@@ -839,8 +839,10 @@ matched, _ := arbiter.Eval(prog, dc)
 Multiplication, division and remainder (`* / %`) bind tighter than addition and
 subtraction (`+ -`). Operators within either tier associate left to right.
 Parentheses override that order: `1 + 2 * 3` is `7`, while `(1 + 2) * 3` is `9`.
-Keep spaces around subtraction between numeric literals (`10 - 3 - 2`); the
-existing signed-number lexer can consume `10-3-2` incorrectly.
+Subtraction works with or without spaces: `10-3-2` and `10 - 3 - 2` both give
+`5`; `10--3` gives `13`. A signed literal keeps its sign adjacent (`-3`).
+To negate an expression, write `(0 - value)`; unary `-value` is not supported.
+Incomplete arithmetic and out-of-range numeric literals are rejected.
 
 `%` always means remainder, regardless of whitespace. Both `7%3` and `7 % 3`
 produce `1`. The default numeric profile retains fractional remainders and the

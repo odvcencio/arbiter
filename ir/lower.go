@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
@@ -21,7 +22,7 @@ func Lower(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) 
 	if root.HasError() {
 		return nil, fmt.Errorf("parse errors in arbiter source")
 	}
-	if err := checkRemainderTokens(root, source, lang); err != nil {
+	if err := checkArithmeticTokens(root, source, lang); err != nil {
 		return nil, err
 	}
 
@@ -42,34 +43,62 @@ func Lower(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) 
 }
 
 // The parser can discard an incomplete operator without setting HasError.
-// Reject an unrepresented % rather than silently compiling "50 %" as 50.
+// Reject an unrepresented arithmetic operator instead of compiling a partial expression.
 // Recovery can truncate the root span, so check the entire source buffer.
 // Parsed strings and comments are leaf spans, so their contents are excluded.
-func checkRemainderTokens(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) error {
+func checkArithmeticTokens(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) error {
 	cursor := uint32(0)
 	checkGap := func(end uint32) error {
-		if end > cursor && bytes.IndexByte(source[cursor:end], '%') >= 0 {
-			return fmt.Errorf("invalid or incomplete %% expression; use pct for percentage quantities")
+		if end > cursor && bytes.IndexAny(source[cursor:end], "+-*/%") >= 0 {
+			return fmt.Errorf("invalid or incomplete arithmetic expression; use pct for percentage quantities")
 		}
 		return nil
 	}
 	var walk func(*gotreesitter.Node, *gotreesitter.Node) error
 	walk = func(n, parent *gotreesitter.Node) error {
-		if n.ChildCount() == 0 {
+		kind := n.Type(lang)
+		numericLiteral := kind == "number_literal" || kind == "decimal_literal" || kind == "quantity_literal"
+		if numericLiteral {
+			// Signed literals contain a visible sign and a hidden immediate
+			// token. Recovery can retain only the sign, without HasError.
+			// Check the whole literal before treating its span as opaque.
+			text := string(source[n.StartByte():n.EndByte()])
+			if kind != "number_literal" {
+				parts := strings.Fields(text)
+				if len(parts) != 2 {
+					return fmt.Errorf("invalid %s", kind)
+				}
+				text = parts[0]
+			}
+			if _, err := strconv.ParseFloat(text, 64); err != nil {
+				return fmt.Errorf("invalid %s: %w", kind, err)
+			}
+		}
+		if n.ChildCount() == 0 || numericLiteral {
 			if err := checkGap(n.StartByte()); err != nil {
 				return err
 			}
-			// Recovery can also retain a stray anonymous token outside the
-			// expression. A valid remainder token belongs to a complete binary.
-			if n.EndByte() == n.StartByte()+1 && source[n.StartByte()] == '%' {
-				if parent == nil || parent.Type(lang) != "product_expr" {
-					return fmt.Errorf("invalid or incomplete %% expression; use pct for percentage quantities")
+			// Recovery may retain an anonymous operator outside an expression.
+			// A minus may also introduce a signed literal, and arbiter targets
+			// have a wildcard token. Named leaves (strings, paths, comments,
+			// timestamps and exponents) retain their contents as literal text.
+			if !n.IsNamed() && n.EndByte() == n.StartByte()+1 && bytes.IndexByte([]byte("+-*/%"), source[n.StartByte()]) >= 0 {
+				if parent == nil {
+					return fmt.Errorf("arithmetic operator outside an expression")
 				}
-				op := parent.ChildByFieldName("op", lang)
-				left := parent.ChildByFieldName("left", lang)
-				right := parent.ChildByFieldName("right", lang)
-				if op == nil || op.StartByte() != n.StartByte() || left == nil || right == nil || left.EndByte() == left.StartByte() || right.EndByte() == right.StartByte() {
-					return fmt.Errorf("invalid or incomplete %% expression; use pct for percentage quantities")
+				opChar := source[n.StartByte()]
+				kind := parent.Type(lang)
+				wildcard := opChar == '*' && kind == "arbiter_wildcard"
+				if !wildcard {
+					if kind != "math_expr" && kind != "product_expr" {
+						return fmt.Errorf("invalid or incomplete arithmetic expression; use (0 - value) to negate an expression")
+					}
+					op := parent.ChildByFieldName("op", lang)
+					left := parent.ChildByFieldName("left", lang)
+					right := parent.ChildByFieldName("right", lang)
+					if op == nil || op.StartByte() != n.StartByte() || left == nil || right == nil || left.EndByte() == left.StartByte() || right.EndByte() == right.StartByte() {
+						return fmt.Errorf("invalid or incomplete arithmetic expression")
+					}
 				}
 			}
 			if end := n.EndByte(); end > cursor {
