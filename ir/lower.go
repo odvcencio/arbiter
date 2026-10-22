@@ -1,12 +1,13 @@
 package ir
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
 
-	"m31labs.dev/arbiter/internal/parseutil"
 	gotreesitter "github.com/odvcencio/gotreesitter"
+	"m31labs.dev/arbiter/internal/parseutil"
 )
 
 // Lower converts a parsed Arbiter CST into the shared in-process IR.
@@ -19,6 +20,9 @@ func Lower(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) 
 	}
 	if root.HasError() {
 		return nil, fmt.Errorf("parse errors in arbiter source")
+	}
+	if err := checkRemainderTokens(root, source, lang); err != nil {
+		return nil, err
 	}
 
 	l := lowerer{
@@ -35,6 +39,55 @@ func Lower(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) 
 	}
 	l.program.rebuildIndexes()
 	return l.program, nil
+}
+
+// The parser can discard an incomplete operator without setting HasError.
+// Reject an unrepresented % rather than silently compiling "50 %" as 50.
+// Recovery can truncate the root span, so check the entire source buffer.
+// Parsed strings and comments are leaf spans, so their contents are excluded.
+func checkRemainderTokens(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) error {
+	cursor := uint32(0)
+	checkGap := func(end uint32) error {
+		if end > cursor && bytes.IndexByte(source[cursor:end], '%') >= 0 {
+			return fmt.Errorf("invalid or incomplete %% expression; use pct for percentage quantities")
+		}
+		return nil
+	}
+	var walk func(*gotreesitter.Node, *gotreesitter.Node) error
+	walk = func(n, parent *gotreesitter.Node) error {
+		if n.ChildCount() == 0 {
+			if err := checkGap(n.StartByte()); err != nil {
+				return err
+			}
+			// Recovery can also retain a stray anonymous token outside the
+			// expression. A valid remainder token belongs to a complete binary.
+			if n.EndByte() == n.StartByte()+1 && source[n.StartByte()] == '%' {
+				if parent == nil || parent.Type(lang) != "math_expr" {
+					return fmt.Errorf("invalid or incomplete %% expression; use pct for percentage quantities")
+				}
+				op := parent.ChildByFieldName("op", lang)
+				left := parent.ChildByFieldName("left", lang)
+				right := parent.ChildByFieldName("right", lang)
+				if op == nil || op.StartByte() != n.StartByte() || left == nil || right == nil || left.EndByte() == left.StartByte() || right.EndByte() == right.StartByte() {
+					return fmt.Errorf("invalid or incomplete %% expression; use pct for percentage quantities")
+				}
+			}
+			if end := n.EndByte(); end > cursor {
+				cursor = end
+			}
+			return nil
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			if err := walk(n.Child(i), n); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(root, nil); err != nil {
+		return err
+	}
+	return checkGap(uint32(len(source)))
 }
 
 type lowerer struct {

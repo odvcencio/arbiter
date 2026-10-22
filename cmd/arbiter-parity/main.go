@@ -121,11 +121,14 @@ rule QMisc { when { true } then Out { a: 14.7 psi, b: 1.5 atm, c: 7.1 gal, d: 3.
 `
 	moduloSource = `
 rule ConstMod { when { true } then Out {
-	big: (10000000000000000000) % (7),
-	half: (7) % (0.5),
-	frac: (7.5) % (2),
-	neg: (-7.5) % (2),
-	huge: (1e300) % (3),
+	big: 10000000000000000000 % 7,
+	half: 7 % 0.5,
+	frac: 7.5 % 2,
+	neg: -7.5 % 2,
+	huge: 1e300 % 3,
+	adjacent: 7%3,
+	precedence: 1 + 2 * 3,
+	mixed: 10 + 7 % 4,
 } }
 `
 	tableSource = `
