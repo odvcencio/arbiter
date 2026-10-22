@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Breaking
+
+- **Arithmetic precedence.** `*`, `/` and `%` now bind tighter than `+` and `-`. `1 + 2 * 3` now evaluates to 7 instead of 9. Parser integrations must handle the new `product_expr` CST node for `* / %`.
+- **Arithmetic chains group left to right.** v1.12.0 grouped many chains of five or more terms from the right. For example, `1000 - 2 - 3 - 4 - 5` evaluated to 1002 instead of 986, `1000 / 2 / 3 / 4 / 5` to 1875 instead of 8.33, and a seven-term sum and difference such as `w + i + d + g - l - h - 14600` (values 100000, 1000, 500, 2000, 2500, 3000) to 89400 instead of 83400. Chains of up to four terms were already left to right. Every chain now groups left to right. Long `-` and `/` chains change value when recompiled, so audit them along with mixed arithmetic. To keep a former result exactly, add parentheses that state the old grouping.
+- **Unambiguous remainder.** `%` is reserved for remainder with or without spaces. `7 % 3` now evaluates to 1 instead of being consumed as a percentage quantity. Write percentage quantities as `50 pct`, replacing `50 %`. Incomplete percent expressions are rejected; strings and comments are unchanged. Rebuild and audit affected policies. Existing bytecode and wire-format versions are unchanged. These source-language changes are separate from v1.12.0.
+
 ## [1.12.0] — 2026-10-22
 
 ### Added

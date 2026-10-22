@@ -834,6 +834,33 @@ matched, _ := arbiter.Eval(prog, dc)
 
 ## Language
 
+### Arithmetic and remainder
+
+Multiplication, division and remainder (`* / %`) bind tighter than addition and
+subtraction (`+ -`). Operators within either tier associate left to right.
+Parentheses override that order: `1 + 2 * 3` is `7`, while `(1 + 2) * 3` is `9`.
+Keep spaces around subtraction between numeric literals (`10 - 3 - 2`); the
+existing signed-number lexer can consume `10-3-2` incorrectly.
+
+`%` always means remainder, regardless of whitespace. Both `7%3` and `7 % 3`
+produce `1`. The default numeric profile retains fractional remainders and the
+dividend's sign: `5.5 % 2` is `1.5`, and `-7 % 3` is `-1`. The integer profile
+retains its exact-integer bounds and zero-divisor errors.
+
+Use `pct` for percentage quantities, such as `50 pct`. The former `50 %` suffix
+is rejected because it conflicts with remainder expressions. Percent characters
+inside strings and comments are unaffected.
+
+These are breaking source-language changes after v1.12.0. v1.12.0 also grouped
+many chains of five or more terms from the right: `1000 - 2 - 3 - 4 - 5` gave
+`1002` instead of `986`. Chains now always group left to right, so long `-` and
+`/` chains change value when recompiled. To keep a former result exactly, add
+explicit parentheses that state the old grouping before recompiling. Replace
+percentage suffixes with `pct`, audit mixed arithmetic and rebuild affected
+policies. Existing bytecode retains its compiled meaning; this change does not
+change the bundle or precompiled-program wire format. Parser integrations must
+recognize `product_expr` for `* / %`; `math_expr` now represents the `+ -` tier.
+
 ### Typed Data Declarations
 
 `input`, `feature`, `fact`, `outcome`, and `table` are one family: declared data shapes Arbiter can validate, inspect, and reason about. Use `input` for request shape, `feature` for sourced data, `fact` for working memory, `outcome` for governed effects, and `table` for immutable lookup data.

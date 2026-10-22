@@ -773,12 +773,10 @@ func ArbiterGrammar() *Grammar {
 		Sym("_value_expr"),
 	))
 
-	// _value_expr: math and primaries only
-	g.Define("_value_expr", Choice(
-		Sym("math_expr"),
-		Sym("aggregate_expr"),
-		Sym("_primary"),
-	))
+	// _value_expr: arithmetic tiers, aggregates and primaries only
+	g.Define("_value_expr", Choice(Sym("math_expr"), Sym("_product_value")))
+	g.Define("_product_value", Choice(Sym("product_expr"), Sym("_arithmetic_primary")))
+	g.Define("_arithmetic_primary", Choice(Sym("aggregate_expr"), Sym("_primary")))
 
 	// Logical — operate on _expr (full expressions)
 	g.Define("or_expr", PrecLeft(1, Seq(
@@ -872,11 +870,18 @@ func ArbiterGrammar() *Grammar {
 		Field("left", Sym("_value_expr")), Str("is"), Str("not"), Str("null"),
 	)))
 
-	// Math — operands are _value_expr (binds tighter than comparisons)
+	// Math binds tighter than comparisons. Restrict each right operand to
+	// the next tier so precedence and left associativity do not depend on
+	// the parser generator resolving ambiguous recursive productions.
 	g.Define("math_expr", PrecLeft(5, Seq(
 		Field("left", Sym("_value_expr")),
-		Field("op", Choice(Str("+"), Str("-"), Str("*"), Str("/"), Str("%"))),
-		Field("right", Sym("_value_expr")),
+		Field("op", Choice(Str("+"), Str("-"))),
+		Field("right", Sym("_product_value")),
+	)))
+	g.Define("product_expr", PrecLeft(6, Seq(
+		Field("left", Sym("_product_value")),
+		Field("op", Choice(Str("*"), Str("/"), Str("%"))),
+		Field("right", Sym("_arithmetic_primary")),
 	)))
 
 	// Quantifiers: any/all/none x in collection { body }
@@ -1002,9 +1007,11 @@ func ArbiterGrammar() *Grammar {
 	g.Define("parameterized_decimal_type", Token(Pat(`decimal<[a-zA-Z_][a-zA-Z0-9_]*>`)))
 	g.Define("timestamp_literal", Token(Pat(`[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})`)))
 	g.Define("decimal_literal", Token(Pat(`-?[0-9]+(\.[0-9]+)?[ \t]+(?:USD|EUR|GBP|JPY|CNY|CHF|CAD|AUD|BTC|ETH|SOL|USDC|USDT)`)))
-	g.Define("quantity_literal", Token(Pat(`-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?[ \t]+(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|%|hp)`)))
+	// The % token is exclusively remainder. Percentage quantities use pct;
+	// otherwise "7 % 3" can become a quantity plus an ignored trailing value.
+	g.Define("quantity_literal", Token(Pat(`-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?[ \t]+(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)`)))
 	g.Define("number_literal", Pat(`-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?`))
-	g.Define("unit_literal", Pat(`(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|%|hp)`))
+	g.Define("unit_literal", Pat(`(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)`))
 	g.Define("duration_literal", Pat(`([0-9]+(ns|us|µs|ms|s|m|h))+`))
 	g.Define("temporal_duration_literal", Token(Pat(`[0-9]+(\.[0-9]+)?(ms|s|m|hr|d)`)))
 	g.Define("string_literal", Pat(`"[^"]*"`))

@@ -3420,6 +3420,28 @@
           "type": "SYMBOL"
         },
         {
+          "name": "_product_value",
+          "type": "SYMBOL"
+        }
+      ],
+      "type": "CHOICE"
+    },
+    "_product_value": {
+      "members": [
+        {
+          "name": "product_expr",
+          "type": "SYMBOL"
+        },
+        {
+          "name": "_arithmetic_primary",
+          "type": "SYMBOL"
+        }
+      ],
+      "type": "CHOICE"
+    },
+    "_arithmetic_primary": {
+      "members": [
+        {
           "name": "aggregate_expr",
           "type": "SYMBOL"
         },
@@ -4125,7 +4147,41 @@
                 {
                   "type": "STRING",
                   "value": "-"
-                },
+                }
+              ],
+              "type": "CHOICE"
+            },
+            "name": "op",
+            "type": "FIELD"
+          },
+          {
+            "content": {
+              "name": "_product_value",
+              "type": "SYMBOL"
+            },
+            "name": "right",
+            "type": "FIELD"
+          }
+        ],
+        "type": "SEQ"
+      },
+      "type": "PREC_LEFT",
+      "value": 5
+    },
+    "product_expr": {
+      "content": {
+        "members": [
+          {
+            "content": {
+              "name": "_product_value",
+              "type": "SYMBOL"
+            },
+            "name": "left",
+            "type": "FIELD"
+          },
+          {
+            "content": {
+              "members": [
                 {
                   "type": "STRING",
                   "value": "*"
@@ -4146,7 +4202,7 @@
           },
           {
             "content": {
-              "name": "_value_expr",
+              "name": "_arithmetic_primary",
               "type": "SYMBOL"
             },
             "name": "right",
@@ -4156,7 +4212,7 @@
         "type": "SEQ"
       },
       "type": "PREC_LEFT",
-      "value": 5
+      "value": 6
     },
     "quantifier_expr": {
       "members": [
@@ -4784,7 +4840,7 @@
     "quantity_literal": {
       "content": {
         "type": "PATTERN",
-        "value": "-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?[ \\t]+(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|%|hp)"
+        "value": "-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?[ \\t]+(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)"
       },
       "type": "TOKEN"
     },
@@ -4794,7 +4850,7 @@
     },
     "unit_literal": {
       "type": "PATTERN",
-      "value": "(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|%|hp)"
+      "value": "(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)"
     },
     "duration_literal": {
       "type": "PATTERN",
