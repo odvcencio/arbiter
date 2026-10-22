@@ -2,7 +2,7 @@ package buildinfo
 
 const (
 	Product                 = "arbiter"
-	Version                 = "1.12.0"
+	Version                 = "1.13.0"
 	OperatorContractVersion = "operator.v1"
 )
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [1.13.0] — 2026-10-22
+
 ### Security
 
 - Require Go 1.26.10 and use the module's Go version in CI, parity and release builds; the Docker builder uses the same patched version and the runtime uses Alpine 3.24.3. Public module downloads retain checksum-database verification and the grammar path is selected from the resolved module version. Upgrade pgx to v5.9.2, gRPC to v1.83.2, x/net to v0.60.0 and x/text to v0.42.0, plus their required transitive updates. CI and release qualification now check dependency integrity and reachable vulnerabilities. Release preparation refuses module-file drift instead of tidying the release tree.

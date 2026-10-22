@@ -1,10 +1,10 @@
 # arbiter
 
-## What's new in v1.10.0
+## What's new in v1.13.0
 
-**Prepared tag-filtered evaluation** — `vm.NewPreparedEvaluator` selects matching rule headers once for repeated decisions with the same rules, string pool, and tags.
+**Correct arithmetic grouping** — multiplication, division and remainder bind before addition and subtraction, and chains group left to right. Adjacent subtraction such as `10-3-2` evaluates to 5. These are source-language changes: audit policy outcomes before recompiling. Write percentage quantities as `50 pct`; `%` now always means remainder. See the [migration details](CHANGELOG.md#1130--2026-10-22).
 
-**Existing evaluation semantics** — prepared evaluation keeps rule order, active windows, actions, errors, and outputs consistent with `EvalWithTagFilter`.
+**Patched build foundation** — Go 1.26.10 and patched dependencies, dependency-integrity and vulnerability checks, and cross-target parity on amd64, native arm64 and WebAssembly. Existing bytecode and wire-format versions are unchanged from v1.12.0.
 
 ---
 
