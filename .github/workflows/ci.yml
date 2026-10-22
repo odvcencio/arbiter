@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -14,10 +17,18 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
 
       - name: Test
         run: go test ./... -count=1 -short -timeout=120s
+
+      - name: Dependency integrity
+        run: |
+          go mod tidy -diff
+          go mod verify
+
+      - name: Reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
       - name: Vet
         run: go vet ./...
@@ -54,7 +65,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
 
       - name: Fuzz Compile
         run: go test . -run '^$' -fuzz '^FuzzCompile$' -fuzztime=60s -timeout=120s
@@ -96,7 +107,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
 
       - name: Bump gotreesitter to latest
         run: go get github.com/odvcencio/gotreesitter@latest
@@ -109,3 +120,15 @@ jobs:
 
       - name: Vet against latest gotreesitter
         run: go vet ./...
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the deployment image
+        run: docker build -f deploy/Dockerfile -t arbiter:ci .
+      - name: Check the non-root runtime and external grammar
+        run: |
+          docker run --rm --entrypoint sh arbiter:ci -c 'test "$(id -u)" = 10001 && test -s /usr/local/share/arbiter/grammars/hcl.bin && cat /etc/alpine-release'
+          docker run --rm -v "$PWD/testdata:/fixtures:ro" arbiter:ci check /fixtures/fraud.arb

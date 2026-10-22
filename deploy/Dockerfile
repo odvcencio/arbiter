@@ -1,14 +1,14 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 RUN apk add --no-cache git
-ENV GONOSUMCHECK=github.com/odvcencio/* GONOSUMDB=github.com/odvcencio/*
+ENV GOFLAGS=-p=4
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -tags grammar_blobs_external -ldflags="-s -w" -o /arbiter ./cmd/arbiter
-RUN cp $(find /root/go/pkg/mod -path '*/gotreesitter@*/grammars/grammar_blobs/hcl.bin' -type f | head -1) /hcl.bin
+RUN cp "$(go list -m -f '{{.Dir}}' github.com/odvcencio/gotreesitter)/grammars/grammar_blobs/hcl.bin" /hcl.bin
 
-FROM alpine:3.20
+FROM alpine:3.24.3
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /arbiter /usr/local/bin/arbiter
 COPY --from=builder /hcl.bin /usr/local/share/arbiter/grammars/hcl.bin
