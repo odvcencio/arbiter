@@ -607,6 +607,9 @@ Bundle publishes, activations, rollbacks, and override mutations are also emitte
 
 ## Install
 
+Building from source requires Go 1.26.10 or newer. CI and release builds use the
+version declared in `go.mod`; keep that patched toolchain when building binaries.
+
 ```bash
 go install github.com/odvcencio/arbiter/cmd/arbiter@latest
 ```
