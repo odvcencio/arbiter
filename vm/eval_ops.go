@@ -154,6 +154,10 @@ func (vm *VM) evalComparisonOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 }
 
 func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
+	if vm.profile == NumericInteger && op >= compiler.OpAdd && op <= compiler.OpCeil {
+		vm.evalIntegerMathOp(op)
+		return nextInstruction(ip), true
+	}
 	switch op {
 	case compiler.OpAdd:
 		b, a := vm.pop(), vm.pop()
@@ -200,7 +204,10 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			}
 			break
 		}
-		vm.push(NumVal(vm.toNum(a) * vm.toNum(b)))
+		// float64(...) rounds the product here and prevents the compiler from
+		// fusing it into a later add (FMA on arm64, never on wasm), which would
+		// make results differ by target. See SPEC.md, "Deterministic evaluation".
+		vm.push(NumVal(float64(vm.toNum(a) * vm.toNum(b))))
 	case compiler.OpDiv:
 		b, a := vm.pop(), vm.pop()
 		if a.Typ == TypeDecimal || b.Typ == TypeDecimal {
@@ -232,7 +239,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 		if denom == 0 {
 			vm.push(NumVal(math.NaN()))
 		} else {
-			vm.push(NumVal(vm.toNum(a) / denom))
+			vm.push(NumVal(float64(vm.toNum(a) / denom)))
 		}
 	case compiler.OpMod:
 		b, a := vm.pop(), vm.pop()
@@ -257,6 +264,10 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 		if denom == 0 {
 			vm.push(NumVal(math.NaN()))
 		} else {
+			// math.Mod is portable: in Go 1.26 math/mod.go is pure Go (Frexp, Ldexp,
+			// subtraction) and stubs.go sets haveArchMod = false on every GOARCH,
+			// amd64, arm64 and wasm included. There is no assembly path, so the
+			// result is the same on all targets.
 			vm.push(NumVal(math.Mod(vm.toNum(a), denom)))
 		}
 	case compiler.OpAbs:
@@ -593,9 +604,19 @@ func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode,
 		if len(vm.iters) == 0 {
 			return nextInstruction(ip), true
 		}
-		val := vm.toNum(vm.pop())
+		popped := vm.pop()
+		val := vm.toNum(popped)
 		iter := &vm.iters[len(vm.iters)-1]
-		iter.aggSum += val
+		if vm.profile == NumericInteger {
+			sum, err := integerSum(iter.aggSum, popped)
+			if err != nil {
+				vm.setErr(err)
+				return nextInstruction(ip), true
+			}
+			iter.aggSum = sum
+		} else {
+			iter.aggSum += val
+		}
 		iter.aggCount++
 		iter.index++
 		if iter.index < len(iter.items) {
@@ -623,7 +644,7 @@ func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode,
 			if iter.aggCount == 0 {
 				vm.push(NumVal(0))
 			} else {
-				vm.push(NumVal(iter.aggSum / float64(iter.aggCount)))
+				vm.push(NumVal(float64(iter.aggSum / float64(iter.aggCount))))
 			}
 		default:
 			vm.push(NumVal(iter.aggSum))

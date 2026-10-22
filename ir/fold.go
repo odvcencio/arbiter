@@ -65,10 +65,12 @@ func foldBinary(program *Program, expr *Expr) {
 		case BinarySub:
 			result, ok = left.Number-right.Number, true
 		case BinaryMul:
-			result, ok = left.Number*right.Number, true
+			// float64(...) forbids fusing with a later operation (FMA), so the
+			// fold gives the same bits on every target.
+			result, ok = float64(left.Number*right.Number), true
 		case BinaryDiv:
 			if right.Number != 0 {
-				result, ok = left.Number/right.Number, true
+				result, ok = float64(left.Number/right.Number), true
 			}
 		case BinaryMod:
 			if right.Number != 0 {

@@ -51,6 +51,7 @@ import (
 	"m31labs.dev/arbiter/arbtest"
 	"m31labs.dev/arbiter/audit"
 	"m31labs.dev/arbiter/bundle"
+	"m31labs.dev/arbiter/compiler"
 	"m31labs.dev/arbiter/decompile"
 	"m31labs.dev/arbiter/expert"
 	explorepkg "m31labs.dev/arbiter/explore"
@@ -126,19 +127,30 @@ func run(args []string) error {
 
 func runCheck(args []string) error {
 	if len(args) < 1 {
-		return usageError("Usage: arbiter check <file.arb> [--strict] [--proto set.binpb --message pkg.Message]")
+		return usageError("Usage: arbiter check <file.arb> [--strict] [--numeric-profile integer] [--proto set.binpb --message pkg.Message]")
 	}
 	strict := false
-	for _, a := range args[1:] {
-		if a == "--strict" {
+	numericProfile := ""
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--strict":
 			strict = true
+		case "--numeric-profile":
+			if i+1 >= len(args) {
+				return usageError("--numeric-profile requires a value (integer)")
+			}
+			numericProfile = args[i+1]
+			i++
 		}
+	}
+	if numericProfile != "" && numericProfile != "integer" {
+		return usageError(fmt.Sprintf("unknown numeric profile %q (supported: integer)", numericProfile))
 	}
 	opts, err := schemaOptions(args[1:])
 	if err != nil {
 		return err
 	}
-	return check(args[0], strict, opts...)
+	return checkWithProfile(args[0], strict, numericProfile, opts...)
 }
 
 func runCompile(args []string) error {
@@ -757,6 +769,11 @@ func looksLikeDiagnostic(message string) bool {
 }
 
 func check(path string, strict bool, opts ...arbiter.Option) error {
+	return checkWithProfile(path, strict, "", opts...)
+}
+
+// checkWithProfile is check plus an optional numeric profile gate ("integer").
+func checkWithProfile(path string, strict bool, numericProfile string, opts ...arbiter.Option) error {
 	unit, parsed, err := arbiter.LoadFileParsed(path)
 	if err != nil {
 		return fmt.Errorf("check %s: %w", path, err)
@@ -780,8 +797,25 @@ func check(path string, strict bool, opts ...arbiter.Option) error {
 	if _, err := flags.LoadParsed(parsed, full); err != nil {
 		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
 	}
-	if _, err := expert.CompileParsed(parsed, full); err != nil {
+	expertProg, err := expert.CompileParsed(parsed, full)
+	if err != nil {
 		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
+	}
+	if numericProfile == "integer" {
+		var violations []compiler.NumericViolation
+		violations = append(violations, compiler.CheckIntegerProfile(full.Ruleset)...)
+		if full.Segments != nil {
+			for _, seg := range full.Segments.All() {
+				violations = append(violations, compiler.CheckIntegerProfile(seg.Ruleset)...)
+			}
+		}
+		violations = append(violations, expertProg.NumericProfileViolations()...)
+		if len(violations) > 0 {
+			for _, v := range violations {
+				fmt.Fprintf(os.Stderr, "%s: numeric profile integer: %s\n", path, v)
+			}
+			return fmt.Errorf("check %s: %d violation(s) of the integer numeric profile", path, len(violations))
+		}
 	}
 
 	// Surface non-fatal warnings; --strict turns them into a CI failure.

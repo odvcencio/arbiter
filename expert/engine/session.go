@@ -60,6 +60,10 @@ type Options struct {
 	BundleID     string
 	Overrides    overrides.View
 	Now          func() time.Time
+	// NumericProfile selects the arithmetic rules for rule evaluation. The
+	// zero value is IEEE float64. vm.NumericInteger turns on the integer
+	// profile runtime guard (SPEC.md, "Integer numeric profile").
+	NumericProfile vm.NumericProfile
 }
 
 // Result is the final state of an expert session run.
@@ -303,6 +307,7 @@ func (s *Session) resetPool() {
 	}
 	s.pool = vm.NewStringPool(s.program.ruleset.Constants.Strings())
 	s.evaluator = vm.NewEvaluator(s.program.ruleset, s.pool)
+	s.evaluator.SetNumericProfile(s.opts.NumericProfile)
 	s.dc = nil      // force DataContext rebuild on next eval
 	s.evalCtx = nil // force context rebuild
 }
@@ -1757,6 +1762,7 @@ func (s *Session) initEvalState() {
 	}
 	s.pool = vm.NewStringPool(s.program.ruleset.Constants.Strings())
 	s.evaluator = vm.NewEvaluator(s.program.ruleset, s.pool)
+	s.evaluator.SetNumericProfile(s.opts.NumericProfile)
 	s.syncEnvelopeContext()
 }
 

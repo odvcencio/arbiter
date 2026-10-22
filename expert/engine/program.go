@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -391,4 +392,30 @@ func compileTemporalDuration(duration *ir.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("unsupported duration unit %q", duration.Unit)
 	}
 	return time.Duration(duration.Value * float64(scale)), nil
+}
+
+// NumericProfileViolations statically checks the program's rules and segments
+// against the integer numeric profile (compiler.CheckIntegerProfile). A host
+// that sets Options.NumericProfile to vm.NumericInteger should require this to
+// return no violations.
+func (p *Program) NumericProfileViolations() []compiler.NumericViolation {
+	if p == nil {
+		return nil
+	}
+	out := compiler.CheckIntegerProfile(p.ruleset)
+	if p.segments != nil {
+		segs := p.segments.All()
+		sort.Slice(segs, func(i, j int) bool { return segs[i].Name < segs[j].Name })
+		for _, seg := range segs {
+			for _, v := range compiler.CheckIntegerProfile(seg.Ruleset) {
+				if v.Rule != "" {
+					v.Rule = "segment " + seg.Name + ", rule " + v.Rule
+				} else {
+					v.Rule = "segment " + seg.Name
+				}
+				out = append(out, v)
+			}
+		}
+	}
+	return out
 }

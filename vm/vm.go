@@ -77,6 +77,7 @@ type VM struct {
 	badReLRU  []string
 	err       error
 	ip        uint32
+	profile   NumericProfile
 
 	// budgetSteps accumulates instructions executed across every
 	// evalCondition call made on this VM instance since the last
