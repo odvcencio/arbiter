@@ -4,7 +4,18 @@
 
 ### Added
 
+- **Integer numeric profile.** `compiler.CheckIntegerProfile`, `arbiter check --numeric-profile integer` and `expert.Program.NumericProfileViolations` reject non-integer or oversized number literals, decimals, and any `/` or `avg` result that does not go straight through `floor`, `ceil` or `round`. `vm.NumericInteger` (via `SetNumericProfile` on `Evaluator` and `PreparedEvaluator`, or `expert.Options.NumericProfile`) makes every arithmetic operand and result an exact integer with magnitude at most 2^53, and makes division or modulo by zero an error. See SPEC.md section 3.7.
+- **Cross-target parity check.** `make parity` (`scripts/parity.sh`) builds `cmd/arbiter-parity` for amd64 `v1` and `v3`, js/wasm and arm64, and fails unless a fixed corpus of stateless and expert rules produces the same digest everywhere.
 - **Parser-free expert runtime.** Package `expert/engine` holds the expert `Program` and `Session`. It does not import the `.arb` parser or the tree-sitter grammars. `Program.MarshalBinary` encodes a compiled program and `engine.UnmarshalProgram` loads it, so a program can ship precompiled rules. Package `expert` keeps its API through type aliases. Package `bundle/wire` holds the bundle codec for the same reason, and `bundle` re-exports it.
+
+### Fixed
+
+- **Deterministic expert sessions.** The engine ranged over Go maps when it built fact lists, ran per-fact rules and cleared stale mutations, so aggregate sums, `any` bindings and outcome order changed between runs. Those paths now sort by fact key, rule name or instance. In a 2,400-fact corpus, 20 runs gave 20 different digests before the fix and one after.
+- **Fused multiply-add.** Products and quotients in the VM and in constant folding are wrapped in `float64(...)`, so arm64 cannot fuse them into a later add.
+
+### Changed
+
+- **Precompiled program format version 2.** The metadata JSON now uses explicit lower-case snake_case tags on `expert.Rule`, `ir.FactSchema`, `ir.OutcomeSchema` and the types they contain, so renaming a Go field no longer changes the bytes. `programFormatVersion` is 2, and a golden test (`expert/codec_golden_test.go`) fails when the metadata encoding changes without a version bump. Version 1 programs are rejected.
 
 ## [1.11.0] — 2026-09-23
 

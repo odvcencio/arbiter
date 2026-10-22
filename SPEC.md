@@ -297,7 +297,8 @@ Only rules with intersecting fact dependencies re-evaluate in subsequent rounds.
 
 #### 3.1 Schema Types
 
-`string` -- UTF-8. `number` -- IEEE 754 float64. `decimal` -- exact
+`string` -- UTF-8. `number` -- IEEE 754 float64 (see 3.7 for the integer
+numeric profile). `decimal` -- exact
 fixed-point. `bool`/`boolean`. `timestamp` -- RFC 3339.
 `number<dimension>` -- float64 with dimension. `decimal<currency>` -- exact
 decimal with currency.
@@ -358,6 +359,76 @@ match exactly in arithmetic.
 - **Compile-time**: schema-bound paths type-checked at compilation.
 - **Runtime**: unbound paths use coercion. Numeric strings coerce to numbers.
   Type mismatches produce errors, not panics.
+
+#### 3.7 Deterministic Evaluation and the Integer Numeric Profile
+
+**Cross-target determinism.** Rule evaluation gives bit-identical results on
+amd64, arm64 and js/wasm. The implementation guarantees this as follows:
+
+- Every product and quotient the VM computes (`*`, `/`, `avg`, and constant
+  folding) is wrapped in an explicit `float64(...)` conversion. The Go spec says
+  this rounds the value and prevents the compiler from fusing it into a later
+  add (an FMA instruction on arm64, never on wasm).
+- `%` on floats calls `math.Mod`. In Go 1.26 `math/mod.go` is pure Go and
+  `math/stubs.go` sets `haveArchMod = false` on every GOARCH, so no target has
+  an assembly path.
+- The expert engine never lets Go map order reach a result. Fact lists given to
+  `any`/`all`/`none` quantifiers and aggregates are sorted by fact key, so
+  float sums add in one fixed order and an `any` quantifier binds the same
+  item. Per-fact rules, sync, retraction and support clean-up also run in sorted
+  order.
+
+`scripts/parity.sh` (`make parity`) checks this: it runs a fixed corpus on
+amd64 `GOAMD64=v1` and `v3`, js/wasm and native arm64, and fails unless all
+digests match.
+
+**Integer numeric profile.** The default profile is IEEE float64 (section 3.1).
+A host that wants an arithmetic guarantee, not a convention, opts in to the
+integer profile. It has a static check and a runtime guard.
+
+*Static check.* `compiler.CheckIntegerProfile(rs)` and
+`arbiter check <file.arb> --numeric-profile integer` (which also checks
+segments and expert rules; `expert.Program.NumericProfileViolations` does the
+same for a loaded program) work on the compiled bytecode and report these
+violations:
+
+1. An `OpLoadNum` constant, or a number inside a list literal, that is not an
+   exact integer with |v| <= 2^53.
+2. Any `OpLoadDec` constant or decimal inside a list literal. Decimal and
+   quantity literals are therefore rejected.
+3. An `OpDiv`, or an `OpAggEnd` that computes `avg`, whose next instruction is
+   not `OpFloor`, `OpCeil` or `OpRound`.
+
+Rule 3 is exact for postfix bytecode. The quotient is on top of the value stack
+right after `OpDiv`. The next instruction either consumes it or pushes another
+operand above it, so requiring a rounding opcode there means no other operation
+can use the quotient first. `floor(a / b)` passes. `floor(a / b + 1)`,
+`a / b > 2` and `let q = a / b` fail. The compiler folds a division of two
+literals into one literal. A fractional constant quotient such as `floor(7 / 2)`
+therefore fails rule 1; write the dividend or divisor as a field instead.
+
+*Runtime guard.* `vm.NumericInteger`, set with `SetNumericProfile` on
+`vm.NewPreparedEvaluator`'s result or on `vm.NewEvaluator`'s result, or with
+`expert.Options.NumericProfile`, makes each math opcode check its operands and
+result:
+
+- `+ - * % abs min max` and each `sum` item need operands that are exact
+  integers with |v| <= 2^53, and the result must also be in that range. Sums
+  and products are computed in exact integer arithmetic, so a product of
+  2^53 + 1 is an error and is never rounded down to 2^53.
+- `/` needs integer operands. A zero divisor is an error. The quotient may be
+  fractional (IEEE division is correctly rounded on every target), and only
+  `floor`, `ceil` and `round` accept a fractional operand. For |a|, |b| <= 2^53,
+  `floor(a / b)` equals integer floor division.
+- `%` with a zero divisor is an error. The result takes the sign of the
+  dividend.
+- A null, string, boolean or decimal operand is an error.
+- Errors carry the text `integer profile:` and abort the evaluation like any
+  other runtime error. No NaN or Inf result is produced.
+
+The runtime guard does not inspect comparisons or the values a rule only
+passes through, so a host that needs the whole guarantee also requires an empty
+static check result.
 
 ---
 
