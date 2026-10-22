@@ -192,12 +192,12 @@ func TestIntegerProfileRoundIsExactForLargeQuotients(t *testing.T) {
 	// float64(6755399441055745 / 4503599627370497) rounds to 1.5, so a float
 	// round gives 2. The exact quotient is 1.49999999999999977..., so round is 1.
 	data := map[string]any{"a": 6755399441055745.0, "b": 4503599627370497.0}
-	got, err := evalInteger(t, "rule R { when { true } then Out { r: round(a / b), f: floor(a / b), c: ceil(a / b), n: round(-a / b) } }", data, vm.NumericInteger)
+	got, err := evalInteger(t, "rule R { when { true } then Out { r: round(a / b), f: floor(a / b), c: ceil(a / b), n: round((0 - a) / b) } }", data, vm.NumericInteger)
 	if err != nil || len(got) != 1 {
 		t.Fatalf("err=%v got=%+v", err, got)
 	}
 	p := got[0].Params
-	if p["r"] != 1.0 || p["f"] != 1.0 || p["c"] != 2.0 {
+	if p["r"] != 1.0 || p["f"] != 1.0 || p["c"] != 2.0 || p["n"] != -1.0 {
 		t.Fatalf("exact rounding wrong: %+v", p)
 	}
 	// Half cases round away from zero, as math.Round does.

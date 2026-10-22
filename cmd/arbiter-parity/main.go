@@ -128,6 +128,9 @@ rule ConstMod { when { true } then Out {
 	huge: 1e300 % 3,
 	adjacent: 7%3,
 	precedence: 1 + 2 * 3,
+	subtraction: 10-3-2,
+	signed_subtraction: -10--3-2,
+	negative_exponent: -1e-2,
 	mixed: 10 + 7 % 4,
 } }
 `

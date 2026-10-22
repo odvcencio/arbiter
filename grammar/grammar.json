@@ -4831,22 +4831,88 @@
       "type": "TOKEN"
     },
     "decimal_literal": {
-      "content": {
-        "type": "PATTERN",
-        "value": "-?[0-9]+(\\.[0-9]+)?[ \\t]+(?:USD|EUR|GBP|JPY|CNY|CHF|CAD|AUD|BTC|ETH|SOL|USDC|USDT)"
-      },
-      "type": "TOKEN"
+      "members": [
+        {
+          "content": {
+            "type": "PATTERN",
+            "value": "[0-9]+(\\.[0-9]+)?[ \\t]+(?:USD|EUR|GBP|JPY|CNY|CHF|CAD|AUD|BTC|ETH|SOL|USDC|USDT)"
+          },
+          "type": "TOKEN"
+        },
+        {
+          "members": [
+            {
+              "type": "STRING",
+              "value": "-"
+            },
+            {
+              "content": {
+                "type": "PATTERN",
+                "value": "[0-9]+(\\.[0-9]+)?[ \\t]+(?:USD|EUR|GBP|JPY|CNY|CHF|CAD|AUD|BTC|ETH|SOL|USDC|USDT)"
+              },
+              "type": "IMMEDIATE_TOKEN"
+            }
+          ],
+          "type": "SEQ"
+        }
+      ],
+      "type": "CHOICE"
     },
     "quantity_literal": {
-      "content": {
-        "type": "PATTERN",
-        "value": "-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?[ \\t]+(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)"
-      },
-      "type": "TOKEN"
+      "members": [
+        {
+          "content": {
+            "type": "PATTERN",
+            "value": "[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?[ \\t]+(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)"
+          },
+          "type": "TOKEN"
+        },
+        {
+          "members": [
+            {
+              "type": "STRING",
+              "value": "-"
+            },
+            {
+              "content": {
+                "type": "PATTERN",
+                "value": "[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?[ \\t]+(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)"
+              },
+              "type": "IMMEDIATE_TOKEN"
+            }
+          ],
+          "type": "SEQ"
+        }
+      ],
+      "type": "CHOICE"
     },
     "number_literal": {
-      "type": "PATTERN",
-      "value": "-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?"
+      "members": [
+        {
+          "content": {
+            "type": "PATTERN",
+            "value": "[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?"
+          },
+          "type": "TOKEN"
+        },
+        {
+          "members": [
+            {
+              "type": "STRING",
+              "value": "-"
+            },
+            {
+              "content": {
+                "type": "PATTERN",
+                "value": "[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?"
+              },
+              "type": "IMMEDIATE_TOKEN"
+            }
+          ],
+          "type": "SEQ"
+        }
+      ],
+      "type": "CHOICE"
     },
     "unit_literal": {
       "type": "PATTERN",

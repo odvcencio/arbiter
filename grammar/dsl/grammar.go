@@ -1006,11 +1006,11 @@ func ArbiterGrammar() *Grammar {
 	g.Define("parameterized_number_type", Token(Pat(`number<[a-zA-Z_][a-zA-Z0-9_]*>`)))
 	g.Define("parameterized_decimal_type", Token(Pat(`decimal<[a-zA-Z_][a-zA-Z0-9_]*>`)))
 	g.Define("timestamp_literal", Token(Pat(`[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})`)))
-	g.Define("decimal_literal", Token(Pat(`-?[0-9]+(\.[0-9]+)?[ \t]+(?:USD|EUR|GBP|JPY|CNY|CHF|CAD|AUD|BTC|ETH|SOL|USDC|USDT)`)))
+	g.Define("decimal_literal", signedLiteral(Pat(`[0-9]+(\.[0-9]+)?[ \t]+(?:USD|EUR|GBP|JPY|CNY|CHF|CAD|AUD|BTC|ETH|SOL|USDC|USDT)`)))
 	// The % token is exclusively remainder. Percentage quantities use pct;
 	// otherwise "7 % 3" can become a quantity plus an ignored trailing value.
-	g.Define("quantity_literal", Token(Pat(`-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?[ \t]+(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)`)))
-	g.Define("number_literal", Pat(`-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?`))
+	g.Define("quantity_literal", signedLiteral(Pat(`[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?[ \t]+(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)`)))
+	g.Define("number_literal", signedLiteral(Pat(`[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?`)))
 	g.Define("unit_literal", Pat(`(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)`))
 	g.Define("duration_literal", Pat(`([0-9]+(ns|us|µs|ms|s|m|h))+`))
 	g.Define("temporal_duration_literal", Token(Pat(`[0-9]+(\.[0-9]+)?(ms|s|m|hr|d)`)))
@@ -1084,4 +1084,11 @@ func ArbiterGrammar() *Grammar {
 	g.EnableLRSplitting = true
 
 	return g
+}
+
+// Keep the sign out of numeric tokens. Otherwise maximal munch can consume
+// "-3" as a new literal after "10", discarding the subtraction. The immediate
+// token preserves adjacent signed-literal syntax, including units and currencies.
+func signedLiteral(unsigned *Rule) *Rule {
+	return Choice(Token(unsigned), Seq(Str("-"), ImmToken(unsigned)))
 }

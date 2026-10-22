@@ -24,6 +24,17 @@ func TestArithmeticPrecedenceAndRemainder(t *testing.T) {
 		{"parentheses", "(1 + 2) * 3", nil, 9},
 		{"left associative division", "24 / 3 * 2", nil, 16},
 		{"left associative subtraction", "10 - 3 - 2", nil, 5},
+		{"adjacent subtraction", "10-3-2", nil, 5},
+		{"left spaced subtraction", "10 -3 -2", nil, 5},
+		{"right spaced subtraction", "10- 3- 2", nil, 5},
+		{"subtract negative", "10--3", nil, 13},
+		{"subtract negative chain", "-10--3-2", nil, -9},
+		{"subtract before product", "10-3*2", nil, 4},
+		{"subtract exponent", "1e-2-3e-3", nil, 0.007},
+		{"negative exponent", "-1e-2", nil, -0.01},
+		{"subtract variable", "10-a", map[string]any{"a": 3.0}, 7},
+		{"variable minus literal", "a-3", map[string]any{"a": 10.0}, 7},
+		{"multiply negative", "3*-2", nil, -6},
 		// v1.12.0 grouped many chains of five or more terms from the right.
 		{"five-term subtraction chain", "1000 - 2 - 3 - 4 - 5", nil, 986},
 		{"six-term subtraction chain", "1000 - 2 - 3 - 4 - 5 - 6", nil, 980},
@@ -86,5 +97,27 @@ func TestPercentInCommentsAndStrings(t *testing.T) {
 	source := []byte("// A 50 % comment is not an expression.\nrule R { when { true } then Out { value: \"50 %\" } } // 20 %\n")
 	if _, err := arbiter.Compile(source); err != nil {
 		t.Fatalf("percent inside a string/comment: %v", err)
+	}
+}
+
+func TestSubtractionWithUnits(t *testing.T) {
+	for _, expr := range []string{
+		"10 kg-3 kg == 7 kg", "10 kg--3 kg == 13 kg", "-10 kg-3 kg == -13 kg",
+		"10 USD-3 USD == 7 USD", "10 USD--3 USD == 13 USD", "-10 USD-3 USD == -13 USD",
+	} {
+		source := fmt.Sprintf("rule R { when { %s } then Out {} }", expr)
+		got, err := evalInteger(t, source, nil, vm.NumericDefault)
+		if err != nil || len(got) != 1 {
+			t.Errorf("expression %q: got %+v err=%v", expr, got, err)
+		}
+	}
+}
+
+func TestIncompleteArithmeticIsRejected(t *testing.T) {
+	for _, expr := range []string{"10-", "-", "a-", "-a", "-(1+2)", "10+", "10*", "10/", "10%", "1--", "10 - - 3", "1e400", "-1e400"} {
+		source := fmt.Sprintf("rule R { when { true } then Out { value: %s } }", expr)
+		if _, err := arbiter.Compile([]byte(source)); err == nil {
+			t.Errorf("invalid expression %q silently compiled", expr)
+		}
 	}
 }

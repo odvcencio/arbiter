@@ -1,0 +1,102 @@
+name: parity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  target:
+    name: parity-${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: amd64-v1
+            runner: ubuntu-latest
+            level: v1
+          - target: amd64-v3
+            runner: ubuntu-latest
+            level: v3
+          - target: wasm
+            runner: ubuntu-latest
+            level: v1
+          - target: arm64
+            runner: macos-15
+            level: v1
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      GOFLAGS: -p=4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - uses: actions/setup-node@v4
+        if: matrix.target == 'wasm'
+        with:
+          node-version: '24'
+      - name: Build and run the same corpus
+        shell: bash
+        env:
+          PARITY_TARGET: ${{ matrix.target }}
+          GOAMD64: ${{ matrix.level }}
+        run: |
+          set -euo pipefail
+          unset GOMAXPROCS
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source.txt
+          go version > evidence/go.txt
+          uname -sm > evidence/platform.txt
+          if [[ "$PARITY_TARGET" == arm64 ]]; then
+            test "$(uname -m)" = arm64
+          fi
+          if [[ "$PARITY_TARGET" == wasm ]]; then
+            GOOS=js GOARCH=wasm go build -o evidence/parity.wasm ./cmd/arbiter-parity
+            "$(go env GOROOT)/lib/wasm/go_js_wasm_exec" evidence/parity.wasm -dump evidence/corpus.dump > evidence/digest.txt
+            node --version > evidence/node.txt
+          else
+            go build -o evidence/parity ./cmd/arbiter-parity
+            evidence/parity -dump evidence/corpus.dump > evidence/digest.txt
+            if [[ "$PARITY_TARGET" == amd64-v1 ]]; then
+              for ((parity_run=0; parity_run<20; parity_run++)); do
+                evidence/parity > evidence/repeat.txt
+                cmp evidence/digest.txt evidence/repeat.txt
+              done
+            fi
+          fi
+          cat evidence/digest.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parity-${{ matrix.target }}
+          path: |
+            evidence/*.txt
+            evidence/*.dump
+          if-no-files-found: error
+
+  compare:
+    name: parity-required
+    needs: target
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: parity-*
+          path: evidence
+      - name: Compare source, corpus and digests across all four targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in amd64-v3 wasm arm64; do
+            for file in source.txt digest.txt corpus.dump; do
+              cmp "evidence/parity-amd64-v1/$file" "evidence/parity-$target/$file"
+            done
+          done
+          cat evidence/parity-amd64-v1/digest.txt
