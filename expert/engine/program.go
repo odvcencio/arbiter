@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -391,7 +392,13 @@ func compileTemporalDuration(duration *ir.Duration) (time.Duration, error) {
 	default:
 		return 0, fmt.Errorf("unsupported duration unit %q", duration.Unit)
 	}
-	return time.Duration(duration.Value * float64(scale)), nil
+	// A float64 outside the int64 range converts differently per architecture
+	// (wraps on amd64, saturates on arm64), so reject it here.
+	ns := float64(duration.Value * float64(scale))
+	if math.IsNaN(ns) || math.IsInf(ns, 0) || ns >= 1<<63 {
+		return 0, fmt.Errorf("duration %v%s is too long (limit is about 106751 days)", duration.Value, duration.Unit)
+	}
+	return time.Duration(ns), nil
 }
 
 // NumericProfileViolations statically checks the program's rules and segments
@@ -408,11 +415,7 @@ func (p *Program) NumericProfileViolations() []compiler.NumericViolation {
 		sort.Slice(segs, func(i, j int) bool { return segs[i].Name < segs[j].Name })
 		for _, seg := range segs {
 			for _, v := range compiler.CheckIntegerProfile(seg.Ruleset) {
-				if v.Rule != "" {
-					v.Rule = "segment " + seg.Name + ", rule " + v.Rule
-				} else {
-					v.Rule = "segment " + seg.Name
-				}
+				v.Rule = "segment " + seg.Name
 				out = append(out, v)
 			}
 		}

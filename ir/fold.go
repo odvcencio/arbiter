@@ -1,5 +1,7 @@
 package ir
 
+import "math"
+
 // FoldConstants performs a single pass over all expressions in the program,
 // replacing constant binary/unary operations with their result.
 //
@@ -74,7 +76,10 @@ func foldBinary(program *Program, expr *Expr) {
 			}
 		case BinaryMod:
 			if right.Number != 0 {
-				result = float64(int64(left.Number) % int64(right.Number))
+				// math.Mod is what the VM runs. An int64 conversion here would
+				// be implementation-defined for large operands and would drop
+				// fractions.
+				result = math.Mod(left.Number, right.Number)
 				ok = true
 			}
 		}

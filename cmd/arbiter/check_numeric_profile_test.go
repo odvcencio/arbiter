@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,5 +51,36 @@ func TestCheckNumericProfileIsOptIn(t *testing.T) {
 	}
 	if err := runCheck([]string{path, "--numeric-profile", "bogus"}); err == nil {
 		t.Fatal("unknown profile must be rejected")
+	}
+}
+
+func TestCheckNumericProfileEqualsFormAndUnknownFlags(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "r.arb")
+	if err := os.WriteFile(path, []byte(`rule R { when { a / b > 2 } then Out {} }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCheck([]string{path, "--numeric-profile=integer"}); err == nil {
+		t.Fatal("--numeric-profile=integer must run the check and fail")
+	}
+	if err := runCheck([]string{path, "--numeric-profil", "integer"}); err == nil {
+		t.Fatal("an unknown flag must be rejected")
+	}
+}
+
+func TestCheckNumericProfileReportsSegmentViolationsOnce(t *testing.T) {
+	src := "segment half { zone.n / 2 + 1 > 1 }\nexpert rule R {\n\twhen segment half { true }\n\tthen emit Out { k: 1 }\n}\n"
+	path := filepath.Join(t.TempDir(), "r.arb")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, w, _ := os.Pipe()
+	old := os.Stderr
+	os.Stderr = w
+	err := runCheck([]string{path, "--numeric-profile", "integer"})
+	w.Close()
+	os.Stderr = old
+	out, _ := io.ReadAll(r)
+	if err == nil || strings.Count(string(out), "segment half") != 1 {
+		t.Fatalf("want exactly one segment violation line, err=%v output:\n%s", err, out)
 	}
 }

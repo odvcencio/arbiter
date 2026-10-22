@@ -2,22 +2,34 @@ package expert_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"strconv"
 	"testing"
 
 	"m31labs.dev/arbiter/expert"
+	"m31labs.dev/arbiter/expert/engine"
 )
 
-const goldenMetaPath = "testdata/program-meta.golden"
+// goldenPath is per format version. A change to the encoded bytes must come
+// with a new programFormatVersion, which selects a new golden file. The update
+// mode refuses to overwrite an existing file, so a golden cannot be edited
+// while the version stays the same.
+func goldenPath(version byte) string {
+	return fmt.Sprintf("testdata/program-v%d.golden", version)
+}
 
-// TestProgramMetadataEncodingIsPinned fails when the metadata section of a
-// precompiled program changes. That section is JSON of Rule, ir.FactSchema and
-// ir.OutcomeSchema. If the bytes change, bump programFormatVersion in
-// expert/engine/codec.go and regenerate the golden file with
-// ARBITER_UPDATE_GOLDEN=1 go test ./expert -run TestProgramMetadataEncodingIsPinned.
-func TestProgramMetadataEncodingIsPinned(t *testing.T) {
+// TestProgramEncodingIsPinned fails when the encoding of a precompiled program
+// changes without a version bump. The golden file holds the metadata JSON (Rule,
+// ir.FactSchema and ir.OutcomeSchema) and the SHA-256 of the whole blob, which
+// covers the rule and segment wire bundles, so renumbering an opcode fails too.
+//
+// To bump: increase programFormatVersion in expert/engine/codec.go, then run
+// ARBITER_UPDATE_GOLDEN=1 go test ./expert -run TestProgramEncodingIsPinned.
+func TestProgramEncodingIsPinned(t *testing.T) {
 	p, err := expert.Compile([]byte(precompiledSource))
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
@@ -32,20 +44,44 @@ func TestProgramMetadataEncodingIsPinned(t *testing.T) {
 	version := blob[4]
 	n := binary.LittleEndian.Uint32(blob[5:9])
 	meta := blob[9 : 9+n]
-	got := append([]byte("format_version="+strconv.Itoa(int(version))+"\n"), meta...)
-	got = append(got, '\n')
+	sum := sha256.Sum256(blob)
 
+	var got bytes.Buffer
+	got.WriteString("format_version=" + strconv.Itoa(int(version)) + "\n")
+	got.WriteString("blob_sha256=" + hex.EncodeToString(sum[:]) + "\n")
+	got.Write(meta)
+	got.WriteByte('\n')
+
+	path := goldenPath(version)
 	if os.Getenv("ARBITER_UPDATE_GOLDEN") == "1" {
-		if err := os.WriteFile(goldenMetaPath, got, 0o644); err != nil {
+		if _, err := os.Stat(path); err == nil {
+			t.Fatalf("%s exists: the golden for a format version is frozen. Bump programFormatVersion to write a new one", path)
+		}
+		if err := os.WriteFile(path, got.Bytes(), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	want, err := os.ReadFile(goldenMetaPath)
+	want, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read golden: %v", err)
+		t.Fatalf("read golden for format version %d: %v (bump without a golden? generate it, see the test comment)", version, err)
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("precompiled program metadata encoding changed.\nIf this is intended, bump programFormatVersion in expert/engine/codec.go and regenerate the golden file (see test comment).\n got: %s\nwant: %s", got, want)
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Fatalf("the precompiled program encoding changed but programFormatVersion is still %d.\nBump programFormatVersion in expert/engine/codec.go and generate a new golden (see the test comment).\n got: %s\nwant: %s", version, got.Bytes(), want)
+	}
+}
+
+func TestVersion1ProgramIsRejected(t *testing.T) {
+	p, err := expert.Compile([]byte(precompiledSource))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := p.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob[4] = 1
+	if _, err := engine.UnmarshalProgram(blob); err == nil {
+		t.Fatal("a version 1 program must be rejected")
 	}
 }

@@ -22,6 +22,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: No fused multiply-add on arm64
+        run: scripts/check-no-fma.sh
+
       - name: Build CLI
         run: go build -tags grammar_blobs_external -o /dev/null ./cmd/arbiter
 

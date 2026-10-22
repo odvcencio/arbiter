@@ -3,6 +3,8 @@ package govern
 import (
 	"fmt"
 	"time"
+
+	"m31labs.dev/arbiter/vm"
 )
 
 type flagResult struct {
@@ -22,6 +24,7 @@ type RequestCache struct {
 	evalStack   map[string]bool
 	evalTime    time.Time
 	hasEvalTime bool
+	profile     vm.NumericProfile
 }
 
 // NewRequestCache creates a per-request cache.
@@ -38,6 +41,14 @@ func NewRequestCache(segments *SegmentSet, ctx map[string]any) *RequestCache {
 		ruleResults: make(map[string]bool),
 		flagResults: make(map[string]flagResult),
 		evalStack:   make(map[string]bool),
+	}
+}
+
+// SetNumericProfile selects the numeric profile segments run under. It must be
+// called before the first EvalSegment, because results are memoized.
+func (rc *RequestCache) SetNumericProfile(p vm.NumericProfile) {
+	if rc != nil {
+		rc.profile = p
 	}
 }
 
@@ -88,7 +99,7 @@ func (rc *RequestCache) EvalSegment(name string) (bool, string, error) {
 		rc.segResults[name] = false
 		return false, fmt.Sprintf("segment %q not found", name), nil
 	}
-	matched, err := seg.Eval(rc.nestedCtx)
+	matched, err := seg.EvalWithProfile(rc.nestedCtx, rc.profile)
 	if err != nil {
 		rc.segResults[name] = false
 		rc.segErrs[name] = err

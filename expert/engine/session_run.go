@@ -25,6 +25,9 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 		s.stopReason = StopQuiescent
 		return s.snapshot(), nil
 	}
+	// Each Run is one request with its own instruction budget. Without this the
+	// budget accumulates across Run calls on a long-lived session.
+	s.evaluator.ResetBudget()
 	forceFullEval := s.prepareRun()
 	if s.shouldReuseQuiescentSnapshot(forceFullEval) {
 		return s.snapshot(), nil

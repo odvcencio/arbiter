@@ -132,15 +132,28 @@ func runCheck(args []string) error {
 	strict := false
 	numericProfile := ""
 	for i := 1; i < len(args); i++ {
-		switch args[i] {
+		name, value, hasValue := strings.Cut(args[i], "=")
+		switch name {
 		case "--strict":
 			strict = true
 		case "--numeric-profile":
-			if i+1 >= len(args) {
-				return usageError("--numeric-profile requires a value (integer)")
+			if !hasValue {
+				if i+1 >= len(args) {
+					return usageError("--numeric-profile requires a value (integer)")
+				}
+				value = args[i+1]
+				i++
 			}
-			numericProfile = args[i+1]
-			i++
+			numericProfile = value
+		case "--proto", "--message", "--go", "--type":
+			// Parsed by schemaOptions; skip the separate value of "--flag value".
+			if !hasValue {
+				i++
+			}
+		default:
+			if strings.HasPrefix(args[i], "--") {
+				return usageError(fmt.Sprintf("unknown flag %q for check", args[i]))
+			}
 		}
 	}
 	if numericProfile != "" && numericProfile != "integer" {
@@ -802,19 +815,39 @@ func checkWithProfile(path string, strict bool, numericProfile string, opts ...a
 		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
 	}
 	if numericProfile == "integer" {
+		// The expert program checks its own ruleset and the segments it holds;
+		// the plain ruleset and its segments are checked here. A finding that
+		// two checks both report is printed once, in a fixed order.
 		var violations []compiler.NumericViolation
 		violations = append(violations, compiler.CheckIntegerProfile(full.Ruleset)...)
 		if full.Segments != nil {
-			for _, seg := range full.Segments.All() {
-				violations = append(violations, compiler.CheckIntegerProfile(seg.Ruleset)...)
+			segs := full.Segments.All()
+			sort.Slice(segs, func(i, j int) bool { return segs[i].Name < segs[j].Name })
+			for _, seg := range segs {
+				for _, v := range compiler.CheckIntegerProfile(seg.Ruleset) {
+					v.Rule = "segment " + seg.Name
+					violations = append(violations, v)
+				}
 			}
 		}
 		violations = append(violations, expertProg.NumericProfileViolations()...)
-		if len(violations) > 0 {
-			for _, v := range violations {
-				fmt.Fprintf(os.Stderr, "%s: numeric profile integer: %s\n", path, v)
+		seen := make(map[string]bool)
+		failures := 0
+		for _, v := range violations {
+			key := fmt.Sprintf("%s|%d|%s|%v", v.Rule, v.Offset, v.Message, v.Warning)
+			if seen[key] {
+				continue
 			}
-			return fmt.Errorf("check %s: %d violation(s) of the integer numeric profile", path, len(violations))
+			seen[key] = true
+			if v.Warning {
+				fmt.Fprintf(os.Stderr, "%s: warning: numeric profile integer: %s\n", path, v)
+				continue
+			}
+			failures++
+			fmt.Fprintf(os.Stderr, "%s: numeric profile integer: %s\n", path, v)
+		}
+		if failures > 0 {
+			return fmt.Errorf("check %s: %d violation(s) of the integer numeric profile", path, failures)
 		}
 	}
 

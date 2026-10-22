@@ -1223,6 +1223,7 @@ type roundState struct {
 
 func (s *Session) newRoundState() roundState {
 	rc := govern.NewRequestCache(s.program.segments, s.evalCtx)
+	rc.SetNumericProfile(s.opts.NumericProfile)
 	current := make(map[string]bool, len(s.ruleResults)+len(s.program.rules))
 	// Order-independent: copies each entry into maps keyed by rule name.
 	for name, matched := range s.ruleResults {
@@ -1265,6 +1266,7 @@ func (s *Session) ruleEvalInputs(rule Rule, current map[string]bool, rc *govern.
 	}
 
 	ruleRC = govern.NewRequestCache(s.program.segments, tempCtx)
+	ruleRC.SetNumericProfile(s.opts.NumericProfile)
 	// Order-independent: records one result per distinct rule name.
 	for name, matched := range current {
 		ruleRC.RecordRuleResult(name, matched)
@@ -1278,7 +1280,11 @@ func (s *Session) evaluateRuleMatches(rule Rule, header compiler.RuleHeader, dc 
 		return result, pending, nil, ruleTrace, err
 	}
 	if rule.PerFact {
-		return true, pending, s.evalPerFact(rule, header, s.evaluator, dc, rc), ruleTrace, nil
+		matches, err := s.evalPerFact(rule, header, s.evaluator, dc, rc)
+		if err != nil {
+			return false, pending, nil, ruleTrace, err
+		}
+		return true, pending, matches, ruleTrace, nil
 	}
 	return true, pending, []vm.MatchedRule{mr}, ruleTrace, nil
 }
@@ -1287,9 +1293,9 @@ func (s *Session) evaluateRuleMatches(rule Rule, header compiler.RuleHeader, dc 
 // evaluates the rule condition with each fact individually. Returns one
 // MatchedRule per matching fact, with the quantifier variable bound to that
 // fact so action params can reference its fields.
-func (s *Session) evalPerFact(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext, rc *govern.RequestCache) []vm.MatchedRule {
+func (s *Session) evalPerFact(rule Rule, header compiler.RuleHeader, evaluator *vm.Evaluator, dc vm.DataContext, rc *govern.RequestCache) ([]vm.MatchedRule, error) {
 	if len(rule.FactDeps) == 0 {
-		return nil
+		return nil, nil
 	}
 	factType := rule.FactDeps[0]
 	factsOfType, ok := s.facts[factType]
@@ -1297,7 +1303,7 @@ func (s *Session) evalPerFact(rule Rule, header compiler.RuleHeader, evaluator *
 		// Also check external facts
 		factsOfType, ok = s.externalFacts[factType]
 		if !ok {
-			return nil
+			return nil, nil
 		}
 	}
 
@@ -1309,12 +1315,21 @@ func (s *Session) evalPerFact(rule Rule, header compiler.RuleHeader, evaluator *
 		tempCtx := s.buildSingleFactContext(factType, fact)
 		tempDC := vm.DataFromMap(tempCtx, s.pool)
 		ok, _, mr, _, err := s.evalRule(rule, header, evaluator, tempDC, rc)
-		if err != nil || !ok {
+		if err != nil {
+			// Under the integer profile an error is a rule violation the host
+			// must see. In the default profile it keeps the old behavior of
+			// skipping the fact.
+			if s.opts.NumericProfile == vm.NumericInteger {
+				return nil, fmt.Errorf("expert rule %s fact %s/%s: %w", rule.Name, factType, key, err)
+			}
+			continue
+		}
+		if !ok {
 			continue
 		}
 		results = append(results, mr)
 	}
-	return results
+	return results, nil
 }
 
 // buildSingleFactContext creates an evaluation context where only one fact of

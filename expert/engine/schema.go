@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	dec "m31labs.dev/arbiter/decimal"
@@ -308,13 +309,23 @@ func timestampValue(value any) (int64, bool) {
 	case uint64:
 		return int64(v), true
 	case float64:
-		return int64(v), true
+		return floatToUnix(v)
 	case float32:
-		return int64(v), true
+		return floatToUnix(float64(v))
 	case json.Number:
 		n, err := v.Int64()
 		return n, err == nil
 	default:
 		return 0, false
 	}
+}
+
+// floatToUnix converts float seconds to int64. NaN, infinities and values
+// outside the int64 range are rejected, because that conversion is
+// implementation-defined and differs between amd64, arm64 and wasm.
+func floatToUnix(v float64) (int64, bool) {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v >= 1<<63 || v < -(1<<63) {
+		return 0, false
+	}
+	return int64(v), true
 }

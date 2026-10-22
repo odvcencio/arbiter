@@ -7,9 +7,9 @@ import (
 	"m31labs.dev/arbiter/intern"
 )
 
-// MaxSafeInteger is 2^53, the largest magnitude the integer numeric profile
+// MaxSafeInteger is 2^53 - 1, the largest magnitude the integer numeric profile
 // accepts for a literal or an arithmetic result.
-const MaxSafeInteger = 1 << 53
+const MaxSafeInteger = 1<<53 - 1
 
 // NumericViolation is one place where compiled bytecode breaks the integer
 // numeric profile.
@@ -17,6 +17,9 @@ type NumericViolation struct {
 	Rule    string // rule that owns the bytecode, or "" when no rule owns it
 	Offset  uint32 // byte offset into CompiledRuleset.Instructions
 	Message string
+	// Warning marks a finding that does not fail the check but will fail at
+	// run time (for example string concatenation).
+	Warning bool
 }
 
 func (v NumericViolation) String() string {
@@ -26,14 +29,25 @@ func (v NumericViolation) String() string {
 	return fmt.Sprintf("offset %d: %s", v.Offset, v.Message)
 }
 
+// Errors returns the violations that are not warnings.
+func Errors(vs []NumericViolation) []NumericViolation {
+	var out []NumericViolation
+	for _, v := range vs {
+		if !v.Warning {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // CheckIntegerProfile statically checks a compiled ruleset against the integer
 // numeric profile (SPEC.md, "Integer numeric profile"). It returns no
 // violations when the ruleset conforms. The rules, all applied to the compiled
 // instruction stream:
 //
-//  1. Every OpLoadNum constant is an exact integer with |v| <= 2^53.
+//  1. Every OpLoadNum constant is an exact integer with |v| <= 2^53-1.
 //  2. OpLoadDec never appears, and no decimal appears in a pooled list.
-//  3. Every pooled list number is an exact integer with |v| <= 2^53.
+//  3. Every pooled list number is an exact integer with |v| <= 2^53-1.
 //  4. The instruction that follows every OpDiv, and every OpAggEnd that
 //     computes an average, is OpFloor, OpCeil or OpRound.
 //
@@ -51,15 +65,16 @@ func CheckIntegerProfile(rs *CompiledRuleset) []NumericViolation {
 		out = append(out, NumericViolation{Rule: owners.at(off), Offset: off, Message: fmt.Sprintf(format, args...)})
 	}
 
-	if pool := rs.Constants; pool != nil {
-		for _, item := range pool.Lists() {
-			switch item.Typ {
-			case intern.TypeNumber:
-				if msg := integerLiteralProblem(item.Num); msg != "" {
-					add(0, "list literal %v: %s", item.Num, msg)
+	for _, table := range rs.Tables {
+		for r, row := range table.Rows {
+			for c, cell := range row {
+				col := ""
+				if c < len(table.Columns) {
+					col = table.Columns[c]
 				}
-			case intern.TypeDecimal:
-				add(0, "decimal value in a list literal")
+				if msg := poolValueProblem(rs.Constants, cell); msg != "" {
+					out = append(out, NumericViolation{Rule: "table " + table.Name, Message: fmt.Sprintf("row %d column %s: %s", r, col, msg)})
+				}
 			}
 		}
 	}
@@ -95,6 +110,22 @@ func CheckIntegerProfile(rs *CompiledRuleset) []NumericViolation {
 			}
 		case OpLoadDec:
 			add(uint32(i), "decimal literal is not allowed")
+		case OpLoadNull:
+			if flags == intern.TypeList {
+				if next, nflags, length, ok := opAt(i + InstrSize); ok && next == OpLoadNull && nflags == 0xFF {
+					if msg := listProblem(rs.Constants, arg, length, 0); msg != "" {
+						add(uint32(i), "list literal: %s", msg)
+					}
+				}
+			}
+		case OpAdd, OpMin, OpMax:
+			// Heuristic: a string literal directly feeding the operator.
+			p1, f1, _, ok1 := opAt(i - InstrSize)
+			p2, f2, _, ok2 := opAt(i - 2*InstrSize)
+			if (ok1 && p1 == OpLoadStr && f1 == 0) || (ok2 && p2 == OpLoadStr && f2 == 0) {
+				out = append(out, NumericViolation{Rule: owners.at(uint32(i)), Offset: uint32(i), Warning: true,
+					Message: "string operand: concatenation and string min/max are errors at run time under the integer profile"})
+			}
 		case OpDiv:
 			needsRounding(i, "division")
 		case OpAggEnd:
@@ -106,6 +137,33 @@ func CheckIntegerProfile(rs *CompiledRuleset) []NumericViolation {
 	return out
 }
 
+// poolValueProblem reports why one pooled value breaks the profile, or "".
+func poolValueProblem(pool *intern.Pool, v intern.PoolValue) string {
+	switch v.Typ {
+	case intern.TypeNumber:
+		if msg := integerLiteralProblem(v.Num); msg != "" {
+			return fmt.Sprintf("number %v: %s", v.Num, msg)
+		}
+	case intern.TypeDecimal:
+		return "decimal value"
+	case intern.TypeList:
+		return listProblem(pool, v.ListIdx, v.ListLen, 1)
+	}
+	return ""
+}
+
+func listProblem(pool *intern.Pool, idx, length uint16, depth int) string {
+	if pool == nil || depth > 8 {
+		return ""
+	}
+	for _, item := range pool.GetList(idx, length) {
+		if msg := poolValueProblem(pool, item); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
 func integerLiteralProblem(n float64) string {
 	switch {
 	case math.IsNaN(n) || math.IsInf(n, 0):
@@ -113,7 +171,7 @@ func integerLiteralProblem(n float64) string {
 	case n != math.Trunc(n):
 		return "not an integer"
 	case math.Abs(n) > MaxSafeInteger:
-		return "magnitude exceeds 2^53"
+		return "magnitude exceeds 2^53-1"
 	}
 	return ""
 }

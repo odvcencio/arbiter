@@ -97,6 +97,9 @@ func (vm *VM) evalLoadOp(instrs []byte, end, ip uint32, op compiler.OpCode, flag
 		} else {
 			vm.push(dc.Get(key))
 		}
+		if vm.profile == NumericInteger {
+			vm.stack[vm.sp-1] = vm.checkLoaded(vm.stack[vm.sp-1])
+		}
 		return nextInstruction(ip), true
 	default:
 		return 0, false
@@ -207,7 +210,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 		// float64(...) rounds the product here and prevents the compiler from
 		// fusing it into a later add (FMA on arm64, never on wasm), which would
 		// make results differ by target. See SPEC.md, "Deterministic evaluation".
-		vm.push(NumVal(float64(vm.toNum(a) * vm.toNum(b))))
+		vm.push(numResult(float64(vm.toNum(a) * vm.toNum(b))))
 	case compiler.OpDiv:
 		b, a := vm.pop(), vm.pop()
 		if a.Typ == TypeDecimal || b.Typ == TypeDecimal {
@@ -239,7 +242,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 		if denom == 0 {
 			vm.push(NumVal(math.NaN()))
 		} else {
-			vm.push(NumVal(float64(vm.toNum(a) / denom)))
+			vm.push(numResult(float64(vm.toNum(a) / denom)))
 		}
 	case compiler.OpMod:
 		b, a := vm.pop(), vm.pop()
@@ -264,11 +267,11 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 		if denom == 0 {
 			vm.push(NumVal(math.NaN()))
 		} else {
-			// math.Mod is portable: in Go 1.26 math/mod.go is pure Go (Frexp, Ldexp,
-			// subtraction) and stubs.go sets haveArchMod = false on every GOARCH,
-			// amd64, arm64 and wasm included. There is no assembly path, so the
+			// math.Mod is portable: in Go 1.25.9 (go.mod says 1.25) and 1.26.0
+			// math/mod.go is pure Go (Frexp, Ldexp, subtraction) and stubs.go sets
+			// haveArchMod = false on every GOARCH, amd64, arm64 and wasm included. There is no assembly path, so the
 			// result is the same on all targets.
-			vm.push(NumVal(math.Mod(vm.toNum(a), denom)))
+			vm.push(numResult(math.Mod(vm.toNum(a), denom)))
 		}
 	case compiler.OpAbs:
 		a := vm.pop()
@@ -607,14 +610,15 @@ func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode,
 		popped := vm.pop()
 		val := vm.toNum(popped)
 		iter := &vm.iters[len(vm.iters)-1]
-		if vm.profile == NumericInteger {
+		if vm.profile == NumericInteger && flags != compiler.FlagCount {
+			// count ignores the item value, so it need not be an integer.
 			sum, err := integerSum(iter.aggSum, popped)
 			if err != nil {
 				vm.setErr(err)
 				return nextInstruction(ip), true
 			}
 			iter.aggSum = sum
-		} else {
+		} else if flags != compiler.FlagCount || vm.profile != NumericInteger {
 			iter.aggSum += val
 		}
 		iter.aggCount++
@@ -641,13 +645,16 @@ func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode,
 		case compiler.FlagCount:
 			vm.push(NumVal(float64(iter.aggCount)))
 		case compiler.FlagAvg:
-			if iter.aggCount == 0 {
+			switch {
+			case iter.aggCount == 0:
 				vm.push(NumVal(0))
-			} else {
-				vm.push(NumVal(float64(iter.aggSum / float64(iter.aggCount))))
+			case vm.profile == NumericInteger:
+				vm.push(quotientValue(int64(iter.aggSum), int64(iter.aggCount)))
+			default:
+				vm.push(numResult(float64(iter.aggSum / float64(iter.aggCount))))
 			}
 		default:
-			vm.push(NumVal(iter.aggSum))
+			vm.push(numResult(iter.aggSum))
 		}
 		return nextInstruction(ip), true
 
