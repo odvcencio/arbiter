@@ -24,6 +24,13 @@ func TestArithmeticPrecedenceAndRemainder(t *testing.T) {
 		{"parentheses", "(1 + 2) * 3", nil, 9},
 		{"left associative division", "24 / 3 * 2", nil, 16},
 		{"left associative subtraction", "10 - 3 - 2", nil, 5},
+		// v1.12.0 grouped many chains of five or more terms from the right.
+		{"five-term subtraction chain", "1000 - 2 - 3 - 4 - 5", nil, 986},
+		{"six-term subtraction chain", "1000 - 2 - 3 - 4 - 5 - 6", nil, 980},
+		{"nine-term subtraction chain", "1000 - 2 - 3 - 4 - 5 - 6 - 7 - 8 - 9", nil, 956},
+		{"five-term division chain", "1000 / 2 / 5 / 4 / 5", nil, 5},
+		{"eight-term division chain", "40320 / 2 / 3 / 4 / 5 / 6 / 7 / 8", nil, 1},
+		{"long mixed sum and difference", "w + i + d + g - l - h - 14600", map[string]any{"w": 100000.0, "i": 1000.0, "d": 500.0, "g": 2000.0, "l": 2500.0, "h": 3000.0}, 83400},
 		{"spaced literal remainder", "7 % 3", nil, 1},
 		{"adjacent literal remainder", "7%3", nil, 1},
 		{"left spaced remainder", "7 %3", nil, 1},

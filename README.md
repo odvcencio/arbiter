@@ -851,8 +851,11 @@ Use `pct` for percentage quantities, such as `50 pct`. The former `50 %` suffix
 is rejected because it conflicts with remainder expressions. Percent characters
 inside strings and comments are unaffected.
 
-These are breaking source-language changes after v1.12.0. To preserve a former
-left-to-right expression, add explicit parentheses before recompiling. Replace
+These are breaking source-language changes after v1.12.0. v1.12.0 also grouped
+many chains of five or more terms from the right: `1000 - 2 - 3 - 4 - 5` gave
+`1002` instead of `986`. Chains now always group left to right, so long `-` and
+`/` chains change value when recompiled. To keep a former result exactly, add
+explicit parentheses that state the old grouping before recompiling. Replace
 percentage suffixes with `pct`, audit mixed arithmetic and rebuild affected
 policies. Existing bytecode retains its compiled meaning; this change does not
 change the bundle or precompiled-program wire format. Parser integrations must
