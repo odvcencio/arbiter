@@ -70,7 +70,9 @@ func parseEvalTime(raw any) (time.Time, bool) {
 	case time.Time:
 		return value.UTC(), true
 	case float64:
-		if math.IsNaN(value) || math.IsInf(value, 0) {
+		// Reject values float64->int64 cannot convert the same way on every target
+		// (the conversion is implementation-defined outside the int64 range).
+		if math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) >= 1<<62 {
 			return time.Time{}, false
 		}
 		seconds, frac := math.Modf(value)

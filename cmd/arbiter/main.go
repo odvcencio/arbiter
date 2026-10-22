@@ -51,6 +51,7 @@ import (
 	"m31labs.dev/arbiter/arbtest"
 	"m31labs.dev/arbiter/audit"
 	"m31labs.dev/arbiter/bundle"
+	"m31labs.dev/arbiter/compiler"
 	"m31labs.dev/arbiter/decompile"
 	"m31labs.dev/arbiter/expert"
 	explorepkg "m31labs.dev/arbiter/explore"
@@ -126,19 +127,43 @@ func run(args []string) error {
 
 func runCheck(args []string) error {
 	if len(args) < 1 {
-		return usageError("Usage: arbiter check <file.arb> [--strict] [--proto set.binpb --message pkg.Message]")
+		return usageError("Usage: arbiter check <file.arb> [--strict] [--numeric-profile integer] [--proto set.binpb --message pkg.Message]")
 	}
 	strict := false
-	for _, a := range args[1:] {
-		if a == "--strict" {
+	numericProfile := ""
+	for i := 1; i < len(args); i++ {
+		name, value, hasValue := strings.Cut(args[i], "=")
+		switch name {
+		case "--strict":
 			strict = true
+		case "--numeric-profile":
+			if !hasValue {
+				if i+1 >= len(args) {
+					return usageError("--numeric-profile requires a value (integer)")
+				}
+				value = args[i+1]
+				i++
+			}
+			numericProfile = value
+		case "--proto", "--message", "--go", "--type":
+			// Parsed by schemaOptions; skip the separate value of "--flag value".
+			if !hasValue {
+				i++
+			}
+		default:
+			if strings.HasPrefix(args[i], "--") {
+				return usageError(fmt.Sprintf("unknown flag %q for check", args[i]))
+			}
 		}
+	}
+	if numericProfile != "" && numericProfile != "integer" {
+		return usageError(fmt.Sprintf("unknown numeric profile %q (supported: integer)", numericProfile))
 	}
 	opts, err := schemaOptions(args[1:])
 	if err != nil {
 		return err
 	}
-	return check(args[0], strict, opts...)
+	return checkWithProfile(args[0], strict, numericProfile, opts...)
 }
 
 func runCompile(args []string) error {
@@ -757,6 +782,11 @@ func looksLikeDiagnostic(message string) bool {
 }
 
 func check(path string, strict bool, opts ...arbiter.Option) error {
+	return checkWithProfile(path, strict, "", opts...)
+}
+
+// checkWithProfile is check plus an optional numeric profile gate ("integer").
+func checkWithProfile(path string, strict bool, numericProfile string, opts ...arbiter.Option) error {
 	unit, parsed, err := arbiter.LoadFileParsed(path)
 	if err != nil {
 		return fmt.Errorf("check %s: %w", path, err)
@@ -780,8 +810,45 @@ func check(path string, strict bool, opts ...arbiter.Option) error {
 	if _, err := flags.LoadParsed(parsed, full); err != nil {
 		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
 	}
-	if _, err := expert.CompileParsed(parsed, full); err != nil {
+	expertProg, err := expert.CompileParsed(parsed, full)
+	if err != nil {
 		return fmt.Errorf("check %s: %w", path, arbiter.WrapFileError(unit, err))
+	}
+	if numericProfile == "integer" {
+		// The expert program checks its own ruleset and the segments it holds;
+		// the plain ruleset and its segments are checked here. A finding that
+		// two checks both report is printed once, in a fixed order.
+		var violations []compiler.NumericViolation
+		violations = append(violations, compiler.CheckIntegerProfile(full.Ruleset)...)
+		if full.Segments != nil {
+			segs := full.Segments.All()
+			sort.Slice(segs, func(i, j int) bool { return segs[i].Name < segs[j].Name })
+			for _, seg := range segs {
+				for _, v := range compiler.CheckIntegerProfile(seg.Ruleset) {
+					v.Rule = "segment " + seg.Name
+					violations = append(violations, v)
+				}
+			}
+		}
+		violations = append(violations, expertProg.NumericProfileViolations()...)
+		seen := make(map[string]bool)
+		failures := 0
+		for _, v := range violations {
+			key := fmt.Sprintf("%s|%d|%s|%v", v.Rule, v.Offset, v.Message, v.Warning)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			if v.Warning {
+				fmt.Fprintf(os.Stderr, "%s: warning: numeric profile integer: %s\n", path, v)
+				continue
+			}
+			failures++
+			fmt.Fprintf(os.Stderr, "%s: numeric profile integer: %s\n", path, v)
+		}
+		if failures > 0 {
+			return fmt.Errorf("check %s: %d violation(s) of the integer numeric profile", path, failures)
+		}
 	}
 
 	// Surface non-fatal warnings; --strict turns them into a CI failure.

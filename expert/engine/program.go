@@ -2,6 +2,8 @@ package engine
 
 import (
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,31 +26,31 @@ const modifySetPrefix = "__expert_set__"
 
 // Rule describes one compiled expert rule.
 type Rule struct {
-	Name            string
-	Tags            []string
-	Priority        int
-	Kind            ActionKind
-	Target          string
-	Segment         string
-	Condition       string
-	KillSwitch      ir.KillSwitchState
-	Prereqs         []string
-	Excludes        []string
-	FactDeps        []string
-	NoLoop          bool
-	Stable          bool
-	PerFact         bool
-	Group           string
-	ForDuration     time.Duration
-	HasFor          bool
-	WithinDuration  time.Duration
-	HasWithin       bool
-	StableCycles    int
-	HasStableCycles bool
-	Cooldown        time.Duration
-	HasCooldown     bool
-	Debounce        time.Duration
-	HasDebounce     bool
+	Name            string             `json:"name"`
+	Tags            []string           `json:"tags"`
+	Priority        int                `json:"priority"`
+	Kind            ActionKind         `json:"kind"`
+	Target          string             `json:"target"`
+	Segment         string             `json:"segment"`
+	Condition       string             `json:"condition"`
+	KillSwitch      ir.KillSwitchState `json:"kill_switch"`
+	Prereqs         []string           `json:"prereqs"`
+	Excludes        []string           `json:"excludes"`
+	FactDeps        []string           `json:"fact_deps"`
+	NoLoop          bool               `json:"no_loop"`
+	Stable          bool               `json:"stable"`
+	PerFact         bool               `json:"per_fact"`
+	Group           string             `json:"group"`
+	ForDuration     time.Duration      `json:"for_duration"`
+	HasFor          bool               `json:"has_for"`
+	WithinDuration  time.Duration      `json:"within_duration"`
+	HasWithin       bool               `json:"has_within"`
+	StableCycles    int                `json:"stable_cycles"`
+	HasStableCycles bool               `json:"has_stable_cycles"`
+	Cooldown        time.Duration      `json:"cooldown"`
+	HasCooldown     bool               `json:"has_cooldown"`
+	Debounce        time.Duration      `json:"debounce"`
+	HasDebounce     bool               `json:"has_debounce"`
 }
 
 func (r Rule) hasTemporal() bool {
@@ -390,5 +392,33 @@ func compileTemporalDuration(duration *ir.Duration) (time.Duration, error) {
 	default:
 		return 0, fmt.Errorf("unsupported duration unit %q", duration.Unit)
 	}
-	return time.Duration(duration.Value * float64(scale)), nil
+	// A float64 outside the int64 range converts differently per architecture
+	// (wraps on amd64, saturates on arm64), so reject it here.
+	ns := float64(duration.Value * float64(scale))
+	if math.IsNaN(ns) || math.IsInf(ns, 0) || ns >= 1<<63 {
+		return 0, fmt.Errorf("duration %v%s is too long (limit is about 106751 days)", duration.Value, duration.Unit)
+	}
+	return time.Duration(ns), nil
+}
+
+// NumericProfileViolations statically checks the program's rules and segments
+// against the integer numeric profile (compiler.CheckIntegerProfile). A host
+// that sets Options.NumericProfile to vm.NumericInteger should require this to
+// return no violations.
+func (p *Program) NumericProfileViolations() []compiler.NumericViolation {
+	if p == nil {
+		return nil
+	}
+	out := compiler.CheckIntegerProfile(p.ruleset)
+	if p.segments != nil {
+		segs := p.segments.All()
+		sort.Slice(segs, func(i, j int) bool { return segs[i].Name < segs[j].Name })
+		for _, seg := range segs {
+			for _, v := range compiler.CheckIntegerProfile(seg.Ruleset) {
+				v.Rule = "segment " + seg.Name
+				out = append(out, v)
+			}
+		}
+	}
+	return out
 }

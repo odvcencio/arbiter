@@ -55,6 +55,16 @@ func NewEvaluator(rs *compiler.CompiledRuleset, sp *StringPool) *Evaluator {
 	}
 }
 
+// ResetBudget starts a new per-request instruction budget. A host that reuses
+// one Evaluator across requests (an expert session does so across Run calls)
+// must call it once per request, or the budget accumulates for the life of the
+// evaluator and evaluation eventually fails with "instruction limit exceeded".
+func (e *Evaluator) ResetBudget() {
+	if e != nil && e.vm != nil {
+		e.vm.resetBudget()
+	}
+}
+
 // String resolves a compile-time string constant through the evaluator's pool.
 func (e *Evaluator) String(idx uint16) string {
 	return e.vm.strPool.Get(idx)

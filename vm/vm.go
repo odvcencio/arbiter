@@ -77,6 +77,7 @@ type VM struct {
 	badReLRU  []string
 	err       error
 	ip        uint32
+	profile   NumericProfile
 
 	// budgetSteps accumulates instructions executed across every
 	// evalCondition call made on this VM instance since the last
@@ -344,7 +345,9 @@ func resolveEvalTime(dc DataContext) time.Time {
 func valueAsEvalTime(v Value) (time.Time, bool) {
 	switch v.Typ {
 	case TypeNumber:
-		if math.IsNaN(v.Num) || math.IsInf(v.Num, 0) {
+		// Reject values float64->int64 cannot convert the same way on every target
+		// (the conversion is implementation-defined outside the int64 range).
+		if math.IsNaN(v.Num) || math.IsInf(v.Num, 0) || math.Abs(v.Num) >= 1<<62 {
 			return time.Time{}, false
 		}
 		seconds, frac := math.Modf(v.Num)
@@ -827,7 +830,7 @@ func (vm *VM) addValues(a, b Value) (Value, error) {
 		}
 		return DecimalVal(sum), nil
 	}
-	return NumVal(vm.toNum(a) + vm.toNum(b)), nil
+	return numResult(vm.toNum(a) + vm.toNum(b)), nil
 }
 
 func (vm *VM) subValues(a, b Value) (Value, error) {
@@ -843,7 +846,7 @@ func (vm *VM) subValues(a, b Value) (Value, error) {
 		}
 		return DecimalVal(diff), nil
 	}
-	return NumVal(vm.toNum(a) - vm.toNum(b)), nil
+	return numResult(vm.toNum(a) - vm.toNum(b)), nil
 }
 
 func (vm *VM) absValue(v Value) (Value, error) {

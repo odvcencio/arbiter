@@ -28,7 +28,11 @@ func (vm *VM) evalTableOp(instrs []byte, end, ip uint32, op compiler.OpCode, fla
 			if !exists {
 				vm.push(NullVal())
 			} else {
-				vm.push(anyToValue(val, vm.strPool))
+				loaded := anyToValue(val, vm.strPool)
+				if vm.profile == NumericInteger {
+					loaded = vm.checkLoaded(loaded)
+				}
+				vm.push(loaded)
 			}
 		} else {
 			vm.push(NullVal())

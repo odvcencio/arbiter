@@ -172,5 +172,7 @@ func Normalize(value float64, symbol string) (float64, Entry, error) {
 	if !ok {
 		return 0, Entry{}, fmt.Errorf("unknown unit %q", symbol)
 	}
-	return value*entry.ToBase + entry.Offset, entry, nil
+	// float64(...) rounds the product, so arm64 cannot fuse it with the add
+	// (FMADDD) and give different bits than amd64 and wasm.
+	return float64(value*entry.ToBase) + entry.Offset, entry, nil
 }

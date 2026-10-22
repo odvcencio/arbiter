@@ -17,12 +17,22 @@ type CompiledSegment struct {
 // and so on) is returned rather than silently treated as "did not match", so
 // callers can surface it the same way they surface a rule condition error.
 func (s *CompiledSegment) Eval(nestedCtx map[string]any) (bool, error) {
+	return s.EvalWithProfile(nestedCtx, vm.NumericDefault)
+}
+
+// EvalWithProfile is Eval under the given numeric profile.
+func (s *CompiledSegment) EvalWithProfile(nestedCtx map[string]any, profile vm.NumericProfile) (bool, error) {
 	if s == nil || s.Ruleset == nil {
 		return false, nil
 	}
 	sp := vm.NewStringPool(s.Ruleset.Constants.Strings())
 	dc := vm.DataFromMap(nestedCtx, sp)
-	matched, err := vm.EvalWithPool(s.Ruleset, dc, sp)
+	prepared, err := vm.NewPreparedEvaluator(s.Ruleset, sp, nil)
+	if err != nil {
+		return false, err
+	}
+	prepared.SetNumericProfile(profile)
+	matched, err := prepared.Eval(dc)
 	if err != nil {
 		return false, err
 	}

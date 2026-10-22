@@ -25,6 +25,9 @@ func (s *Session) Run(ctx context.Context) (Result, error) {
 		s.stopReason = StopQuiescent
 		return s.snapshot(), nil
 	}
+	// Each Run is one request with its own instruction budget. Without this the
+	// budget accumulates across Run calls on a long-lived session.
+	s.evaluator.ResetBudget()
 	forceFullEval := s.prepareRun()
 	if s.shouldReuseQuiescentSnapshot(forceFullEval) {
 		return s.snapshot(), nil
@@ -265,7 +268,8 @@ func (s *Session) applyMatchedRule(round int, rule Rule, match vm.MatchedRule, t
 
 func (s *Session) clearInactiveEvaluatedMutations(evaluated map[string]struct{}, active activeRoundMutations) bool {
 	mutated := false
-	for ruleName := range evaluated {
+	// Sorted so recomputation order does not depend on map order.
+	for _, ruleName := range sortedKeys(evaluated) {
 		rule, ok := s.program.lookupRule(ruleName)
 		if !ok {
 			continue
