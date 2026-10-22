@@ -13,9 +13,15 @@
 - **Deterministic expert sessions.** The engine ranged over Go maps when it built fact lists, ran per-fact rules and cleared stale mutations, so aggregate sums, `any` bindings and outcome order changed between runs. Those paths now sort by fact key, rule name or instance. In a 2,400-fact corpus, 20 runs gave 20 different digests before the fix and one after.
 - **Fused multiply-add.** Products and quotients in the VM and in constant folding are wrapped in `float64(...)`, so arm64 cannot fuse them into a later add.
 
+- **Expert session instruction budget.** `Session.Run` now resets the evaluator's instruction budget (`vm.Evaluator.ResetBudget`). Before, a long-lived session accumulated it across `Run` calls: with 1,000 facts, an `Assert` then `Run` loop failed at tick 261 with "instruction limit exceeded".
+- **Arm64 fused multiply-add in unit normalization.** `units.Normalize` computed `value*ToBase + Offset` as one `FMADDD` on arm64, so `56 F` differed from amd64 and wasm. `scripts/check-no-fma.sh` (`make fma-check`, and a CI step) now fails on any fused multiply-add in Arbiter code in the arm64 build.
+- **Out-of-range float to int64 conversions.** Constant folding of `%` uses `math.Mod` like the VM (it used `int64`, which gave different results per architecture and panicked on `(7) % (0.5)`). A duration of about 106,751 days or more is a compile error. A timestamp field that is NaN, infinite or at least 2^63 is rejected, and `__now` outside +/-2^62 seconds is ignored.
+- **Canonical NaN.** NaN results of arithmetic are replaced by `math.NaN()`, so amd64 and arm64 give the same bits.
+- **Integer profile gaps.** The bound is 2^53 - 1. Inputs, local variables, iterator items and table cells are checked when loaded, so an out-of-range `int64` or a value that is only passed through is rejected. Segments run under the expert session's profile. `per_fact` rules return integer-profile errors. `count` ignores item values. `round(a / b)` is exact for large operands. The static check covers table cells, attributes list-literal findings to their rule, warns on string operands, and reports each finding once. `arbiter check` accepts `--numeric-profile=integer` and rejects unknown flags.
+
 ### Changed
 
-- **Precompiled program format version 2.** The metadata JSON now uses explicit lower-case snake_case tags on `expert.Rule`, `ir.FactSchema`, `ir.OutcomeSchema` and the types they contain, so renaming a Go field no longer changes the bytes. `programFormatVersion` is 2, and a golden test (`expert/codec_golden_test.go`) fails when the metadata encoding changes without a version bump. Version 1 programs are rejected.
+- **Precompiled program format version 2.** The metadata JSON now uses explicit lower-case snake_case tags on `expert.Rule`, `ir.FactSchema`, `ir.OutcomeSchema` and the types they contain, so renaming a Go field no longer changes the bytes. `programFormatVersion` is 2, and a golden test (`expert/codec_golden_test.go`) pins the metadata JSON and the SHA-256 of the whole blob (including the rule and segment wire bundles) per format version, and fails when the encoding changes without a version bump. Version 1 programs are rejected.
 
 ## [1.11.0] — 2026-09-23
 

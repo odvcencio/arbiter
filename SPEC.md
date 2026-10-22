@@ -365,39 +365,64 @@ match exactly in arithmetic.
 **Cross-target determinism.** Rule evaluation gives bit-identical results on
 amd64, arm64 and js/wasm. The implementation guarantees this as follows:
 
-- Every product and quotient the VM computes (`*`, `/`, `avg`, and constant
-  folding) is wrapped in an explicit `float64(...)` conversion. The Go spec says
-  this rounds the value and prevents the compiler from fusing it into a later
-  add (an FMA instruction on arm64, never on wasm).
-- `%` on floats calls `math.Mod`. In Go 1.26 `math/mod.go` is pure Go and
-  `math/stubs.go` sets `haveArchMod = false` on every GOARCH, so no target has
-  an assembly path.
+- Every product and quotient the VM computes (`*`, `/`, `avg`), constant
+  folding, and unit normalization (`value*ToBase + Offset`) is wrapped in an
+  explicit `float64(...)` conversion. The Go spec says this rounds the value and
+  prevents the compiler from fusing it into a later add (an FMA instruction on
+  arm64, never on wasm). `scripts/check-no-fma.sh` (`make fma-check`, and a CI
+  step) builds for arm64, disassembles, and fails on any `FMADD`, `FMSUB`,
+  `FNMADD` or `FNMSUB` in an Arbiter function. The gRPC token-bucket limiter is
+  the one allowlisted function; it never feeds rule evaluation.
+- `%` on floats calls `math.Mod`, and constant folding of `%` uses it too. In
+  Go 1.25.9 (the module's `go` line is 1.25) and 1.26.0, `math/mod.go` is pure Go
+  and `math/stubs.go` sets `haveArchMod = false` on every GOARCH, so no target
+  has an assembly path.
+- A NaN result of `+ - * / %` or a sum is replaced by `math.NaN()`, because the
+  hardware NaN bits differ (amd64 `0xfff8...`, arm64 `0x7ff8...`).
+- Converting a float64 outside the int64 range to an integer is
+  implementation-defined (it wraps on amd64 and wasm and saturates on arm64).
+  The engine therefore rejects such values: a duration of 2^63 ns (about
+  106,751 days) or more fails at compile time, a timestamp field that is NaN,
+  infinite or at least 2^63 in magnitude is rejected, and an `__now` outside
+  +/-2^62 seconds is ignored.
 - The expert engine never lets Go map order reach a result. Fact lists given to
-  `any`/`all`/`none` quantifiers and aggregates are sorted by fact key, so
-  float sums add in one fixed order and an `any` quantifier binds the same
-  item. Per-fact rules, sync, retraction and support clean-up also run in sorted
+  `any`/`all`/`none` quantifiers and aggregates are sorted by fact key, so float
+  sums add in one fixed order and an `any` quantifier binds the same item.
+  Per-fact rules, sync, retraction and support clean-up also run in sorted
   order.
+- Each `Session.Run` starts with a fresh instruction budget. (Earlier versions
+  accumulated it across calls and failed with "instruction limit exceeded" on a
+  long-lived session.)
 
-`scripts/parity.sh` (`make parity`) checks this: it runs a fixed corpus on
-amd64 `GOAMD64=v1` and `v3`, js/wasm and native arm64, and fails unless all
-digests match.
+`scripts/parity.sh` (`make parity`) checks this: it runs a fixed corpus
+(stateless integer and float rules, quantity literals and inputs in every
+built-in unit, constant `%` folds, tables, segments, durations, timestamp
+fields, per_fact rules, and expert sessions with 2,000 or more facts) on amd64
+`GOAMD64=v1` and `v3`, js/wasm and native arm64, and fails unless all digests
+match.
 
 **Integer numeric profile.** The default profile is IEEE float64 (section 3.1).
 A host that wants an arithmetic guarantee, not a convention, opts in to the
-integer profile. It has a static check and a runtime guard.
+integer profile. It has a static check and a runtime guard. The largest
+magnitude both accept is 2^53 - 1: every integer up to it is exact in float64,
+and rounding any larger integer to float64 gives a value above it, so an
+inexact input is always caught.
 
 *Static check.* `compiler.CheckIntegerProfile(rs)` and
-`arbiter check <file.arb> --numeric-profile integer` (which also checks
-segments and expert rules; `expert.Program.NumericProfileViolations` does the
-same for a loaded program) work on the compiled bytecode and report these
-violations:
+`arbiter check <file.arb> --numeric-profile integer` (also `=integer`; unknown
+flags are rejected) work on the compiled bytecode, including segments and expert
+rules. `expert.Program.NumericProfileViolations` does the same for a loaded
+program. They report these violations:
 
-1. An `OpLoadNum` constant, or a number inside a list literal, that is not an
-   exact integer with |v| <= 2^53.
-2. Any `OpLoadDec` constant or decimal inside a list literal. Decimal and
-   quantity literals are therefore rejected.
+1. An `OpLoadNum` constant, a number in a list literal, or a number in a table
+   cell that is not an exact integer with |v| <= 2^53 - 1.
+2. Any `OpLoadDec` constant, or a decimal in a list literal or table cell.
+   Decimal and quantity literals are therefore rejected.
 3. An `OpDiv`, or an `OpAggEnd` that computes `avg`, whose next instruction is
    not `OpFloor`, `OpCeil` or `OpRound`.
+
+It also warns (without failing) when a string literal feeds `+`, `min` or `max`,
+because those are errors at run time under the profile.
 
 Rule 3 is exact for postfix bytecode. The quotient is on top of the value stack
 right after `OpDiv`. The next instruction either consumes it or pushes another
@@ -407,28 +432,33 @@ can use the quotient first. `floor(a / b)` passes. `floor(a / b + 1)`,
 literals into one literal. A fractional constant quotient such as `floor(7 / 2)`
 therefore fails rule 1; write the dividend or divisor as a field instead.
 
-*Runtime guard.* `vm.NumericInteger`, set with `SetNumericProfile` on
-`vm.NewPreparedEvaluator`'s result or on `vm.NewEvaluator`'s result, or with
-`expert.Options.NumericProfile`, makes each math opcode check its operands and
-result:
+*Runtime guard.* `vm.NumericInteger`, set with `SetNumericProfile` on the
+result of `vm.NewPreparedEvaluator` or `vm.NewEvaluator`, or with
+`expert.Options.NumericProfile` (which also applies to segments), checks:
 
-- `+ - * % abs min max` and each `sum` item need operands that are exact
-  integers with |v| <= 2^53, and the result must also be in that range. Sums
-  and products are computed in exact integer arithmetic, so a product of
-  2^53 + 1 is an error and is never rounded down to 2^53.
-- `/` needs integer operands. A zero divisor is an error. The quotient may be
-  fractional (IEEE division is correctly rounded on every target), and only
-  `floor`, `ceil` and `round` accept a fractional operand. For |a|, |b| <= 2^53,
-  `floor(a / b)` equals integer floor division.
-- `%` with a zero divisor is an error. The result takes the sign of the
-  dividend.
-- A null, string, boolean or decimal operand is an error.
+- **Loads.** Every number read from the data context, a local variable, an
+  iterator item or a table cell must be an exact integer with
+  |v| <= 2^53 - 1. A larger `int64`, `uint64` or `json.Number` is rejected
+  instead of being rounded. This also covers an input that a rule only passes
+  through to an action parameter.
+- **Operations.** `+ - * % abs min max` and each `sum` item need integer
+  operands, and the result must be in range. Sums and products use exact
+  integer arithmetic, so a product of 2^53 + 1 is an error and is never rounded
+  down. `count` ignores the item values.
+- **Division.** `/` and `avg` need integer operands, and a zero divisor is an
+  error. The result is the exact rational n/d. `floor`, `ceil` and `round`
+  applied directly to it use integer arithmetic (`round` rounds half away from
+  zero), so `round(6755399441055745 / 4503599627370497)` is 1. Any other use of a
+  fractional quotient in arithmetic is an error.
+- **Other operands.** `%` with a zero divisor is an error. A null, string,
+  boolean or decimal operand of an arithmetic operator is an error.
 - Errors carry the text `integer profile:` and abort the evaluation like any
-  other runtime error. No NaN or Inf result is produced.
+  other runtime error. In `per_fact` rules the error is returned to the caller
+  and the fact is not skipped. No NaN or Inf result is produced.
 
-The runtime guard does not inspect comparisons or the values a rule only
-passes through, so a host that needs the whole guarantee also requires an empty
-static check result.
+Comparisons of two already-checked values and boolean logic need no extra check.
+A host that needs the whole guarantee uses the runtime guard and also requires
+an empty static-check result (warnings aside).
 
 ---
 
