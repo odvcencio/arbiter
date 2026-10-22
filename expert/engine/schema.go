@@ -58,7 +58,8 @@ func normalizeFactFields(schema *ir.FactSchema, fields map[string]any, requireAl
 	}
 	normalized := make(map[string]any, len(fields))
 	seen := make(map[string]struct{}, len(fields))
-	for name, value := range fields {
+	for _, name := range sortedKeys(fields) {
+		value := fields[name]
 		if name == "key" {
 			continue
 		}
@@ -92,7 +93,8 @@ func normalizeOutcomeFields(schema *ir.OutcomeSchema, fields map[string]any) (ma
 	}
 	normalized := make(map[string]any, len(fields))
 	seen := make(map[string]struct{}, len(fields))
-	for name, value := range fields {
+	for _, name := range sortedKeys(fields) {
+		value := fields[name]
 		field, ok := runtimeOutcomeField(schema, name)
 		if !ok {
 			return nil, fmt.Errorf("outcome %s: unknown field %q", schema.Name, name)

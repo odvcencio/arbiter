@@ -331,9 +331,12 @@ func normalizeSyncFacts(facts []Fact) (map[string]map[string]Fact, error) {
 
 func (s *Session) applyIncomingSyncFacts(incoming map[string]map[string]Fact) (SyncSummary, error) {
 	var summary SyncSummary
-	for factType, byKey := range incoming {
+	// Sorted so the upsert order (and with it dirty marks and counters) does not depend on map order.
+	for _, factType := range sortedKeys(incoming) {
+		byKey := incoming[factType]
 		currentByKey := s.externalFacts[factType]
-		for factKey, fact := range byKey {
+		for _, factKey := range sortedKeys(byKey) {
+			fact := byKey[factKey]
 			current, exists := currentByKey[factKey]
 			changed, err := s.upsertExternalFact(fact)
 			if err != nil {
@@ -353,9 +356,11 @@ func (s *Session) applyIncomingSyncFacts(incoming map[string]map[string]Fact) (S
 }
 
 func (s *Session) retractMissingSyncFacts(incoming map[string]map[string]Fact, summary *SyncSummary) error {
-	for factType, byKey := range s.externalFacts {
+	// Sorted so retraction order does not depend on map order. retractLocked
+	// mutates s.externalFacts, so the key lists are taken before it runs.
+	for _, factType := range sortedKeys(s.externalFacts) {
 		nextByKey := incoming[factType]
-		for factKey := range byKey {
+		for _, factKey := range sortedKeys(s.externalFacts[factType]) {
 			if _, ok := nextByKey[factKey]; ok {
 				continue
 			}
@@ -700,7 +705,8 @@ func (s *Session) clearInactiveDerivedSupports(ruleName string, active map[strin
 		return false
 	}
 	changed := false
-	for instance, record := range records {
+	for _, instance := range sortedKeys(records) {
+		record := records[instance]
 		if _, ok := active[instance]; ok {
 			continue
 		}
@@ -828,6 +834,7 @@ func (s *Session) winningSupport(factType, factKey string) (supportRecord, bool)
 	}
 	var winner supportRecord
 	set := false
+	// Order-independent: the comparison is a strict total order on (priority, rule, instance).
 	for _, record := range supporters {
 		if !set ||
 			record.Priority > winner.Priority ||
@@ -849,6 +856,7 @@ func (s *Session) supporterNames(factType, factKey string) []string {
 	if !ok || len(supporters) == 0 {
 		return nil
 	}
+	// Order-independent: the result is sorted below.
 	seen := make(map[string]struct{}, len(supporters))
 	out := make([]string, 0, len(supporters))
 	for _, record := range supporters {
@@ -894,6 +902,7 @@ func (s *Session) applyModificationsExcludingRule(factType, factKey string, fiel
 		out = make(map[string]any)
 	}
 	for _, record := range sortedModifications(records, ruleName, kind) {
+		// Order-independent: distinct keys write distinct map entries.
 		for key, value := range record.SetFields {
 			out[key] = value
 		}
@@ -910,14 +919,17 @@ func (s *Session) evalContextIgnoringOwnMutation(rule Rule) (map[string]any, vm.
 		return nil, nil, false, nil
 	}
 	factsView := make(map[string]any, len(s.factsView))
+	// Order-independent: map copy.
 	for key, value := range s.factsView {
 		factsView[key] = value
 	}
 	for factType, factKeys := range targets {
 		replaced := make(map[string]Fact)
+		// Order-independent: map copy.
 		for key, fact := range s.facts[factType] {
 			replaced[key] = cloneFact(fact)
 		}
+		// Order-independent: each key updates its own map entry.
 		for factKey := range factKeys {
 			tempFact, ok := s.desiredFactExcludingRule(factType, factKey, rule.Name, rule.Kind)
 			if ok {
@@ -930,10 +942,8 @@ func (s *Session) evalContextIgnoringOwnMutation(rule Rule) (map[string]any, vm.
 			delete(factsView, factType)
 			continue
 		}
-		items := make([]any, 0, len(replaced))
-		for _, fact := range replaced {
-			items = append(items, factEvalFields(fact, s.evalNow))
-		}
+		// Sorted by fact key: list order reaches aggregates and quantifier bindings.
+		items := factViewItems(replaced, s.evalNow)
 		factsView[factType] = items
 	}
 
@@ -1039,7 +1049,8 @@ func (s *Session) clearInactiveRetractions(ruleName string, active map[string]st
 		return false
 	}
 	changed := false
-	for instance, record := range records {
+	for _, instance := range sortedKeys(records) {
+		record := records[instance]
 		if _, ok := active[instance]; ok {
 			continue
 		}
@@ -1115,7 +1126,8 @@ func (s *Session) clearInactiveModifications(ruleName string, active map[string]
 		return false
 	}
 	changed := false
-	for instance, record := range records {
+	for _, instance := range sortedKeys(records) {
+		record := records[instance]
 		if _, ok := active[instance]; ok {
 			continue
 		}
@@ -1207,6 +1219,7 @@ type roundState struct {
 func (s *Session) newRoundState() roundState {
 	rc := govern.NewRequestCache(s.program.segments, s.evalCtx)
 	current := make(map[string]bool, len(s.ruleResults)+len(s.program.rules))
+	// Order-independent: copies each entry into maps keyed by rule name.
 	for name, matched := range s.ruleResults {
 		rc.RecordRuleResult(name, matched)
 		current[name] = matched
@@ -1247,6 +1260,7 @@ func (s *Session) ruleEvalInputs(rule Rule, current map[string]bool, rc *govern.
 	}
 
 	ruleRC = govern.NewRequestCache(s.program.segments, tempCtx)
+	// Order-independent: records one result per distinct rule name.
 	for name, matched := range current {
 		ruleRC.RecordRuleResult(name, matched)
 	}
@@ -1283,7 +1297,9 @@ func (s *Session) evalPerFact(rule Rule, header compiler.RuleHeader, evaluator *
 	}
 
 	var results []vm.MatchedRule
-	for _, fact := range factsOfType {
+	// Sorted by fact key: match order decides action application order.
+	for _, key := range sortedKeys(factsOfType) {
+		fact := factsOfType[key]
 		// Build a temporary context with this single fact as the only fact of its type
 		tempCtx := s.buildSingleFactContext(factType, fact)
 		tempDC := vm.DataFromMap(tempCtx, s.pool)
@@ -1785,8 +1801,9 @@ func (s *Session) refreshFactView(factType string) {
 
 func factViewItems(byKey map[string]Fact, now int64) []any {
 	items := make([]any, 0, len(byKey))
-	for _, fact := range byKey {
-		items = append(items, factEvalFields(fact, now))
+	// Sorted by fact key: list order reaches float sums, quantifier bindings and traces.
+	for _, key := range sortedKeys(byKey) {
+		items = append(items, factEvalFields(byKey[key], now))
 	}
 	return items
 }
