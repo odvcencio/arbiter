@@ -1,6 +1,8 @@
 package overrides
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -131,6 +133,49 @@ func TestStorePersistenceStatusTracksHealth(t *testing.T) {
 	status := store.PersistenceStatus()
 	if status.Healthy || status.ErrorsTotal != 1 || status.LastError == "" || status.LastErrorAt.IsZero() {
 		t.Fatalf("expected failed persistence status, got %+v", status)
+	}
+}
+
+func TestStoreNotifiesSubscriberAfterPersistenceRetry(t *testing.T) {
+	store := NewStore()
+	path := filepath.Join(t.TempDir(), "overrides.json")
+	if err := store.UseFile(path); err != nil {
+		t.Fatal(err)
+	}
+	_, events, cancel := store.Subscribe("bundle")
+	defer cancel()
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setRule := func() error {
+		kill := true
+		return store.SetRule("bundle", "Review", RuleOverride{KillSwitch: &kill})
+	}
+	if err := setRule(); err == nil {
+		t.Fatal("write to directory unexpectedly succeeded")
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("failed write notified subscriber: %+v", event)
+	default:
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := setRule(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != OverrideEventRule || event.RuleName != "Review" || event.Rule.KillSwitch == nil || !*event.Rule.KillSwitch {
+			t.Fatalf("unexpected retry event: %+v", event)
+		}
+	default:
+		t.Fatal("successful retry did not notify subscriber")
 	}
 }
 

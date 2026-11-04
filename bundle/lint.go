@@ -106,9 +106,9 @@ func Analyze(rs *compiler.CompiledRuleset, policySource []byte) (AnalyzeResult, 
 			},
 		}
 		dc := arbiter.DataFromMap(ctx, policyProg)
-		matched, err := arbiter.Eval(policyProg, dc)
+		matched, _, err := arbiter.EvalGoverned(policyProg, dc, policyProg.Segments, ctx)
 		if err != nil {
-			continue
+			return result, fmt.Errorf("evaluate edge export policy for %s: %w", sig.Kind, err)
 		}
 		for _, m := range matched {
 			reason, _ := m.Params["reason"].(string)

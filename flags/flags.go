@@ -362,6 +362,19 @@ func (f *Flags) VariantWithOverrides(bundleID, flag string, ctx map[string]any, 
 
 // ExplainWithOverrides resolves a flag with explainability and runtime overrides.
 func (f *Flags) ExplainWithOverrides(bundleID, flag string, ctx map[string]any, view overrides.View) FlagEvaluation {
+	return f.explain(flag, govern.NewRequestCache(f.segments, ctx), bundleID, view)
+}
+
+// ExplainDecision resolves a flag and its prerequisites using one snapshot.
+func (f *Flags) ExplainDecision(flag string, decision govern.DecisionSnapshot) FlagEvaluation {
+	if decision.EvalTime().IsZero() {
+		return FlagEvaluation{Flag: flag, IsDefault: true, Reason: "missing decision snapshot"}
+	}
+	bundleID, view := decision.Overrides()
+	return f.explain(flag, decision.RequestCache(f.segments), bundleID, view)
+}
+
+func (f *Flags) explain(flag string, rc *govern.RequestCache, bundleID string, view overrides.View) FlagEvaluation {
 	start := time.Now()
 
 	f.mu.RLock()
@@ -378,7 +391,6 @@ func (f *Flags) ExplainWithOverrides(bundleID, flag string, ctx map[string]any, 
 	}
 
 	trace := &govern.Arbitrace{}
-	rc := govern.NewRequestCache(f.segments, ctx)
 	name := f.evalVariantName(def, rc, trace, bundleID, view)
 
 	return FlagEvaluation{

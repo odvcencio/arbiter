@@ -43,12 +43,12 @@ func repl(prog *arbiter.Program, in io.Reader, out io.Writer) error {
 		if line == "exit" || line == "quit" {
 			break
 		}
-		dc, err := arbiter.DataFromJSON(line, prog)
-		if err != nil {
+		var ctx map[string]any
+		if err := json.Unmarshal([]byte(line), &ctx); err != nil {
 			fmt.Fprintf(out, "error: %v\n", err)
 			continue
 		}
-		matched, err := arbiter.Eval(prog, dc)
+		matched, _, err := arbiter.EvalGoverned(prog, arbiter.DataFromMap(ctx, prog), prog.Segments, ctx)
 		if err != nil {
 			fmt.Fprintf(out, "error: %v\n", err)
 			continue

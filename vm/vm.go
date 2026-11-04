@@ -153,7 +153,9 @@ func evalWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) 
 	return EvalWithTagFilter(rs, dc, sp, nil)
 }
 
-// EvalWithTagFilter evaluates using the provided tag filter.
+// EvalWithTagFilter evaluates bytecode using the provided tag filter and active
+// windows. It skips other governance gates. Use the root package's EvalGoverned
+// for policy decisions that depend on those gates.
 func EvalWithTagFilter(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool, tags []string) ([]MatchedRule, error) {
 	if rs == nil {
 		return nil, fmt.Errorf("nil ruleset")

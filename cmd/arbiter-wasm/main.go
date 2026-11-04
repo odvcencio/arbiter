@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -48,8 +49,8 @@ func main() {
 // --- Compilation ---
 
 var (
-	compiled   *arbiter.Program
-	expertProg *expert.Program
+	compiled      *arbiter.Program
+	expertProg    *expert.Program
 	lastSource    []byte
 	bundleRuleset *compiler.CompiledRuleset // set by loadBundle
 )
@@ -103,7 +104,6 @@ func loadBundle(_ js.Value, args []js.Value) any {
 	})
 }
 
-
 // activeRuleset returns whichever ruleset is loaded (bundle or compiled).
 func activeRuleset() *compiler.CompiledRuleset {
 	if bundleRuleset != nil {
@@ -125,12 +125,21 @@ func eval(_ js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return jsError("eval requires JSON context string")
 	}
-	sp := vm.NewStringPool(rs.Constants.Strings())
-	dc, err := vm.DataFromJSON(args[0].String(), sp)
+	prog := compiled
+	if bundleRuleset != nil {
+		prog = &arbiter.Program{Ruleset: rs}
+	}
+	dc, err := arbiter.DataFromJSON(args[0].String(), prog)
 	if err != nil {
 		return jsError(err.Error())
 	}
-	matched, err := vm.EvalWithPool(rs, dc, sp)
+	matched, err := arbiter.Eval(prog, dc)
+	if errors.Is(err, arbiter.ErrGovernanceRequired) {
+		if bundleRuleset != nil {
+			return jsError("bundle requires governance; call arbiterCompile with policy source, then arbiterEvalGoverned")
+		}
+		return jsError("rule requires governance; call arbiterEvalGoverned")
+	}
 	if err != nil {
 		return jsError(err.Error())
 	}

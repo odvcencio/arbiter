@@ -298,16 +298,13 @@ func (s *Store) SetRule(bundleID, ruleName string, ov RuleOverride) error {
 		rules = make(map[string]RuleOverride)
 		s.rules[bundleID] = rules
 	}
-	if current, ok := rules[ruleName]; !ok || current != ov {
-		changed = true
-	}
-	rules[ruleName] = ov
+	rules[ruleName] = cloneRuleOverride(ov)
 	return s.persistAndNotifyLocked(OverrideEvent{
 		Type:     OverrideEventRule,
 		BundleID: bundleID,
 		RuleName: ruleName,
 		Rule:     cloneRuleOverride(ov),
-	}, changed)
+	}, true)
 }
 
 // SetFlag stores or clears a flag override.
@@ -337,16 +334,13 @@ func (s *Store) SetFlag(bundleID, flagKey string, ov FlagOverride) error {
 		flags = make(map[string]FlagOverride)
 		s.flags[bundleID] = flags
 	}
-	if current, ok := flags[flagKey]; !ok || current != ov {
-		changed = true
-	}
-	flags[flagKey] = ov
+	flags[flagKey] = cloneFlagOverride(ov)
 	return s.persistAndNotifyLocked(OverrideEvent{
 		Type:     OverrideEventFlag,
 		BundleID: bundleID,
 		FlagKey:  flagKey,
 		Flag:     cloneFlagOverride(ov),
-	}, changed)
+	}, true)
 }
 
 // SetFlagRule stores or clears a flag rule override.
@@ -387,17 +381,14 @@ func (s *Store) SetFlagRule(bundleID, flagKey string, ruleIndex int, ov FlagRule
 		rules = make(map[int]FlagRuleOverride)
 		flags[flagKey] = rules
 	}
-	if current, ok := rules[ruleIndex]; !ok || current != ov {
-		changed = true
-	}
-	rules[ruleIndex] = ov
+	rules[ruleIndex] = cloneFlagRuleOverride(ov)
 	return s.persistAndNotifyLocked(OverrideEvent{
 		Type:      OverrideEventFlagRule,
 		BundleID:  bundleID,
 		FlagKey:   flagKey,
 		RuleIndex: ruleIndex,
 		FlagRule:  cloneFlagRuleOverride(ov),
-	}, changed)
+	}, true)
 }
 
 // SetStrategy stores or clears a strategy-candidate override.
@@ -438,17 +429,14 @@ func (s *Store) SetStrategy(bundleID, strategyName, candidateLabel string, ov St
 		candidates = make(map[string]StrategyOverride)
 		strategies[strategyName] = candidates
 	}
-	if current, ok := candidates[candidateLabel]; !ok || current != ov {
-		changed = true
-	}
-	candidates[candidateLabel] = ov
+	candidates[candidateLabel] = cloneStrategyOverride(ov)
 	return s.persistAndNotifyLocked(OverrideEvent{
 		Type:           OverrideEventStrategy,
 		BundleID:       bundleID,
 		StrategyName:   strategyName,
 		CandidateLabel: candidateLabel,
 		Strategy:       cloneStrategyOverride(ov),
-	}, changed)
+	}, true)
 }
 
 // Rule returns a rule override if present.
@@ -460,7 +448,7 @@ func (s *Store) Rule(bundleID, ruleName string) (RuleOverride, bool) {
 		return RuleOverride{}, false
 	}
 	ov, ok := rules[ruleName]
-	return ov, ok
+	return cloneRuleOverride(ov), ok
 }
 
 // Flag returns a flag override if present.
@@ -472,7 +460,7 @@ func (s *Store) Flag(bundleID, flagKey string) (FlagOverride, bool) {
 		return FlagOverride{}, false
 	}
 	ov, ok := flags[flagKey]
-	return ov, ok
+	return cloneFlagOverride(ov), ok
 }
 
 // FlagRule returns a flag rule override if present.
@@ -488,7 +476,7 @@ func (s *Store) FlagRule(bundleID, flagKey string, ruleIndex int) (FlagRuleOverr
 		return FlagRuleOverride{}, false
 	}
 	ov, ok := rules[ruleIndex]
-	return ov, ok
+	return cloneFlagRuleOverride(ov), ok
 }
 
 // Strategy returns a strategy-candidate override if present.
@@ -504,7 +492,7 @@ func (s *Store) Strategy(bundleID, strategyName, candidateLabel string) (Strateg
 		return StrategyOverride{}, false
 	}
 	ov, ok := candidates[candidateLabel]
-	return ov, ok
+	return cloneStrategyOverride(ov), ok
 }
 
 // Snapshot returns a deep copy of the current override store.

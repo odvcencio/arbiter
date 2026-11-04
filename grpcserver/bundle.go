@@ -213,26 +213,37 @@ func NewFileRegistry(path string) (*Registry, error) {
 
 // UseFile enables file-backed persistence for bundle state.
 func (r *Registry) UseFile(path string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if path == "" {
-		r.mu.Lock()
 		r.path = ""
-		r.mu.Unlock()
 		r.persistence.Configure(false, false, "")
 		return nil
 	}
-	r.persistence.Configure(true, true, path)
-	if err := r.loadFileIfExists(path); err != nil {
+	if r.path == "" {
+		r.persistence.Configure(true, true, path)
+	}
+
+	snapshot, bundles, err := readRegistrySnapshot(path)
+	if err != nil {
 		r.persistence.RecordError(time.Now().UTC(), err)
 		return err
 	}
-	r.mu.Lock()
+	if snapshot == nil {
+		current := r.snapshotLocked()
+		snapshot = &current
+	}
+	if err := saveRegistrySnapshot(path, *snapshot); err != nil {
+		r.persistence.RecordError(time.Now().UTC(), err)
+		return err
+	}
+	if bundles != nil {
+		r.bundles = bundles
+		r.history = snapshot.History
+		r.active = snapshot.Active
+	}
 	r.path = path
-	snapshot := r.snapshotLocked()
-	r.mu.Unlock()
-	if err := saveRegistrySnapshot(path, snapshot); err != nil {
-		r.persistence.RecordError(time.Now().UTC(), err)
-		return err
-	}
+	r.persistence.Configure(true, true, path)
 	r.persistence.RecordSuccess(time.Now().UTC())
 	return nil
 }
@@ -261,22 +272,14 @@ func (r *Registry) Publish(name string, source []byte) (*Bundle, error) {
 	}
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	if existing, ok := r.bundles[bundle.ID]; ok {
-		r.mu.Unlock()
 		return existing, nil
 	}
-	r.bundles[bundle.ID] = bundle
-	if !slices.Contains(r.history[bundle.Name], bundle.ID) {
-		r.history[bundle.Name] = append(r.history[bundle.Name], bundle.ID)
-	}
-	r.active[bundle.Name] = bundle.ID
-	snapshot := r.snapshotLocked()
-	r.mu.Unlock()
-
-	if err := r.persistSnapshot(snapshot); err != nil {
+	if _, _, _, err := r.installLocked(bundle, true); err != nil {
 		return nil, err
 	}
-	r.notify(bundleEvent{
+	r.notifyLocked(bundleEvent{
 		Type:   bundleEventPublished,
 		Bundle: bundle,
 	})
@@ -385,64 +388,67 @@ func (r *Registry) Install(bundle *Bundle, activate bool) (*Bundle, error) {
 		return nil, errors.New("bundle id and name are required")
 	}
 
-	published := false
-	activated := false
-
 	r.mu.Lock()
-	stored := bundle
-	if existing, ok := r.bundles[bundle.ID]; ok {
-		stored = existing
-	} else {
-		r.bundles[bundle.ID] = bundle
-		if !slices.Contains(r.history[bundle.Name], bundle.ID) {
-			r.history[bundle.Name] = append(r.history[bundle.Name], bundle.ID)
-		}
-		published = true
-	}
-	if activate && r.active[stored.Name] != stored.ID {
-		r.active[stored.Name] = stored.ID
-		activated = true
-	}
-	snapshot := r.snapshotLocked()
-	r.mu.Unlock()
-
-	if err := r.persistSnapshot(snapshot); err != nil {
+	defer r.mu.Unlock()
+	stored, published, activated, err := r.installLocked(bundle, activate)
+	if err != nil {
 		return nil, err
 	}
 	if published {
-		r.notify(bundleEvent{
-			Type:   bundleEventPublished,
-			Bundle: stored,
-		})
+		r.notifyLocked(bundleEvent{Type: bundleEventPublished, Bundle: stored})
 	}
 	if activated {
-		r.notify(bundleEvent{
-			Type:   bundleEventActivated,
-			Bundle: stored,
-		})
+		r.notifyLocked(bundleEvent{Type: bundleEventActivated, Bundle: stored})
 	}
 	return stored, nil
+}
+
+func (r *Registry) installLocked(bundle *Bundle, activate bool) (*Bundle, bool, bool, error) {
+	stored, exists := r.bundles[bundle.ID]
+	var added, active *Bundle
+	if !exists {
+		stored = bundle
+		added = bundle
+	}
+	if activate && r.active[stored.Name] != stored.ID {
+		active = stored
+	}
+	if err := r.persistChangeLocked(added, active); err != nil {
+		return nil, false, false, err
+	}
+	if added != nil {
+		r.bundles[added.ID] = added
+		r.history[added.Name] = appendBundleID(r.history[added.Name], added.ID)
+	}
+	if active != nil {
+		r.active[active.Name] = active.ID
+	}
+	return stored, added != nil, active != nil, nil
+}
+
+func appendBundleID(ids []string, id string) []string {
+	if slices.Contains(ids, id) {
+		return ids
+	}
+	return append(ids, id)
 }
 
 // Activate switches the active bundle for one bundle name.
 func (r *Registry) Activate(name, id string) (*Bundle, error) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	bundle, ok := r.bundles[id]
 	if !ok {
-		r.mu.Unlock()
 		return nil, fmt.Errorf("bundle %q not found", id)
 	}
 	if bundle.Name != name {
-		r.mu.Unlock()
 		return nil, fmt.Errorf("bundle %q belongs to %q, not %q", id, bundle.Name, name)
 	}
-	r.active[name] = id
-	snapshot := r.snapshotLocked()
-	r.mu.Unlock()
-	if err := r.persistSnapshot(snapshot); err != nil {
+	if err := r.persistChangeLocked(nil, bundle); err != nil {
 		return nil, err
 	}
-	r.notify(bundleEvent{
+	r.active[name] = id
+	r.notifyLocked(bundleEvent{
 		Type:   bundleEventActivated,
 		Bundle: bundle,
 	})
@@ -452,37 +458,24 @@ func (r *Registry) Activate(name, id string) (*Bundle, error) {
 // Rollback switches the active bundle to the previous published version.
 func (r *Registry) Rollback(name string) (*Bundle, *Bundle, error) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	history := r.history[name]
-	if len(history) < 2 {
-		r.mu.Unlock()
-		return nil, nil, fmt.Errorf("bundle %q has no previous version", name)
-	}
 	currentID := r.active[name]
-	currentPos := -1
-	for i, id := range history {
-		if id == currentID {
-			currentPos = i
-			break
-		}
-	}
+	currentPos := slices.Index(history, currentID)
 	if currentPos <= 0 {
-		r.mu.Unlock()
 		return nil, nil, fmt.Errorf("bundle %q has no previous version", name)
 	}
 	previousID := history[currentPos-1]
 	current := r.bundles[currentID]
 	previous := r.bundles[previousID]
 	if previous == nil {
-		r.mu.Unlock()
 		return nil, nil, fmt.Errorf("previous bundle %q not found", previousID)
 	}
-	r.active[name] = previousID
-	snapshot := r.snapshotLocked()
-	r.mu.Unlock()
-	if err := r.persistSnapshot(snapshot); err != nil {
+	if err := r.persistChangeLocked(nil, previous); err != nil {
 		return nil, nil, err
 	}
-	r.notify(bundleEvent{
+	r.active[name] = previousID
+	r.notifyLocked(bundleEvent{
 		Type:             bundleEventRolledBack,
 		Bundle:           previous,
 		PreviousBundleID: currentID,
@@ -583,15 +576,9 @@ func listBundlesLocked(bundles map[string]*Bundle, history map[string][]string, 
 	return out
 }
 
-func (r *Registry) notify(event bundleEvent) {
-	r.mu.RLock()
-	subscribers := make([]chan bundleEvent, 0, len(r.subscribers))
+// notifyLocked queues events in mutation order while holding the registry lock.
+func (r *Registry) notifyLocked(event bundleEvent) {
 	for _, ch := range r.subscribers {
-		subscribers = append(subscribers, ch)
-	}
-	r.mu.RUnlock()
-
-	for _, ch := range subscribers {
 		select {
 		case ch <- event:
 			continue
@@ -608,9 +595,18 @@ func (r *Registry) notify(event bundleEvent) {
 	}
 }
 
-func (r *Registry) persistSnapshot(snapshot registrySnapshot) error {
-	if r == nil || r.path == "" {
+// persistChangeLocked writes the next snapshot before exposing it to readers.
+func (r *Registry) persistChangeLocked(added, active *Bundle) error {
+	if r.path == "" || (added == nil && active == nil) {
 		return nil
+	}
+	snapshot := r.snapshotLocked()
+	if added != nil {
+		snapshot.Bundles = append(snapshot.Bundles, recordFromBundle(added))
+		snapshot.History[added.Name] = appendBundleID(snapshot.History[added.Name], added.ID)
+	}
+	if active != nil {
+		snapshot.Active[active.Name] = active.ID
 	}
 	err := saveRegistrySnapshot(r.path, snapshot)
 	now := time.Now().UTC()
@@ -637,13 +633,7 @@ func (r *Registry) snapshotLocked() registrySnapshot {
 		Active:  make(map[string]string, len(r.active)),
 	}
 	for _, bundle := range r.bundles {
-		out.Bundles = append(out.Bundles, bundleRecord{
-			ID:        bundle.ID,
-			Name:      bundle.Name,
-			Checksum:  bundle.Checksum,
-			Source:    append([]byte(nil), bundle.Source...),
-			Published: bundle.Published,
-		})
+		out.Bundles = append(out.Bundles, recordFromBundle(bundle))
 	}
 	for name, ids := range r.history {
 		out.History[name] = append([]string(nil), ids...)
@@ -654,38 +644,43 @@ func (r *Registry) snapshotLocked() registrySnapshot {
 	return out
 }
 
-func (r *Registry) loadFileIfExists(path string) error {
+func recordFromBundle(bundle *Bundle) bundleRecord {
+	return bundleRecord{
+		ID:        bundle.ID,
+		Name:      bundle.Name,
+		Checksum:  bundle.Checksum,
+		Source:    bundle.Source,
+		Published: bundle.Published,
+	}
+}
+
+func readRegistrySnapshot(path string) (*registrySnapshot, map[string]*Bundle, error) {
 	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, nil
+	}
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
+		return nil, nil, err
 	}
 	var snapshot registrySnapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return err
+		return nil, nil, err
 	}
 	bundles := make(map[string]*Bundle, len(snapshot.Bundles))
 	for _, record := range snapshot.Bundles {
 		bundle, err := compileBundleRecord(record)
 		if err != nil {
-			return fmt.Errorf("load bundle %s: %w", record.ID, err)
+			return nil, nil, fmt.Errorf("load bundle %s: %w", record.ID, err)
 		}
 		bundles[bundle.ID] = bundle
 	}
-	r.mu.Lock()
-	r.bundles = bundles
-	r.history = make(map[string][]string, len(snapshot.History))
-	for name, ids := range snapshot.History {
-		r.history[name] = append([]string(nil), ids...)
+	if snapshot.History == nil {
+		snapshot.History = make(map[string][]string)
 	}
-	r.active = make(map[string]string, len(snapshot.Active))
-	for name, id := range snapshot.Active {
-		r.active[name] = id
+	if snapshot.Active == nil {
+		snapshot.Active = make(map[string]string)
 	}
-	r.mu.Unlock()
-	return nil
+	return &snapshot, bundles, nil
 }
 
 func compileBundleRecord(record bundleRecord) (*Bundle, error) {
@@ -736,8 +731,29 @@ func saveRegistrySnapshot(path string, snapshot registrySnapshot) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	file, err := os.CreateTemp(dir, ".registry-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		if err := file.Chmod(info.Mode().Perm()); err != nil {
+			return err
+		}
+	}
+	if _, err := file.Write(data); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
 }

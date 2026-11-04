@@ -1,6 +1,9 @@
 package grpcserver
 
 import (
+	"fmt"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -129,5 +132,113 @@ func TestRegistryPersistenceStatusTracksHealth(t *testing.T) {
 	status := registry.PersistenceStatus()
 	if status.Healthy || status.ErrorsTotal != 1 || status.LastError == "" || status.LastErrorAt.IsZero() {
 		t.Fatalf("expected failed persistence status, got %+v", status)
+	}
+}
+
+func TestRegistryFailedWritesLeaveActiveRevisionAndWatchersUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	registry, err := NewFileRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := registry.Publish("checkout", []byte(bundleSourceV1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := registry.Publish("checkout", []byte(bundleSourceV2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextSource := []byte(`rule Decide { when { true } then Review {} }`)
+	next, err := BuildBundle("checkout", nextSource, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, cancel := registry.Subscribe()
+	defer cancel()
+	registry.path = t.TempDir() // A regular snapshot cannot replace this directory.
+
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"publish", func() error { _, err := registry.Publish("checkout", nextSource); return err }},
+		{"install", func() error { _, err := registry.Install(next, false); return err }},
+		{"activate", func() error { _, err := registry.Activate("checkout", first.ID); return err }},
+		{"rollback", func() error { _, _, err := registry.Rollback("checkout"); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.run(); err == nil {
+				t.Fatal("expected snapshot write to fail")
+			}
+			active, ok := registry.GetActive("checkout")
+			if !ok || active.ID != second.ID {
+				t.Fatalf("failed write changed active revision to %+v", active)
+			}
+			if _, ok := registry.Get(next.ID); ok {
+				t.Fatal("failed write published a candidate")
+			}
+			select {
+			case event := <-events:
+				t.Fatalf("failed write notified watchers: %+v", event)
+			default:
+			}
+		})
+	}
+
+	registry.path = path
+	published, err := registry.Publish("checkout", nextSource)
+	if err != nil || published.ID != next.ID {
+		t.Fatalf("publish retry failed: %+v, %v", published, err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != bundleEventPublished || event.Bundle.ID != next.ID {
+			t.Fatalf("wrong event after retry: %+v", event)
+		}
+	default:
+		t.Fatal("successful retry did not notify watchers")
+	}
+	reloaded, err := NewFileRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, ok := reloaded.GetActive("checkout"); !ok || active.ID != next.ID {
+		t.Fatalf("retry did not persist the active revision: %+v", active)
+	}
+}
+
+func TestRegistryConcurrentPublishesPersistSameState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	registry, err := NewFileRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workers sync.WaitGroup
+	for i := range 8 {
+		workers.Go(func() {
+			source := fmt.Appendf(nil, "rule Decide { when { true } then Review { revision: %d } }", i)
+			if _, err := registry.Publish("checkout", source); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	workers.Wait()
+	reloaded, err := NewFileRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _ := registry.GetActive("checkout")
+	persisted, ok := reloaded.GetActive("checkout")
+	if current == nil || !ok || persisted.ID != current.ID {
+		t.Fatalf("live and persisted active revisions differ: %+v / %+v", current, persisted)
+	}
+	for i := range 8 {
+		source := fmt.Appendf(nil, "rule Decide { when { true } then Review { revision: %d } }", i)
+		id := bundleIdentity("checkout", source)
+		if _, ok := reloaded.Get(id); !ok {
+			t.Errorf("persisted state lost concurrent revision %d", i)
+		}
 	}
 }

@@ -732,18 +732,28 @@ For stricter production behavior, use `arbiter.MiddlewareWithOptions` to supply 
 ### Go Library — Stateless Rules
 
 ```go
-prog, _ := arbiter.Compile(source)
-dc := arbiter.DataFromMap(data, prog)
-
-// Fast path — no governance
-matched, _ := arbiter.Eval(prog, dc)
-
-// Governed path — segments, kill switches, rollouts, prerequisites, arbitrace
-matched, arbitrace, _ := arbiter.EvalGoverned(prog, dc, prog.Segments, ctx)
-
-// Selective evaluation — filter by tags
-matched, _ = arbiter.Eval(prog, dc, arbiter.WithTags("fraud"))
+prog, err := arbiter.Compile(source)
+if err != nil {
+    return err
+}
+dc := arbiter.DataFromMap(ctx, prog)
+matched, arbitrace, err := arbiter.EvalGoverned(
+    prog, dc, prog.Segments, ctx, arbiter.WithTags("fraud"),
+)
 ```
+
+Use `Eval` or `EvalDebug` for ordinary rules. Both enforce active windows and
+return `ErrGovernanceRequired` if a selected rule declares a segment, kill
+switch, rollout, prerequisite, or exclusion. The low-level `vm` package
+provides bytecode evaluation for hosts that implement their own governance.
+
+For stateless decisions with one set of facts, clock, and overrides, use
+`govern.NewDecisionSnapshot(facts, evaluationTime, bundleID, store)`. Pass the
+snapshot to `arbiter.EvalDecision`, `prog.Strategies.EvaluateDecision`, or
+`flags.ExplainDecision`. The host supplies the evaluation time. The snapshot
+copies JSON-shaped facts, overlays dotted keys onto nested facts, and reserves
+`__now` for its UTC timestamp. The gRPC stateless endpoints use server time and
+record the effective facts and time in their audit events.
 
 Use file-aware APIs when your source uses `import` or `include`:
 

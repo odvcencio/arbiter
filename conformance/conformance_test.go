@@ -12,6 +12,7 @@ package conformance_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -406,14 +407,12 @@ rule Premium {
 		}
 	}
 
-	// Surface 1: native eval.
-	t.Run("native", func(t *testing.T) {
+	t.Run("native rejects imported prerequisite", func(t *testing.T) {
 		dc := arbiter.DataFromMap(ctx, prog)
 		matched, err := arbiter.Eval(prog, dc)
-		if err != nil {
-			t.Fatalf("Eval: %v", err)
+		if !errors.Is(err, arbiter.ErrGovernanceRequired) || len(matched) != 0 {
+			t.Fatalf("Eval got matches %v and error %v", matched, err)
 		}
-		checkMatches(t, matched)
 	})
 
 	// Surface 2: governed eval.
@@ -436,11 +435,11 @@ rule Premium {
 		if err != nil {
 			t.Fatalf("Unmarshal: %v", err)
 		}
-		sp := vm.NewStringPool(restored.Constants.Strings())
-		dc := vm.DataFromMap(ctx, sp)
-		matched, err := vm.EvalWithPool(restored, dc, sp)
+		bundleProg := &arbiter.Program{Ruleset: restored}
+		dc := arbiter.DataFromMap(ctx, bundleProg)
+		matched, _, err := arbiter.EvalGoverned(bundleProg, dc, nil, ctx)
 		if err != nil {
-			t.Fatalf("EvalWithPool: %v", err)
+			t.Fatalf("EvalGoverned: %v", err)
 		}
 		checkMatches(t, matched)
 	})
