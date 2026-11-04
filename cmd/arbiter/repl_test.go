@@ -27,6 +27,26 @@ func TestReplEvaluatesContexts(t *testing.T) {
 	}
 }
 
+func TestReplAppliesGovernance(t *testing.T) {
+	prog, err := arbiter.Compile([]byte(`
+segment eligible { amount > 10 }
+rule Eligible { when segment eligible then Approve {} }
+rule Disabled { kill_switch on when { true } then Deny {} }
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := strings.NewReader("{\"amount\":5}\n{\"amount\":20}\nexit\n")
+	var out bytes.Buffer
+	if err := repl(prog, in, &out); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "(no rules matched)") || strings.Count(got, "Eligible -> Approve") != 1 || strings.Contains(got, "Disabled") {
+		t.Fatalf("unexpected REPL decisions: %q", got)
+	}
+}
+
 func TestReplReportsBadJSON(t *testing.T) {
 	prog, err := arbiter.Compile([]byte(`rule R { when { score > 1 } then A {} }`))
 	if err != nil {

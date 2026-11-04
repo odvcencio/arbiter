@@ -1,6 +1,7 @@
 package arbiter_test
 
 import (
+	"errors"
 	"testing"
 
 	arbiter "m31labs.dev/arbiter"
@@ -31,9 +32,8 @@ rule SegOnly {
 }
 `)
 
-// TestSegmentOnlyRuleCrossPaths asserts that a segment-only rule (ConditionLen==0)
-// fires correctly under EvalGoverned, basic Eval, and EvalDebug — all three eval
-// paths must agree.
+// TestSegmentOnlyRuleCrossPaths verifies that EvalGoverned applies the segment
+// even when the rule has no inline condition.
 func TestSegmentOnlyRuleCrossPaths(t *testing.T) {
 	prog, err := arbiter.Compile(segOnlySrc)
 	if err != nil {
@@ -56,24 +56,14 @@ func TestSegmentOnlyRuleCrossPaths(t *testing.T) {
 		t.Errorf("EvalGoverned: unexpected inline rule match, got %v", ruleNames(governed))
 	}
 
-	// --- basic Eval ---
 	basic, err := arbiter.Eval(prog, dc)
-	if err != nil {
-		t.Fatalf("Eval: %v", err)
-	}
-	// Basic eval does not gate on segments, so SegOnly fires unconditionally
-	// (ConditionLen==0 → condition satisfied). InlineA/InlineB still don't match.
-	if !containsRule(basic, "SegOnly") {
-		t.Errorf("Eval: want SegOnly in matches, got %v", ruleNames(basic))
+	if !errors.Is(err, arbiter.ErrGovernanceRequired) || len(basic) != 0 {
+		t.Errorf("Eval: want governance error without matches, got %v, %v", basic, err)
 	}
 
-	// --- EvalDebug ---
 	dbg := arbiter.EvalDebug(prog, dc)
-	if dbg.Error != nil {
-		t.Fatalf("EvalDebug: %v", dbg.Error)
-	}
-	if !containsRule(dbg.Matched, "SegOnly") {
-		t.Errorf("EvalDebug: want SegOnly in matched, got %v", ruleNames(dbg.Matched))
+	if !errors.Is(dbg.Error, arbiter.ErrGovernanceRequired) || len(dbg.Matched) != 0 {
+		t.Errorf("EvalDebug: want governance error without matches, got %v, %v", dbg.Matched, dbg.Error)
 	}
 }
 

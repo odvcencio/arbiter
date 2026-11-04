@@ -6,6 +6,11 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	arbiter "m31labs.dev/arbiter"
 	arbiterv1 "m31labs.dev/arbiter/api/arbiter/v1"
 	"m31labs.dev/arbiter/audit"
@@ -15,11 +20,6 @@ import (
 	"m31labs.dev/arbiter/observability"
 	"m31labs.dev/arbiter/overrides"
 	"m31labs.dev/arbiter/vm"
-	"go.opentelemetry.io/otel/attribute"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/structpb"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Server implements the Arbiter gRPC API.
@@ -273,6 +273,14 @@ func (s *Server) WatchBundles(req *arbiterv1.WatchBundlesRequest, stream arbiter
 	}
 }
 
+func (s *Server) captureDecision(facts *structpb.Struct, at time.Time, bundleID string) (govern.DecisionSnapshot, error) {
+	decision, err := govern.NewDecisionSnapshot(facts.AsMap(), at, bundleID, s.overrides)
+	if err != nil {
+		return govern.DecisionSnapshot{}, status.Errorf(codes.InvalidArgument, "decision context: %v", err)
+	}
+	return decision, nil
+}
+
 // EvaluateRules evaluates rules in a published bundle.
 func (s *Server) EvaluateRules(ctx context.Context, req *arbiterv1.EvaluateRulesRequest) (*arbiterv1.EvaluateRulesResponse, error) {
 	bundle, err := s.bundleRef(req.GetBundleId(), req.GetBundleName())
@@ -288,10 +296,12 @@ func (s *Server) EvaluateRules(ctx context.Context, req *arbiterv1.EvaluateRules
 	defer func() { endEvalSpan(span, len(matched), err) }()
 
 	start := time.Now()
-	ctxMap := req.GetContext().AsMap()
+	decision, err := s.captureDecision(req.GetContext(), start, bundle.ID)
+	if err != nil {
+		return nil, err
+	}
 	prog := &arbiter.Program{Ruleset: bundle.Compiled.Ruleset, Segments: bundle.Compiled.Segments}
-	dc := arbiter.DataFromMap(ctxMap, prog)
-	matched, trace, err := arbiter.EvalGovernedWithOverrides(prog, dc, bundle.Compiled.Segments, ctxMap, bundle.ID, s.overrides)
+	matched, trace, err := arbiter.EvalDecision(prog, decision)
 	elapsed := time.Since(start)
 	evalStatus := "ok"
 	if err != nil {
@@ -328,11 +338,11 @@ func (s *Server) EvaluateRules(ctx context.Context, req *arbiterv1.EvaluateRules
 	}
 
 	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
-		Timestamp: time.Now().UTC(),
+		Timestamp: decision.EvalTime(),
 		RequestID: req.GetRequestId(),
 		BundleID:  bundle.ID,
 		Kind:      "rules",
-		Context:   ctxMap,
+		Context:   decision.Facts(),
 		Rules:     auditRuleMatches(matched),
 		Arbitrace: trace.Steps,
 	})
@@ -358,8 +368,11 @@ func (s *Server) ResolveFlag(ctx context.Context, req *arbiterv1.ResolveFlagRequ
 	}()
 
 	start := time.Now()
-	ctxMap := req.GetContext().AsMap()
-	eval := bundle.Flags.ExplainWithOverrides(bundle.ID, req.GetFlagKey(), ctxMap, s.overrides)
+	decision, err := s.captureDecision(req.GetContext(), start, bundle.ID)
+	if err != nil {
+		return nil, err
+	}
+	eval := bundle.Flags.ExplainDecision(req.GetFlagKey(), decision)
 	elapsed := time.Since(start)
 	evalTotal.WithLabelValues(bundle.Name, "governed", "ok").Inc()
 	evalDuration.WithLabelValues(bundle.Name, "governed", "ok").Observe(elapsed.Seconds())
@@ -372,12 +385,12 @@ func (s *Server) ResolveFlag(ctx context.Context, req *arbiterv1.ResolveFlagRequ
 
 	env := bundle.Flags.Environment
 	event := audit.DecisionEvent{
-		Timestamp:   time.Now().UTC(),
+		Timestamp:   decision.EvalTime(),
 		RequestID:   req.GetRequestId(),
 		BundleID:    bundle.ID,
 		Environment: env,
 		Kind:        "flag",
-		Context:     ctxMap,
+		Context:     decision.Facts(),
 		Flag: &audit.FlagDecision{
 			Flag:        eval.Flag,
 			Variant:     eval.Variant.Name,
@@ -391,7 +404,7 @@ func (s *Server) ResolveFlag(ctx context.Context, req *arbiterv1.ResolveFlagRequ
 
 	// Emit assignment event for non-default resolutions (experimentation).
 	if !eval.IsDefault {
-		userID, _ := extractUserID(ctxMap)
+		userID, _ := extractUserID(event.Context)
 		event.Assignment = &audit.FlagAssignment{
 			Flag:        eval.Flag,
 			Variant:     eval.Variant.Name,
@@ -435,8 +448,11 @@ func (s *Server) EvaluateStrategy(ctx context.Context, req *arbiterv1.EvaluateSt
 	}()
 
 	start := time.Now()
-	ctxMap := req.GetContext().AsMap()
-	result, err := arbiter.EvalStrategyWithOverrides(bundle.Compiled, req.GetStrategyName(), ctxMap, bundle.ID, s.overrides)
+	decision, err := s.captureDecision(req.GetContext(), start, bundle.ID)
+	if err != nil {
+		return nil, err
+	}
+	result, err := bundle.Compiled.Strategies.EvaluateDecision(req.GetStrategyName(), decision)
 	elapsed := time.Since(start)
 	evalStatus := "ok"
 	if err != nil {
@@ -454,11 +470,11 @@ func (s *Server) EvaluateStrategy(ctx context.Context, req *arbiterv1.EvaluateSt
 	}
 
 	_ = s.audit.WriteDecision(ctx, audit.DecisionEvent{
-		Timestamp: time.Now().UTC(),
+		Timestamp: decision.EvalTime(),
 		RequestID: req.GetRequestId(),
 		BundleID:  bundle.ID,
 		Kind:      "strategy",
-		Context:   ctxMap,
+		Context:   decision.Facts(),
 		Strategy: &audit.StrategyDecision{
 			Strategy: result.Strategy,
 			Outcome:  result.Outcome,

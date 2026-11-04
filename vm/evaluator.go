@@ -12,7 +12,8 @@ type Evaluator struct {
 	vm *VM
 }
 
-// PreparedEvaluator evaluates one immutable ruleset and tag selection.
+// PreparedEvaluator evaluates bytecode for one immutable ruleset and tag
+// selection. It applies active windows and skips other governance gates.
 // It reuses VM scratch state and is not safe for concurrent use.
 type PreparedEvaluator struct {
 	rs    *compiler.CompiledRuleset

@@ -1,12 +1,52 @@
 package arbiter
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"m31labs.dev/arbiter/govern"
 )
+
+func TestPlainEvalRejectsSelectedGovernance(t *testing.T) {
+	for _, gate := range []string{
+		"kill_switch on",
+		"kill_switch off",
+		"rollout 100",
+		"requires Plain",
+		"excludes Plain",
+	} {
+		t.Run(gate, func(t *testing.T) {
+			source := fmt.Sprintf(`
+tag "plain"
+rule Plain tag "plain" { when { true } then Review {} }
+rule Governed {
+	%s
+	when { true }
+	then Allow {}
+}`, gate)
+			prog, err := Compile([]byte(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A program built from bytecode alone has the same safeguard.
+			prog = &Program{Ruleset: prog.Ruleset}
+			dc := DataFromMap(nil, prog)
+			matched, err := Eval(prog, dc)
+			if !errors.Is(err, ErrGovernanceRequired) || len(matched) != 0 || !strings.Contains(err.Error(), "Governed") {
+				t.Fatalf("Eval got matches %v and error %v", matched, err)
+			}
+			if _, err := EvalTyped(prog, struct{}{}); !errors.Is(err, ErrGovernanceRequired) {
+				t.Fatalf("EvalTyped got error %v", err)
+			}
+			matched, err = Eval(prog, dc, WithTags("plain"))
+			if err != nil || len(matched) != 1 || matched[0].Name != "Plain" {
+				t.Fatalf("tagged Eval got matches %v and error %v", matched, err)
+			}
+		})
+	}
+}
 
 func TestCompileFullExtractsSegments(t *testing.T) {
 	src := []byte(`

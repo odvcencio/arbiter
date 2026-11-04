@@ -1,6 +1,7 @@
 package arbiter
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -110,7 +111,11 @@ func applyEvalOptions(opts []EvalOption) evalOptions {
 	return out
 }
 
-// Eval evaluates a compiled program against a data context.
+// ErrGovernanceRequired means a selected rule requires governed evaluation.
+var ErrGovernanceRequired = errors.New("selected rule requires governance; use EvalGoverned")
+
+// Eval evaluates ordinary rules, including their active windows. It returns
+// ErrGovernanceRequired if a selected rule declares any other governance gate.
 func Eval(prog *Program, dc vm.DataContext, opts ...EvalOption) ([]vm.MatchedRule, error) {
 	if prog == nil {
 		return nil, fmt.Errorf("nil program")
@@ -120,6 +125,9 @@ func Eval(prog *Program, dc vm.DataContext, opts ...EvalOption) ([]vm.MatchedRul
 		return nil, fmt.Errorf("nil ruleset")
 	}
 	evalOpts := applyEvalOptions(opts)
+	if err := checkPlainEvaluation(rs, evalOpts.tags); err != nil {
+		return nil, err
+	}
 	// If dc was created via DataFromMap/DataFromJSON, it shares a pool.
 	// Try to extract it; otherwise create a new one.
 	if ec, ok := dc.(*evalContextWrapper); ok {
@@ -128,7 +136,8 @@ func Eval(prog *Program, dc vm.DataContext, opts ...EvalOption) ([]vm.MatchedRul
 	return vm.EvalWithTagFilter(rs, dc, vm.NewStringPool(rs.Constants.Strings()), evalOpts.tags)
 }
 
-// EvalDebug evaluates with full debug trace.
+// EvalDebug traces ordinary rule evaluation. For selected rules with
+// governance gates, use the arbitrace returned by EvalGoverned.
 func EvalDebug(prog *Program, dc vm.DataContext, opts ...EvalOption) vm.DebugResult {
 	if prog == nil {
 		return vm.DebugResult{Error: fmt.Errorf("nil program")}
@@ -138,10 +147,24 @@ func EvalDebug(prog *Program, dc vm.DataContext, opts ...EvalOption) vm.DebugRes
 		return vm.DebugResult{Error: fmt.Errorf("nil ruleset")}
 	}
 	evalOpts := applyEvalOptions(opts)
+	if err := checkPlainEvaluation(rs, evalOpts.tags); err != nil {
+		return vm.DebugResult{Error: err}
+	}
 	if ec, ok := dc.(*evalContextWrapper); ok {
 		return vm.EvalDebugWithTagFilter(rs, ec.inner, ec.pool, evalOpts.tags)
 	}
 	return vm.EvalDebugWithTagFilter(rs, dc, vm.NewStringPool(rs.Constants.Strings()), evalOpts.tags)
+}
+
+func checkPlainEvaluation(rs *compiler.CompiledRuleset, tags []string) error {
+	for _, rule := range rs.Rules {
+		requiresGovernance := rule.KillSwitch.IsSet() || rule.HasSegment ||
+			rule.HasRollout || rule.PrereqLen > 0 || rule.ExcludeLen > 0
+		if requiresGovernance && rs.RuleMatchesTags(rule, tags) {
+			return fmt.Errorf("rule %s: %w", rs.Constants.GetString(rule.NameIdx), ErrGovernanceRequired)
+		}
+	}
+	return nil
 }
 
 // EvalGoverned evaluates a compiled program with rule governance enabled.
@@ -151,6 +174,23 @@ func EvalGoverned(prog *Program, dc vm.DataContext, segments *govern.SegmentSet,
 
 // EvalGovernedWithOverrides evaluates a program while applying runtime overrides.
 func EvalGovernedWithOverrides(prog *Program, dc vm.DataContext, segments *govern.SegmentSet, ctx map[string]any, bundleID string, view overrides.View, opts ...EvalOption) ([]vm.MatchedRule, *govern.Arbitrace, error) {
+	return evalGoverned(prog, dc, govern.NewRequestCache(segments, ctx), bundleID, view, opts)
+}
+
+// EvalDecision evaluates a program with one snapshot for its VM and governance.
+func EvalDecision(prog *Program, decision govern.DecisionSnapshot, opts ...EvalOption) ([]vm.MatchedRule, *govern.Arbitrace, error) {
+	if prog == nil || prog.Ruleset == nil {
+		return nil, &govern.Arbitrace{}, fmt.Errorf("decision requires a compiled ruleset")
+	}
+	if decision.EvalTime().IsZero() {
+		return nil, &govern.Arbitrace{}, fmt.Errorf("missing decision snapshot")
+	}
+	cache := decision.RequestCache(prog.Segments)
+	bundleID, view := decision.Overrides()
+	return evalGoverned(prog, DataFromMap(cache.Context(), prog), cache, bundleID, view, opts)
+}
+
+func evalGoverned(prog *Program, dc vm.DataContext, cache *govern.RequestCache, bundleID string, view overrides.View, opts []EvalOption) ([]vm.MatchedRule, *govern.Arbitrace, error) {
 	if prog == nil {
 		return nil, &govern.Arbitrace{}, fmt.Errorf("nil program")
 	}
@@ -161,9 +201,9 @@ func EvalGovernedWithOverrides(prog *Program, dc vm.DataContext, segments *gover
 	evalOpts := applyEvalOptions(opts)
 	conditionSources := ruleConditionSources(prog)
 	if ec, ok := dc.(*evalContextWrapper); ok {
-		return evalGovernedWithPool(rs, ec.inner, ec.pool, conditionSources, segments, ctx, bundleID, view, evalOpts.tags)
+		return evalGovernedWithPool(rs, ec.inner, ec.pool, conditionSources, cache, bundleID, view, evalOpts.tags)
 	}
-	return evalGovernedWithPool(rs, dc, vm.NewStringPool(rs.Constants.Strings()), conditionSources, segments, ctx, bundleID, view, evalOpts.tags)
+	return evalGovernedWithPool(rs, dc, vm.NewStringPool(rs.Constants.Strings()), conditionSources, cache, bundleID, view, evalOpts.tags)
 }
 
 // evalContextWrapper wraps a DataContext with its StringPool.
@@ -237,13 +277,12 @@ func compileSegmentRuleset(program *ir.Program, segment *ir.Segment) (*compiler.
 	return compiler.CompileIR(synthetic)
 }
 
-func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *vm.StringPool, conditionSources map[string]string, segments *govern.SegmentSet, ctx map[string]any, bundleID string, view overrides.View, tags []string) ([]vm.MatchedRule, *govern.Arbitrace, error) {
+func evalGovernedWithPool(rs *compiler.CompiledRuleset, dc vm.DataContext, sp *vm.StringPool, conditionSources map[string]string, rc *govern.RequestCache, bundleID string, view overrides.View, tags []string) ([]vm.MatchedRule, *govern.Arbitrace, error) {
 	if rs == nil {
 		return nil, &govern.Arbitrace{}, fmt.Errorf("nil ruleset")
 	}
 
 	trace := &govern.Arbitrace{}
-	rc := govern.NewRequestCache(segments, ctx)
 	evaluator := vm.NewEvaluator(rs, sp)
 	var matched []vm.MatchedRule
 

@@ -82,18 +82,29 @@ func (s *Strategies) EvaluateWithOverrides(name string, ctx map[string]any, bund
 	if s == nil {
 		return Result{}, fmt.Errorf("nil strategies")
 	}
+	return s.evaluate(name, govern.NewRequestCache(s.segments, ctx), bundleID, view)
+}
+
+// EvaluateDecision selects a strategy using one captured set of decision inputs.
+func (s *Strategies) EvaluateDecision(name string, decision govern.DecisionSnapshot) (Result, error) {
+	if s == nil {
+		return Result{}, fmt.Errorf("nil strategies")
+	}
+	if decision.EvalTime().IsZero() {
+		return Result{}, fmt.Errorf("missing decision snapshot")
+	}
+	bundleID, view := decision.Overrides()
+	return s.evaluate(name, decision.RequestCache(s.segments), bundleID, view)
+}
+
+func (s *Strategies) evaluate(name string, rc *govern.RequestCache, bundleID string, view overrides.View) (Result, error) {
 	def, ok := s.defs[name]
 	if !ok {
 		return Result{}, fmt.Errorf("strategy %q not found", name)
 	}
-	if ctx == nil {
-		ctx = map[string]any{}
-	}
-
 	sp := vm.NewStringPool(def.Ruleset.Constants.Strings())
-	dc := vm.DataFromMap(ctx, sp)
+	dc := vm.DataFromMap(rc.Context(), sp)
 	evaluator := vm.NewEvaluator(def.Ruleset, sp)
-	rc := govern.NewRequestCache(s.segments, ctx)
 	trace := &govern.Arbitrace{}
 
 	for i, rule := range def.Ruleset.Rules {
