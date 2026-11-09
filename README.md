@@ -38,6 +38,7 @@ Standalone reference material lives under [`docs/`](docs):
 
 - [`docs/language/grammar.ebnf`](docs/language/grammar.ebnf) is the tooling-facing language specification.
 - [`docs/self-hosted.md`](docs/self-hosted.md) is the recommended self-hosted profile for a single team or trust boundary.
+- [`docs/game-ai.md`](docs/game-ai.md) shows how to run CPU players in a deterministic game with package `gameai`, on the server and in the browser.
 
 ## Performance
 
@@ -76,6 +77,10 @@ go test -run '^$' -bench '^BenchmarkLatencySplit/grpc_in_cluster$' -benchmem -be
 ```
 
 The gRPC benches publish the bundle once, warm it up, and benchmark `EvaluateRules` only.
+
+## Game AI
+
+Package `gameai` runs precompiled bundles as CPU decision logic inside a fixed-step game simulation. It does not link the parser, builds for js/wasm and TinyGo, gives the same decisions on amd64, arm64 and js/wasm, and allocates nothing per tick once warm (22 agents x 3 decisions in 27 µs on an Apple M4 Pro). It adds utility scoring, seeded weighted choice, per-agent memory for cooldowns, decision traces for debug overlays and atomic hot reload. Build bundles with `arbiter bundle ai.arb --game`. See [`docs/game-ai.md`](docs/game-ai.md) and the toy game in [`examples/gameai/arena`](examples/gameai/arena).
 
 ## Governance
 

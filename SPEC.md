@@ -712,6 +712,16 @@ metadata not yet specified.
 
 Canonical formatting rules exist but are not frozen.
 
+### Game AI Runtime
+
+Package `gameai` evaluates rule bundles for deterministic games
+(docs/game-ai.md). Provisional surface: the `Selection` policies (`First`,
+`Best`, `Weighted`), `Memory` and its encoding, `Seed`/`Unit`/`Rand`, the
+trace text format, and the load-time rejection of active windows, segments,
+`requires`/`excludes` and rollouts. Its evaluation order and numeric semantics
+are those of sections 2.1 and 3.7. The selection policy is set by the host,
+not by the language.
+
 ### Syntax Under Evaluation
 
 - **`join` expression**: multi-binding join with `on` predicate. Complex, rarely
