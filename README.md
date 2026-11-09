@@ -80,7 +80,7 @@ The gRPC benches publish the bundle once, warm it up, and benchmark `EvaluateRul
 
 ## Game AI
 
-Package `gameai` runs precompiled bundles as CPU decision logic inside a fixed-step game simulation. It does not link the parser, builds for js/wasm and TinyGo, gives the same decisions on amd64, arm64 and js/wasm, and allocates nothing per tick once warm (22 agents x 3 decisions in 27 µs on an Apple M4 Pro). It adds utility scoring, seeded weighted choice, per-agent memory for cooldowns, decision traces for debug overlays and atomic hot reload. Build bundles with `arbiter bundle ai.arb --game`. See [`docs/game-ai.md`](docs/game-ai.md) and the toy game in [`examples/gameai/arena`](examples/gameai/arena).
+Package `gameai` runs precompiled bundles as CPU decision logic inside a fixed-step game simulation. It does not link the parser, builds for js/wasm and TinyGo, gives the same decisions on amd64, arm64 and js/wasm, and allocates nothing per tick once warm (22 agents x 3 decisions in 28 µs on an Apple M4 Pro). It adds utility scoring, seeded weighted choice, per-agent memory for cooldowns, decision traces for debug overlays and atomic hot reload. Build bundles with `arbiter bundle ai.arb --game`. See [`docs/game-ai.md`](docs/game-ai.md) and the toy game in [`examples/gameai/arena`](examples/gameai/arena).
 
 ## Governance
 

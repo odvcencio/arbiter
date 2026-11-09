@@ -324,9 +324,10 @@ draw. Measured with `go test -bench 'BenchmarkDecisions' ./examples/gameai/arena
 
 | Target | Time per tick (66 decisions) | Per decision | Allocations |
 |---|---|---|---|
-| arm64, Apple M4 Pro | 27 µs | 410 ns | 0 |
+| arm64, Apple M4 Pro | 28 µs | 425 ns | 0 |
 | amd64, Intel Core Ultra 9 285 | 33 µs | 500 ns | 0 |
-| js/wasm in Node 26, same Intel host | 104 µs | 1.6 µs | 0 |
+| amd64, Intel Xeon D-2141I (2.2 GHz server) | 97–110 µs | 1.5 µs | 0 |
+| js/wasm in Node 26, Intel Core Ultra 9 285 | 104 µs | 1.6 µs | 0 |
 
 `TestTickDoesNotAllocate` fails if a tick allocates. What allocates: string
 concatenation, decimal arithmetic, and string fields whose value is neither a
