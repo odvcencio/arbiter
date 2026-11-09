@@ -397,12 +397,12 @@ program that loads a bundle and decides once
 
 | Toolchain | Raw | brotli -q 11 |
 |---|---|---|
-| Go 1.26.10 js/wasm, `-trimpath -ldflags=-s -w` | 4,383,964 bytes | 914,991 bytes |
-| TinyGo 0.41.1, `-target wasm -no-debug` | 811,253 bytes | 245,628 bytes |
+| Go 1.26.10 js/wasm, `-trimpath -ldflags=-s -w` | 4,386,682 bytes | 916,260 bytes |
+| TinyGo 0.41.1, `-target wasm -no-debug` | 810,768 bytes | 244,822 bytes |
 
 Most of the Go figure is the standard library (fmt, encoding/json, regexp,
 math/big, crypto/sha256). In a client that already links those, Arbiter adds
-738,384 bytes raw, 144,715 bytes brotli. `TestWasmSize` caps the probe at
+741,104 bytes raw, 141,094 bytes brotli. `TestWasmSize` caps the probe at
 4.5 MiB.
 
 ## Limits

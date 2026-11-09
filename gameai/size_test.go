@@ -13,9 +13,9 @@ import (
 // (fmt, encoding/json, regexp, math/big, crypto/sha256), which a game client
 // usually links already. Raise the budget only with a reason.
 //
-// Measured with go1.26.10, -trimpath -ldflags=-s -w: 4,383,964 bytes raw,
-// 914,991 bytes brotli -q 11. TinyGo 0.41.1 (-target wasm -no-debug) builds
-// the same probe in 811,253 bytes raw, 245,628 brotli.
+// Measured with go1.26.10, -trimpath -ldflags=-s -w: 4,386,682 bytes raw,
+// 916,260 bytes brotli -q 11. TinyGo 0.41.1 (-target wasm -no-debug) builds
+// the same probe in 810,768 bytes raw, 244,822 brotli.
 const wasmSizeBudget = 4_718_592 // 4.5 MiB
 
 // TestWasmSize builds the probe for js/wasm and fails if it outgrows the
