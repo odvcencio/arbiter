@@ -343,3 +343,34 @@ func TestStructContextMatchesMapContext(t *testing.T) {
 		t.Errorf("self.role = %+v, want pooled", got)
 	}
 }
+
+// Swap may run on another goroutine (a file watcher) while the simulation
+// decides; each decision sees one whole program, old or new.
+func TestSwapWhileDeciding(t *testing.T) {
+	p1 := load(t, unitRules)
+	p2 := load(t, strings.Replace(unitRules, `kind: "idle", score: 1`, `kind: "patrol", score: 1`, 1))
+	b := newUnitBrain(t, p1)
+	act := decision(t, b, "act")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			if err := b.Swap([]*gameai.Program{p1, p2}[i%2]); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	var u unit
+	u.Self.HP = 80
+	for i := 0; i < 2000; i++ {
+		c, err := act.Decide(&u, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if k := c.Text("kind"); k != "idle" && k != "patrol" {
+			t.Fatalf("decision %d saw %q", i, k)
+		}
+	}
+	<-done
+}
