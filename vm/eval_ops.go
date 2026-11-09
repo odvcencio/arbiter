@@ -6,16 +6,16 @@ import (
 	"regexp"
 	"strings"
 
-	"m31labs.dev/arbiter/compiler"
+	"m31labs.dev/arbiter/bytecode"
 	dec "m31labs.dev/arbiter/decimal"
 	"m31labs.dev/arbiter/intern"
 )
 
 func nextInstruction(ip uint32) uint32 {
-	return ip + compiler.InstrSize
+	return ip + bytecode.InstrSize
 }
 
-func (vm *VM) dispatchConditionOp(instrs []byte, end, ip uint32, op compiler.OpCode, flags uint8, arg uint16, dc DataContext) (uint32, bool, bool, bool) {
+func (vm *VM) dispatchConditionOp(instrs []byte, end, ip uint32, op bytecode.OpCode, flags uint8, arg uint16, dc DataContext) (uint32, bool, bool, bool) {
 	if nextIP, handled := vm.evalLoadOp(instrs, end, ip, op, flags, arg, dc); handled {
 		return nextIP, true, false, false
 	}
@@ -55,7 +55,7 @@ func (vm *VM) dispatchConditionOp(instrs []byte, end, ip uint32, op compiler.OpC
 	if nextIP, handled := vm.evalTableOp(instrs, end, ip, op, flags, arg, dc); handled {
 		return nextIP, true, false, false
 	}
-	if op == compiler.OpRuleMatch {
+	if op == bytecode.OpRuleMatch {
 		if vm.sp > 0 {
 			return 0, true, vm.peek().AsBool(), true
 		}
@@ -64,9 +64,9 @@ func (vm *VM) dispatchConditionOp(instrs []byte, end, ip uint32, op compiler.OpC
 	return 0, false, false, false
 }
 
-func (vm *VM) evalLoadOp(instrs []byte, end, ip uint32, op compiler.OpCode, flags uint8, arg uint16, dc DataContext) (uint32, bool) {
+func (vm *VM) evalLoadOp(instrs []byte, end, ip uint32, op bytecode.OpCode, flags uint8, arg uint16, dc DataContext) (uint32, bool) {
 	switch op {
-	case compiler.OpLoadStr:
+	case bytecode.OpLoadStr:
 		if flags != 0 {
 			// Legacy list encoding kept for compatibility with older in-memory bytecode.
 			vm.push(ListVal(arg, uint16(flags)))
@@ -74,23 +74,23 @@ func (vm *VM) evalLoadOp(instrs []byte, end, ip uint32, op compiler.OpCode, flag
 			vm.push(StrVal(arg))
 		}
 		return nextInstruction(ip), true
-	case compiler.OpLoadNum:
+	case bytecode.OpLoadNum:
 		vm.push(NumVal(vm.pool.GetNumber(arg)))
 		return nextInstruction(ip), true
-	case compiler.OpLoadDec:
+	case bytecode.OpLoadDec:
 		vm.push(DecimalVal(vm.pool.GetDecimal(arg)))
 		return nextInstruction(ip), true
-	case compiler.OpLoadBool:
+	case bytecode.OpLoadBool:
 		vm.push(BoolVal(arg == 1))
 		return nextInstruction(ip), true
-	case compiler.OpLoadNull:
+	case bytecode.OpLoadNull:
 		if flags == intern.TypeList {
 			return nextInstruction(vm.decodeListPair(instrs, ip, end, arg)), true
 		}
 		// Standalone list tails are treated as a no-op null push for compatibility.
 		vm.push(NullVal())
 		return nextInstruction(ip), true
-	case compiler.OpLoadVar:
+	case bytecode.OpLoadVar:
 		key := vm.strPool.Get(arg)
 		if raw, ok := vm.lookupLocal(key); ok {
 			vm.push(anyToValue(raw, vm.strPool))
@@ -106,15 +106,15 @@ func (vm *VM) evalLoadOp(instrs []byte, end, ip uint32, op compiler.OpCode, flag
 	}
 }
 
-func (vm *VM) evalComparisonOp(ip uint32, op compiler.OpCode) (uint32, bool) {
+func (vm *VM) evalComparisonOp(ip uint32, op bytecode.OpCode) (uint32, bool) {
 	switch op {
-	case compiler.OpEq:
+	case bytecode.OpEq:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(vm.valEqual(a, b)))
-	case compiler.OpNeq:
+	case bytecode.OpNeq:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(!vm.valEqual(a, b)))
-	case compiler.OpGt:
+	case bytecode.OpGt:
 		b, a := vm.pop(), vm.pop()
 		cmp, err := vm.orderedCompare(a, b)
 		if err != nil {
@@ -123,7 +123,7 @@ func (vm *VM) evalComparisonOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(BoolVal(cmp > 0))
-	case compiler.OpGte:
+	case bytecode.OpGte:
 		b, a := vm.pop(), vm.pop()
 		cmp, err := vm.orderedCompare(a, b)
 		if err != nil {
@@ -132,7 +132,7 @@ func (vm *VM) evalComparisonOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(BoolVal(cmp >= 0))
-	case compiler.OpLt:
+	case bytecode.OpLt:
 		b, a := vm.pop(), vm.pop()
 		cmp, err := vm.orderedCompare(a, b)
 		if err != nil {
@@ -141,7 +141,7 @@ func (vm *VM) evalComparisonOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(BoolVal(cmp < 0))
-	case compiler.OpLte:
+	case bytecode.OpLte:
 		b, a := vm.pop(), vm.pop()
 		cmp, err := vm.orderedCompare(a, b)
 		if err != nil {
@@ -156,13 +156,13 @@ func (vm *VM) evalComparisonOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 	return nextInstruction(ip), true
 }
 
-func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
-	if vm.profile == NumericInteger && op >= compiler.OpAdd && op <= compiler.OpCeil {
+func (vm *VM) evalMathOp(ip uint32, op bytecode.OpCode) (uint32, bool) {
+	if vm.profile == NumericInteger && op >= bytecode.OpAdd && op <= bytecode.OpCeil {
 		vm.evalIntegerMathOp(op)
 		return nextInstruction(ip), true
 	}
 	switch op {
-	case compiler.OpAdd:
+	case bytecode.OpAdd:
 		b, a := vm.pop(), vm.pop()
 		next, err := vm.addValues(a, b)
 		if err != nil {
@@ -171,7 +171,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(next)
-	case compiler.OpSub:
+	case bytecode.OpSub:
 		b, a := vm.pop(), vm.pop()
 		next, err := vm.subValues(a, b)
 		if err != nil {
@@ -180,7 +180,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(next)
-	case compiler.OpMul:
+	case bytecode.OpMul:
 		b, a := vm.pop(), vm.pop()
 		if a.Typ == TypeDecimal || b.Typ == TypeDecimal {
 			ad, aok := a.Any.(dec.Value)
@@ -211,7 +211,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 		// fusing it into a later add (FMA on arm64, never on wasm), which would
 		// make results differ by target. See SPEC.md, "Deterministic evaluation".
 		vm.push(numResult(float64(vm.toNum(a) * vm.toNum(b))))
-	case compiler.OpDiv:
+	case bytecode.OpDiv:
 		b, a := vm.pop(), vm.pop()
 		if a.Typ == TypeDecimal || b.Typ == TypeDecimal {
 			ad, aok := a.Any.(dec.Value)
@@ -244,7 +244,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 		} else {
 			vm.push(numResult(float64(vm.toNum(a) / denom)))
 		}
-	case compiler.OpMod:
+	case bytecode.OpMod:
 		b, a := vm.pop(), vm.pop()
 		if a.Typ == TypeDecimal || b.Typ == TypeDecimal {
 			ad, aok := a.Any.(dec.Value)
@@ -273,7 +273,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			// result is the same on all targets.
 			vm.push(numResult(math.Mod(vm.toNum(a), denom)))
 		}
-	case compiler.OpAbs:
+	case bytecode.OpAbs:
 		a := vm.pop()
 		next, err := vm.absValue(a)
 		if err != nil {
@@ -282,7 +282,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(next)
-	case compiler.OpMin:
+	case bytecode.OpMin:
 		b, a := vm.pop(), vm.pop()
 		next, err := vm.minValue(a, b)
 		if err != nil {
@@ -291,7 +291,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(next)
-	case compiler.OpMax:
+	case bytecode.OpMax:
 		b, a := vm.pop(), vm.pop()
 		next, err := vm.maxValue(a, b)
 		if err != nil {
@@ -300,7 +300,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(next)
-	case compiler.OpRound:
+	case bytecode.OpRound:
 		a := vm.pop()
 		if a.Typ == TypeDecimal {
 			vm.setErr(fmt.Errorf("builtin round does not support decimal operands"))
@@ -308,7 +308,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(NumVal(math.Round(vm.toNum(a))))
-	case compiler.OpFloor:
+	case bytecode.OpFloor:
 		a := vm.pop()
 		if a.Typ == TypeDecimal {
 			vm.setErr(fmt.Errorf("builtin floor does not support decimal operands"))
@@ -316,7 +316,7 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(NumVal(math.Floor(vm.toNum(a))))
-	case compiler.OpCeil:
+	case bytecode.OpCeil:
 		a := vm.pop()
 		if a.Typ == TypeDecimal {
 			vm.setErr(fmt.Errorf("builtin ceil does not support decimal operands"))
@@ -330,15 +330,15 @@ func (vm *VM) evalMathOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 	return nextInstruction(ip), true
 }
 
-func (vm *VM) evalLogicOp(ip uint32, op compiler.OpCode) (uint32, bool) {
+func (vm *VM) evalLogicOp(ip uint32, op bytecode.OpCode) (uint32, bool) {
 	switch op {
-	case compiler.OpAnd:
+	case bytecode.OpAnd:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(a.AsBool() && b.AsBool()))
-	case compiler.OpOr:
+	case bytecode.OpOr:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(a.AsBool() || b.AsBool()))
-	case compiler.OpNot:
+	case bytecode.OpNot:
 		a := vm.pop()
 		vm.push(BoolVal(!a.AsBool()))
 	default:
@@ -347,14 +347,14 @@ func (vm *VM) evalLogicOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 	return nextInstruction(ip), true
 }
 
-func (vm *VM) evalControlOp(ip uint32, op compiler.OpCode, arg uint16) (uint32, bool) {
+func (vm *VM) evalControlOp(ip uint32, op bytecode.OpCode, arg uint16) (uint32, bool) {
 	switch op {
-	case compiler.OpJumpIfFalse:
+	case bytecode.OpJumpIfFalse:
 		if !vm.peek().AsBool() {
 			return ip + uint32(arg), true
 		}
 		return nextInstruction(ip), true
-	case compiler.OpJumpIfTrue:
+	case bytecode.OpJumpIfTrue:
 		if vm.peek().AsBool() {
 			return ip + uint32(arg), true
 		}
@@ -364,12 +364,12 @@ func (vm *VM) evalControlOp(ip uint32, op compiler.OpCode, arg uint16) (uint32, 
 	}
 }
 
-func (vm *VM) evalNullOp(ip uint32, op compiler.OpCode) (uint32, bool) {
+func (vm *VM) evalNullOp(ip uint32, op bytecode.OpCode) (uint32, bool) {
 	switch op {
-	case compiler.OpIsNull:
+	case bytecode.OpIsNull:
 		a := vm.pop()
 		vm.push(BoolVal(a.IsNull()))
-	case compiler.OpIsNotNull:
+	case bytecode.OpIsNotNull:
 		a := vm.pop()
 		vm.push(BoolVal(!a.IsNull()))
 	default:
@@ -378,15 +378,15 @@ func (vm *VM) evalNullOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 	return nextInstruction(ip), true
 }
 
-func (vm *VM) evalStringOp(ip uint32, op compiler.OpCode) (uint32, bool) {
+func (vm *VM) evalStringOp(ip uint32, op bytecode.OpCode) (uint32, bool) {
 	switch op {
-	case compiler.OpStartsWith:
+	case bytecode.OpStartsWith:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(strings.HasPrefix(vm.toStr(a), vm.toStr(b))))
-	case compiler.OpEndsWith:
+	case bytecode.OpEndsWith:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(strings.HasSuffix(vm.toStr(a), vm.toStr(b))))
-	case compiler.OpMatches:
+	case bytecode.OpMatches:
 		b, a := vm.pop(), vm.pop()
 		var re *regexp.Regexp
 		// Fast path: use the pre-compiled regex from the ruleset when the
@@ -408,33 +408,33 @@ func (vm *VM) evalStringOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 	return nextInstruction(ip), true
 }
 
-func (vm *VM) evalCollectionOp(ip uint32, op compiler.OpCode) (uint32, bool) {
+func (vm *VM) evalCollectionOp(ip uint32, op bytecode.OpCode) (uint32, bool) {
 	switch op {
-	case compiler.OpIn:
+	case bytecode.OpIn:
 		list, val := vm.pop(), vm.pop()
 		vm.push(BoolVal(vm.listContainsVal(list, val)))
-	case compiler.OpNotIn:
+	case bytecode.OpNotIn:
 		list, val := vm.pop(), vm.pop()
 		vm.push(BoolVal(!vm.listContainsVal(list, val)))
-	case compiler.OpContains:
+	case bytecode.OpContains:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(vm.listContainsVal(a, b)))
-	case compiler.OpNotContains:
+	case bytecode.OpNotContains:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(!vm.listContainsVal(a, b)))
-	case compiler.OpRetains:
+	case bytecode.OpRetains:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(vm.listRetains(a, b)))
-	case compiler.OpNotRetains:
+	case bytecode.OpNotRetains:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(!vm.listRetains(a, b)))
-	case compiler.OpVagueContains:
+	case bytecode.OpVagueContains:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(vm.listVagueContains(a, b)))
-	case compiler.OpSubsetOf:
+	case bytecode.OpSubsetOf:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(vm.listSubsetOf(a, b)))
-	case compiler.OpSupersetOf:
+	case bytecode.OpSupersetOf:
 		b, a := vm.pop(), vm.pop()
 		vm.push(BoolVal(vm.listSubsetOf(b, a)))
 	default:
@@ -443,9 +443,9 @@ func (vm *VM) evalCollectionOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 	return nextInstruction(ip), true
 }
 
-func (vm *VM) evalRangeOp(ip uint32, op compiler.OpCode) (uint32, bool) {
+func (vm *VM) evalRangeOp(ip uint32, op bytecode.OpCode) (uint32, bool) {
 	switch op {
-	case compiler.OpBetweenCC:
+	case bytecode.OpBetweenCC:
 		hi, lo, val := vm.pop(), vm.pop(), vm.pop()
 		ok, err := vm.betweenValues(val, lo, hi, true, true)
 		if err != nil {
@@ -454,7 +454,7 @@ func (vm *VM) evalRangeOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(BoolVal(ok))
-	case compiler.OpBetweenOO:
+	case bytecode.OpBetweenOO:
 		hi, lo, val := vm.pop(), vm.pop(), vm.pop()
 		ok, err := vm.betweenValues(val, lo, hi, false, false)
 		if err != nil {
@@ -463,7 +463,7 @@ func (vm *VM) evalRangeOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(BoolVal(ok))
-	case compiler.OpBetweenCO:
+	case bytecode.OpBetweenCO:
 		hi, lo, val := vm.pop(), vm.pop(), vm.pop()
 		ok, err := vm.betweenValues(val, lo, hi, true, false)
 		if err != nil {
@@ -472,7 +472,7 @@ func (vm *VM) evalRangeOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 			break
 		}
 		vm.push(BoolVal(ok))
-	case compiler.OpBetweenOC:
+	case bytecode.OpBetweenOC:
 		hi, lo, val := vm.pop(), vm.pop(), vm.pop()
 		ok, err := vm.betweenValues(val, lo, hi, false, true)
 		if err != nil {
@@ -487,15 +487,15 @@ func (vm *VM) evalRangeOp(ip uint32, op compiler.OpCode) (uint32, bool) {
 	return nextInstruction(ip), true
 }
 
-func (vm *VM) evalIteratorOp(instrs []byte, end, ip uint32, op compiler.OpCode, flags uint8, arg uint16) (uint32, bool) {
+func (vm *VM) evalIteratorOp(instrs []byte, end, ip uint32, op bytecode.OpCode, flags uint8, arg uint16) (uint32, bool) {
 	switch op {
-	case compiler.OpIterBegin:
+	case bytecode.OpIterBegin:
 		list := vm.pop()
 		iter := iterState{
 			kind:    flags,
 			varName: vm.strPool.Get(arg),
 			items:   vm.listEntries(list),
-			result:  flags != compiler.FlagAny,
+			result:  flags != bytecode.FlagAny,
 		}
 		if vm.locals == nil {
 			vm.locals = make(map[string]any)
@@ -507,7 +507,7 @@ func (vm *VM) evalIteratorOp(instrs []byte, end, ip uint32, op compiler.OpCode, 
 		vm.iters = append(vm.iters, iter)
 
 		if len(iter.items) == 0 {
-			nextIP, found := vm.findMatchingLoopMid(instrs, ip, end, compiler.OpIterBegin, compiler.OpIterNext, compiler.OpIterEnd)
+			nextIP, found := vm.findMatchingLoopMid(instrs, ip, end, bytecode.OpIterBegin, bytecode.OpIterNext, bytecode.OpIterEnd)
 			if found {
 				return nextInstruction(nextIP), true
 			}
@@ -517,7 +517,7 @@ func (vm *VM) evalIteratorOp(instrs []byte, end, ip uint32, op compiler.OpCode, 
 		vm.locals[iter.varName] = iter.items[0]
 		return nextInstruction(ip), true
 
-	case compiler.OpIterNext:
+	case bytecode.OpIterNext:
 		if len(vm.iters) == 0 {
 			return nextInstruction(ip), true
 		}
@@ -525,17 +525,17 @@ func (vm *VM) evalIteratorOp(instrs []byte, end, ip uint32, op compiler.OpCode, 
 		iter := &vm.iters[len(vm.iters)-1]
 
 		switch iter.kind {
-		case compiler.FlagAny:
+		case bytecode.FlagAny:
 			if bodyResult {
 				iter.result = true
 				return nextInstruction(ip), true
 			}
-		case compiler.FlagAll:
+		case bytecode.FlagAll:
 			if !bodyResult {
 				iter.result = false
 				return nextInstruction(ip), true
 			}
-		case compiler.FlagNone:
+		case bytecode.FlagNone:
 			if bodyResult {
 				iter.result = false
 				return nextInstruction(ip), true
@@ -549,7 +549,7 @@ func (vm *VM) evalIteratorOp(instrs []byte, end, ip uint32, op compiler.OpCode, 
 		}
 		return nextInstruction(ip), true
 
-	case compiler.OpIterEnd:
+	case bytecode.OpIterEnd:
 		if len(vm.iters) == 0 {
 			vm.push(BoolVal(false))
 			return nextInstruction(ip), true
@@ -574,9 +574,9 @@ func (vm *VM) evalIteratorOp(instrs []byte, end, ip uint32, op compiler.OpCode, 
 	}
 }
 
-func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode, flags uint8, arg uint16) (uint32, bool) {
+func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op bytecode.OpCode, flags uint8, arg uint16) (uint32, bool) {
 	switch op {
-	case compiler.OpAggBegin:
+	case bytecode.OpAggBegin:
 		list := vm.pop()
 		iter := iterState{
 			kind:    flags,
@@ -593,7 +593,7 @@ func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode,
 		vm.iters = append(vm.iters, iter)
 
 		if len(iter.items) == 0 {
-			nextIP, found := vm.findMatchingLoopMid(instrs, ip, end, compiler.OpAggBegin, compiler.OpAggAccum, compiler.OpAggEnd)
+			nextIP, found := vm.findMatchingLoopMid(instrs, ip, end, bytecode.OpAggBegin, bytecode.OpAggAccum, bytecode.OpAggEnd)
 			if found {
 				return nextInstruction(nextIP), true
 			}
@@ -603,14 +603,14 @@ func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode,
 		vm.locals[iter.varName] = iter.items[0]
 		return nextInstruction(ip), true
 
-	case compiler.OpAggAccum:
+	case bytecode.OpAggAccum:
 		if len(vm.iters) == 0 {
 			return nextInstruction(ip), true
 		}
 		popped := vm.pop()
 		val := vm.toNum(popped)
 		iter := &vm.iters[len(vm.iters)-1]
-		if vm.profile == NumericInteger && flags != compiler.FlagCount {
+		if vm.profile == NumericInteger && flags != bytecode.FlagCount {
 			// count ignores the item value, so it need not be an integer.
 			sum, err := integerSum(iter.aggSum, popped)
 			if err != nil {
@@ -618,7 +618,7 @@ func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode,
 				return nextInstruction(ip), true
 			}
 			iter.aggSum = sum
-		} else if flags != compiler.FlagCount || vm.profile != NumericInteger {
+		} else if flags != bytecode.FlagCount || vm.profile != NumericInteger {
 			iter.aggSum += val
 		}
 		iter.aggCount++
@@ -629,7 +629,7 @@ func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode,
 		}
 		return nextInstruction(ip), true
 
-	case compiler.OpAggEnd:
+	case bytecode.OpAggEnd:
 		if len(vm.iters) == 0 {
 			vm.push(NumVal(0))
 			return nextInstruction(ip), true
@@ -642,9 +642,9 @@ func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode,
 			delete(vm.locals, iter.varName)
 		}
 		switch iter.kind {
-		case compiler.FlagCount:
+		case bytecode.FlagCount:
 			vm.push(NumVal(float64(iter.aggCount)))
-		case compiler.FlagAvg:
+		case bytecode.FlagAvg:
 			switch {
 			case iter.aggCount == 0:
 				vm.push(NumVal(0))
@@ -663,8 +663,8 @@ func (vm *VM) evalAggregateOp(instrs []byte, end, ip uint32, op compiler.OpCode,
 	}
 }
 
-func (vm *VM) evalLocalOp(ip uint32, op compiler.OpCode, arg uint16) (uint32, bool) {
-	if op != compiler.OpSetLocal {
+func (vm *VM) evalLocalOp(ip uint32, op bytecode.OpCode, arg uint16) (uint32, bool) {
+	if op != bytecode.OpSetLocal {
 		return 0, false
 	}
 	val := vm.pop()

@@ -9,18 +9,18 @@ import (
 	"strings"
 	"time"
 
-	"m31labs.dev/arbiter/compiler"
+	"m31labs.dev/arbiter/bytecode"
 	dec "m31labs.dev/arbiter/decimal"
 	"m31labs.dev/arbiter/intern"
 )
 
 const (
-	// maxStack must match compiler.MaxValueStackDepth: the compiler's static
+	// maxStack must match bytecode.MaxValueStackDepth: the compiler's static
 	// stack-depth check (compiler/stackdepth.go) rejects any expression that
 	// would need to push more values than this at once, so that pathological
 	// nesting fails at compile time with a clear diagnostic instead of here,
 	// unpredictably, depending on runtime data.
-	maxStack               = compiler.MaxValueStackDepth
+	maxStack               = bytecode.MaxValueStackDepth
 	maxInstructionsPerEval = 1 << 20
 	maxRegexCacheEntries   = 256
 	maxBadRegexEntries     = 256
@@ -68,7 +68,7 @@ type VM struct {
 	stackHigh int
 	pool      *intern.Pool
 	strPool   *StringPool
-	rs        *compiler.CompiledRuleset
+	rs        *bytecode.CompiledRuleset
 	locals    map[string]any // iterator variable bindings
 	iters     []iterState
 	regexes   map[string]*regexp.Regexp
@@ -98,7 +98,7 @@ func (vm *VM) resetBudget() {
 	vm.budgetSteps = 0
 }
 
-func newVM(rs *compiler.CompiledRuleset, sp *StringPool) *VM {
+func newVM(rs *bytecode.CompiledRuleset, sp *StringPool) *VM {
 	return &VM{
 		pool:    rs.Constants,
 		strPool: sp,
@@ -136,7 +136,7 @@ func (vm *VM) peek() Value {
 }
 
 // Eval evaluates all rules in the compiled ruleset against the data context.
-func Eval(rs *compiler.CompiledRuleset, dc DataContext) ([]MatchedRule, error) {
+func Eval(rs *bytecode.CompiledRuleset, dc DataContext) ([]MatchedRule, error) {
 	return EvalWithTagFilter(rs, dc, NewStringPool(rs.Constants.Strings()), nil)
 }
 
@@ -144,19 +144,19 @@ func Eval(rs *compiler.CompiledRuleset, dc DataContext) ([]MatchedRule, error) {
 //
 // Deprecated: The string pool is now managed internally by Program. Use the
 // root-package Eval function with a *Program instead.
-func EvalWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) ([]MatchedRule, error) {
+func EvalWithPool(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringPool) ([]MatchedRule, error) {
 	return EvalWithTagFilter(rs, dc, sp, nil)
 }
 
 // evalWithPool is the internal implementation of EvalWithPool.
-func evalWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) ([]MatchedRule, error) {
+func evalWithPool(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringPool) ([]MatchedRule, error) {
 	return EvalWithTagFilter(rs, dc, sp, nil)
 }
 
 // EvalWithTagFilter evaluates bytecode using the provided tag filter and active
 // windows. It skips other governance gates. Use the root package's EvalGoverned
 // for policy decisions that depend on those gates.
-func EvalWithTagFilter(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool, tags []string) ([]MatchedRule, error) {
+func EvalWithTagFilter(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringPool, tags []string) ([]MatchedRule, error) {
 	if rs == nil {
 		return nil, fmt.Errorf("nil ruleset")
 	}
@@ -164,7 +164,7 @@ func EvalWithTagFilter(rs *compiler.CompiledRuleset, dc DataContext, sp *StringP
 	return evalRuleSelection(rs, dc, newVM(rs, sp), rs.Rules, tags)
 }
 
-func evalRuleSelection(rs *compiler.CompiledRuleset, dc DataContext, evaluator *VM, rules []compiler.RuleHeader, tags []string) ([]MatchedRule, error) {
+func evalRuleSelection(rs *bytecode.CompiledRuleset, dc DataContext, evaluator *VM, rules []bytecode.RuleHeader, tags []string) ([]MatchedRule, error) {
 	var matched []MatchedRule
 	evalTime := resolveEvalTime(dc)
 	defer evaluator.resetTransient()
@@ -230,7 +230,7 @@ func (vm *VM) resetTransient() {
 }
 
 // EvalDebug evaluates with full tracing.
-func EvalDebug(rs *compiler.CompiledRuleset, dc DataContext) DebugResult {
+func EvalDebug(rs *bytecode.CompiledRuleset, dc DataContext) DebugResult {
 	return EvalDebugWithTagFilter(rs, dc, NewStringPool(rs.Constants.Strings()), nil)
 }
 
@@ -238,17 +238,17 @@ func EvalDebug(rs *compiler.CompiledRuleset, dc DataContext) DebugResult {
 //
 // Deprecated: The string pool is now managed internally by Program. Use the
 // root-package EvalDebug function with a *Program instead.
-func EvalDebugWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) DebugResult {
+func EvalDebugWithPool(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringPool) DebugResult {
 	return EvalDebugWithTagFilter(rs, dc, sp, nil)
 }
 
 // evalDebugWithPool is the internal implementation of EvalDebugWithPool.
-func evalDebugWithPool(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool) DebugResult {
+func evalDebugWithPool(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringPool) DebugResult {
 	return EvalDebugWithTagFilter(rs, dc, sp, nil)
 }
 
 // EvalDebugWithTagFilter evaluates with full tracing using the provided tag filter.
-func EvalDebugWithTagFilter(rs *compiler.CompiledRuleset, dc DataContext, sp *StringPool, tags []string) DebugResult {
+func EvalDebugWithTagFilter(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringPool, tags []string) DebugResult {
 	start := time.Now()
 	vm := newVM(rs, sp)
 	var result DebugResult
@@ -324,7 +324,7 @@ func EvalDebugWithTagFilter(rs *compiler.CompiledRuleset, dc DataContext, sp *St
 	return result
 }
 
-func ruleWithinActiveWindow(rule compiler.RuleHeader, evalTime time.Time) bool {
+func ruleWithinActiveWindow(rule bytecode.RuleHeader, evalTime time.Time) bool {
 	nowUnixNano := evalTime.UTC().UnixNano()
 	if rule.HasActiveFrom && nowUnixNano < rule.ActiveFromUnixNano {
 		return false
@@ -386,14 +386,14 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 			vm.err = fmt.Errorf("instruction limit exceeded after %d steps", maxInstructionsPerEval)
 			return false
 		}
-		if ip+compiler.InstrSize > uint32(len(instrs)) {
+		if ip+bytecode.InstrSize > uint32(len(instrs)) {
 			break
 		}
 		vm.ip = ip
 
-		var buf [compiler.InstrSize]byte
-		copy(buf[:], instrs[ip:ip+compiler.InstrSize])
-		op, flags, arg := compiler.DecodeInstr(buf)
+		var buf [bytecode.InstrSize]byte
+		copy(buf[:], instrs[ip:ip+bytecode.InstrSize])
+		op, flags, arg := bytecode.DecodeInstr(buf)
 
 		if nextIP, handled, matched, done := vm.dispatchConditionOp(instrs, end, ip, op, flags, arg, dc); handled {
 			if vm.err != nil {
@@ -409,7 +409,7 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 			return false
 		}
 
-		ip += compiler.InstrSize
+		ip += bytecode.InstrSize
 	}
 
 	// If we ran off the end without RuleMatch, check stack
@@ -419,7 +419,7 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 	return false
 }
 
-func (vm *VM) evalActionParams(instrs []byte, params []compiler.ActionParam, dc DataContext) (map[string]any, error) {
+func (vm *VM) evalActionParams(instrs []byte, params []bytecode.ActionParam, dc DataContext) (map[string]any, error) {
 	if len(params) == 0 {
 		return nil, nil
 	}
@@ -546,16 +546,16 @@ func (vm *VM) listContainsVal(list, val Value) bool {
 }
 
 func (vm *VM) decodeListPair(instrs []byte, ip, end uint32, listIdx uint16) uint32 {
-	nextIP := ip + compiler.InstrSize
-	if nextIP+compiler.InstrSize > uint32(len(instrs)) || nextIP >= end {
+	nextIP := ip + bytecode.InstrSize
+	if nextIP+bytecode.InstrSize > uint32(len(instrs)) || nextIP >= end {
 		vm.err = fmt.Errorf("malformed list encoding at instruction %d", ip)
 		vm.push(NullVal())
 		return ip
 	}
-	var buf [compiler.InstrSize]byte
-	copy(buf[:], instrs[nextIP:nextIP+compiler.InstrSize])
-	op, flags, listLen := compiler.DecodeInstr(buf)
-	if op != compiler.OpLoadNull || flags != 0xFF {
+	var buf [bytecode.InstrSize]byte
+	copy(buf[:], instrs[nextIP:nextIP+bytecode.InstrSize])
+	op, flags, listLen := bytecode.DecodeInstr(buf)
+	if op != bytecode.OpLoadNull || flags != 0xFF {
 		vm.err = fmt.Errorf("malformed list encoding at instruction %d", ip)
 		vm.push(NullVal())
 		return ip
@@ -742,15 +742,15 @@ func (vm *VM) lookupLocal(key string) (any, bool) {
 	return resolve(base, key[dot+1:]), true
 }
 
-func (vm *VM) findMatchingLoopMid(instrs []byte, beginIP, end uint32, beginOp, midOp, endOp compiler.OpCode) (uint32, bool) {
+func (vm *VM) findMatchingLoopMid(instrs []byte, beginIP, end uint32, beginOp, midOp, endOp bytecode.OpCode) (uint32, bool) {
 	depth := 0
-	for pos := beginIP + compiler.InstrSize; pos < end; pos += compiler.InstrSize {
-		if pos+compiler.InstrSize > uint32(len(instrs)) {
+	for pos := beginIP + bytecode.InstrSize; pos < end; pos += bytecode.InstrSize {
+		if pos+bytecode.InstrSize > uint32(len(instrs)) {
 			break
 		}
-		var buf [compiler.InstrSize]byte
-		copy(buf[:], instrs[pos:pos+compiler.InstrSize])
-		op, _, _ := compiler.DecodeInstr(buf)
+		var buf [bytecode.InstrSize]byte
+		copy(buf[:], instrs[pos:pos+bytecode.InstrSize])
+		op, _, _ := bytecode.DecodeInstr(buf)
 		switch op {
 		case beginOp:
 			depth++

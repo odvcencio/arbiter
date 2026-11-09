@@ -3,12 +3,12 @@ package vm
 import (
 	"fmt"
 
-	"m31labs.dev/arbiter/compiler"
+	"m31labs.dev/arbiter/bytecode"
 )
 
 // Evaluator reuses a VM across multiple rule evaluations.
 type Evaluator struct {
-	rs *compiler.CompiledRuleset
+	rs *bytecode.CompiledRuleset
 	vm *VM
 }
 
@@ -16,18 +16,18 @@ type Evaluator struct {
 // selection. It applies active windows and skips other governance gates.
 // It reuses VM scratch state and is not safe for concurrent use.
 type PreparedEvaluator struct {
-	rs    *compiler.CompiledRuleset
-	rules []compiler.RuleHeader
+	rs    *bytecode.CompiledRuleset
+	rules []bytecode.RuleHeader
 	vm    *VM
 }
 
 // NewPreparedEvaluator selects matching rules once. The caller must not mutate
 // the ruleset or string pool while the evaluator is in use.
-func NewPreparedEvaluator(rs *compiler.CompiledRuleset, sp *StringPool, tags []string) (*PreparedEvaluator, error) {
+func NewPreparedEvaluator(rs *bytecode.CompiledRuleset, sp *StringPool, tags []string) (*PreparedEvaluator, error) {
 	if rs == nil {
 		return nil, fmt.Errorf("nil ruleset")
 	}
-	rules := make([]compiler.RuleHeader, 0, len(rs.Rules))
+	rules := make([]bytecode.RuleHeader, 0, len(rs.Rules))
 	for _, rule := range rs.Rules {
 		if rs.RuleMatchesTags(rule, tags) {
 			rules = append(rules, rule)
@@ -49,7 +49,7 @@ func (e *PreparedEvaluator) Eval(dc DataContext) ([]MatchedRule, error) {
 }
 
 // NewEvaluator creates a reusable evaluator for a compiled ruleset.
-func NewEvaluator(rs *compiler.CompiledRuleset, sp *StringPool) *Evaluator {
+func NewEvaluator(rs *bytecode.CompiledRuleset, sp *StringPool) *Evaluator {
 	return &Evaluator{
 		rs: rs,
 		vm: newVM(rs, sp),
@@ -72,7 +72,7 @@ func (e *Evaluator) String(idx uint16) string {
 }
 
 // EvalRuleCondition evaluates one rule's condition.
-func (e *Evaluator) EvalRuleCondition(rule compiler.RuleHeader, dc DataContext) (bool, error) {
+func (e *Evaluator) EvalRuleCondition(rule bytecode.RuleHeader, dc DataContext) (bool, error) {
 	e.vm.sp = 0
 	clear(e.vm.locals)
 	e.vm.iters = e.vm.iters[:0]
@@ -86,21 +86,21 @@ func (e *Evaluator) EvalRuleCondition(rule compiler.RuleHeader, dc DataContext) 
 }
 
 // HasFallback reports whether a rule has a valid fallback action.
-func (e *Evaluator) HasFallback(rule compiler.RuleHeader) bool {
+func (e *Evaluator) HasFallback(rule bytecode.RuleHeader) bool {
 	return rule.FallbackIdx != 0 && int(rule.FallbackIdx) < len(e.rs.Actions)
 }
 
 // BuildMatch builds the normal action result for a matched rule.
-func (e *Evaluator) BuildMatch(rule compiler.RuleHeader, dc DataContext) (MatchedRule, error) {
+func (e *Evaluator) BuildMatch(rule bytecode.RuleHeader, dc DataContext) (MatchedRule, error) {
 	return e.buildAction(rule, rule.ActionIdx, false, dc)
 }
 
 // BuildFallback builds the fallback action result for a rule.
-func (e *Evaluator) BuildFallback(rule compiler.RuleHeader, dc DataContext) (MatchedRule, error) {
+func (e *Evaluator) BuildFallback(rule bytecode.RuleHeader, dc DataContext) (MatchedRule, error) {
 	return e.buildAction(rule, rule.FallbackIdx, true, dc)
 }
 
-func (e *Evaluator) buildAction(rule compiler.RuleHeader, actionIdx uint16, fallback bool, dc DataContext) (MatchedRule, error) {
+func (e *Evaluator) buildAction(rule bytecode.RuleHeader, actionIdx uint16, fallback bool, dc DataContext) (MatchedRule, error) {
 	mr := MatchedRule{
 		Name:     e.String(rule.NameIdx),
 		Priority: int(rule.Priority),

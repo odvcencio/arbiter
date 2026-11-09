@@ -1,0 +1,80 @@
+# Orb Arena: a toy team game used by the gameai tests, benchmarks and guide.
+# Two teams of bots chase one orb and try to carry it into the other goal.
+# Each tick every bot makes three decisions: an intent (utility scoring), a
+# team tactic (weighted random choice) and an ability (rule with a cooldown).
+
+tag "intent"
+tag "tactic"
+tag "ability"
+
+# Decision table: how far apart the team spreads and how hard it presses,
+# by score difference. The first matching row wins, so order matters.
+table spacing {
+    lead_min: number | lead_max: number | spread: number | press: number
+    -99              | -2               | 4              | 9
+    -1               | 1                | 6              | 6
+    2                | 99               | 9              | 3
+}
+
+# Intent: every matching rule is a candidate and the runtime picks the highest
+# score. Ties go to the rule declared first.
+rule Chase tag "intent" {
+    when { not self.has_orb and orb.free }
+    then Intent { kind: "chase", score: 80 - self.orb_dist * 2 }
+}
+
+rule Carry tag "intent" {
+    when { self.has_orb }
+    then Intent { kind: "carry", score: 100 - self.pressure * 10 }
+}
+
+rule Pass tag "intent" {
+    when { self.has_orb and self.pass_open }
+    then Intent { kind: "pass", score: 60 + self.pressure * 12 - self.pass_dist }
+}
+
+rule Mark tag "intent" {
+    when { team.lost_orb and self.mark_threat > 0 }
+    then Intent { kind: "mark", score: 50 + self.mark_threat * 5 }
+}
+
+rule Hold tag "intent" {
+    when { true }
+    then Intent {
+        let row = lookup spacing
+            where lead_min <= team.score_diff and lead_max >= team.score_diff
+            else { lead_min: 0, lead_max: 0, spread: 6, press: 5 }
+        kind: "hold",
+        score: 20 + row.press,
+        spread: row.spread,
+    }
+}
+
+# Tactic: the runtime draws one candidate with probability proportional to its
+# weight, from a seed the game derives from the match seed and the tick.
+rule Press tag "tactic" {
+    when { team.score_diff < 0 }
+    then Tactic { kind: "press", weight: 3 + team.trailing_ticks / 300 }
+}
+
+rule Balanced tag "tactic" {
+    when { true }
+    then Tactic { kind: "balanced", weight: 4 }
+}
+
+rule Park tag "tactic" {
+    when { team.score_diff > 0 }
+    then Tactic { kind: "park", weight: 1 + team.score_diff }
+}
+
+# Ability: per-agent memory keeps the tick each ability last fired, so a
+# cooldown is a plain comparison and survives snapshot and restore.
+rule Dash tag "ability" {
+    when { tick - mem.last.Dash >= 90 and self.stamina >= 30 and self.orb_dist < 6 }
+    then Ability { kind: "dash", cost: 30 }
+}
+
+rule Shove tag "ability" {
+    when { tick - mem.last.Shove >= 45 and self.mark_threat >= 2 }
+    then Ability { kind: "shove", cost: 10 }
+}

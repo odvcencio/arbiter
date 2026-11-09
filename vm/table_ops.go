@@ -4,17 +4,17 @@ import (
 	"fmt"
 	"sort"
 
-	"m31labs.dev/arbiter/compiler"
+	"m31labs.dev/arbiter/bytecode"
 	"m31labs.dev/arbiter/intern"
 )
 
-func (vm *VM) evalTableOp(instrs []byte, end, ip uint32, op compiler.OpCode, flags uint8, arg uint16, dc DataContext) (uint32, bool) {
+func (vm *VM) evalTableOp(instrs []byte, end, ip uint32, op bytecode.OpCode, flags uint8, arg uint16, dc DataContext) (uint32, bool) {
 	switch op {
-	case compiler.OpLookup:
+	case bytecode.OpLookup:
 		vm.execLookup(instrs, arg, dc)
 		return nextInstruction(ip), true
 
-	case compiler.OpTableField:
+	case bytecode.OpTableField:
 		row := vm.pop()
 		fieldName := vm.strPool.Get(arg)
 		if row.Typ == TypeNull {
@@ -134,7 +134,7 @@ func (vm *VM) execLookup(instrs []byte, metaIdx uint16, dc DataContext) {
 	}
 }
 
-func (vm *VM) evalElseRow(instrs []byte, meta *compiler.LookupMeta, dc DataContext) Value {
+func (vm *VM) evalElseRow(instrs []byte, meta *bytecode.LookupMeta, dc DataContext) Value {
 	savedSP := vm.sp
 	savedLocals := cloneLocals(vm.locals)
 	vm.sp = 0
@@ -162,7 +162,7 @@ func (vm *VM) evalElseRow(instrs []byte, meta *compiler.LookupMeta, dc DataConte
 }
 
 // tableRowToValue converts a compiled table row into an ObjectVal (map[string]any).
-func tableRowToValue(table *compiler.CompiledTable, rowIdx int, sp *StringPool) Value {
+func tableRowToValue(table *bytecode.CompiledTable, rowIdx int, sp *StringPool) Value {
 	if rowIdx < 0 || rowIdx >= len(table.Rows) {
 		return NullVal()
 	}
