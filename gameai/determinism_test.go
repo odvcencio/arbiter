@@ -13,7 +13,7 @@ import (
 // the same on every target (amd64, arm64, js/wasm). If a deliberate change to
 // the engine or to arena.arb moves it, update it on one target and confirm
 // the others match.
-const wantEvalDigest = 0x4307286154f9da93
+const wantEvalDigest = 0x34fbec4a4f787df0
 
 // TestDigestOverManyEvaluations makes 60,000 decisions over random views of
 // the toy game and folds every chosen rule, score and parameter value, and a
@@ -78,7 +78,7 @@ func TestDigestOverManyEvaluations(t *testing.T) {
 				digest = gameai.Mix(digest, gameai.Key(trace.String()))
 			}
 			if k == 2 && c.OK() {
-				mem.Note(c.Rule(), v.Tick)
+				mem.Note(c.Text("kind"), v.Tick)
 			}
 		}
 	}

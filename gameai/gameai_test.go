@@ -40,7 +40,7 @@ type unit struct {
 	Enemy *struct {
 		Dist float64 `arb:"dist"`
 	} `arb:"enemy"`
-	Roll float64        `arb:"roll"`
+	Roll float64       `arb:"roll"`
 	Mem  gameai.Memory `arb:"mem"`
 }
 

@@ -67,14 +67,15 @@ rule Park tag "tactic" {
     then Tactic { kind: "park", weight: 1 + team.score_diff }
 }
 
-# Ability: per-agent memory keeps the tick each ability last fired, so a
-# cooldown is a plain comparison and survives snapshot and restore.
+# Ability: per-agent memory keeps the tick each ability kind last fired, so a
+# cooldown is a plain comparison and survives snapshot and restore. The game
+# records the chosen kind (not the rule name, which a shipped bundle may hash).
 rule Dash tag "ability" {
-    when { tick - mem.last.Dash >= 90 and self.stamina >= 30 and self.orb_dist < 6 }
+    when { tick - mem.last.dash >= 90 and self.stamina >= 30 and self.orb_dist < 6 }
     then Ability { kind: "dash", cost: 30 }
 }
 
 rule Shove tag "ability" {
-    when { tick - mem.last.Shove >= 45 and self.mark_threat >= 2 }
+    when { tick - mem.last.shove >= 45 and self.mark_threat >= 2 }
     then Ability { kind: "shove", cost: 10 }
 }

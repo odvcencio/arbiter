@@ -5,7 +5,9 @@
 //
 // Rebuild the bundle after editing arena.arb:
 //
-//	go test ./examples/gameai/arena -run TestBundleIsCurrent -update
+//	arbiter bundle examples/gameai/arena/arena.arb --game --keep-names
+//
+// or go test ./examples/gameai/arena -run TestBundleIsCurrent -update.
 package arena
 
 import _ "embed"
@@ -15,7 +17,8 @@ import _ "embed"
 //go:embed arena.arb
 var Source []byte
 
-// Bundle is Source compiled to a binary bundle with readable rule names.
+// Bundle is Source compiled to a binary bundle with readable rule names, the
+// output of `arbiter bundle arena.arb --game --keep-names`.
 //
 //go:embed arena.arbb
 var Bundle []byte

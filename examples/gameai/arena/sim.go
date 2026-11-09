@@ -202,7 +202,7 @@ func (m *Match) decide(i int) error {
 	}
 	if ability.OK() {
 		m.record(i, ability)
-		b.Mem.Note(ability.Rule(), m.Tick)
+		b.Mem.Note(ability.Text("kind"), m.Tick)
 		b.Stamina -= int64(ability.Number("cost"))
 		if ability.Text("kind") == "dash" {
 			b.DashLeft = DashTicks

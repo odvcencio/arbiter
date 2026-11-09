@@ -499,6 +499,38 @@ func computePreservedStrings(rs *bytecode.CompiledRuleset) map[uint16]bool {
 			keep[p.KeyIdx] = true
 		}
 	}
+	// A rule or segment name can share its pool entry with a string the
+	// rules use as a value or variable name (rule Gold { when { tier ==
+	// "Gold" } }). Hashing that entry would change what the rule compares,
+	// so keep every string the bytecode, lists or tables reference.
+	instrs := rs.Instructions
+	for ip := 0; ip+bytecode.InstrSize <= len(instrs); ip += bytecode.InstrSize {
+		op, flags, arg := bytecode.OpCode(instrs[ip]), instrs[ip+1], uint16(instrs[ip+2])|uint16(instrs[ip+3])<<8
+		switch op {
+		case bytecode.OpLoadStr:
+			if flags == 0 {
+				keep[arg] = true
+			}
+		case bytecode.OpLoadVar, bytecode.OpSetLocal, bytecode.OpIterBegin, bytecode.OpAggBegin, bytecode.OpTableField:
+			keep[arg] = true
+		}
+	}
+	if rs.Constants != nil {
+		for _, item := range rs.Constants.Lists() {
+			if item.Typ == intern.TypeString {
+				keep[item.Str] = true
+			}
+		}
+	}
+	for _, table := range rs.Tables {
+		for _, row := range table.Rows {
+			for _, cell := range row {
+				if cell.Typ == intern.TypeString {
+					keep[cell.Str] = true
+				}
+			}
+		}
+	}
 	return keep
 }
 
