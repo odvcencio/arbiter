@@ -607,29 +607,50 @@ func (vm *VM) evalActionParams(instrs []byte, params []bytecode.ActionParam, dc 
 // locals that were bound when the action began, plus the action's own let
 // bindings: the compiler prepends those to the first parameter's bytecode, so
 // the locals after the first parameter become the base for the rest. When it
-// returns, the locals are those the action began with.
+// returns, the locals are those the action began with. It saves locals only
+// when there are some, so an action without bindings does not allocate.
 func (vm *VM) eachActionParam(instrs []byte, params []bytecode.ActionParam, dc DataContext, emit func(key string, v Value)) error {
-	base := vm.pushFrame()
-	defer vm.popFrame(base)
+	begin, lets := -1, -1
+	if len(vm.locals) > 0 {
+		begin = vm.pushFrame()
+	}
+	var err error
 	for i, p := range params {
 		vm.sp = 0
 		vm.iters = vm.iters[:0]
 		vm.err = nil
 		if i > 0 {
-			vm.restoreFrame(base)
+			switch {
+			case lets >= 0:
+				vm.restoreFrame(lets)
+			case begin >= 0:
+				vm.restoreFrame(begin)
+			default:
+				vm.clearLocals()
+			}
 		}
 		vm.evalCondition(instrs, p.ValueOff, p.ValueLen, dc)
 		if vm.err != nil {
-			return vm.err
+			err = vm.err
+			break
 		}
 		if vm.sp > 0 {
 			emit(vm.strPool.Get(p.KeyIdx), vm.pop())
 		}
-		if i == 0 && len(params) > 1 {
-			vm.saveFrame(base)
+		if i == 0 && len(params) > 1 && len(vm.locals) > 0 {
+			lets = vm.pushFrame()
 		}
 	}
-	return nil
+	switch {
+	case begin >= 0:
+		vm.popFrame(begin)
+	case lets >= 0:
+		vm.popFrame(lets)
+		vm.clearLocals()
+	default:
+		vm.clearLocals()
+	}
+	return err
 }
 
 func (vm *VM) valueToAny(v Value) any {

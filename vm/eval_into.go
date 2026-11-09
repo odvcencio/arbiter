@@ -268,34 +268,14 @@ func (e *PreparedEvaluator) traceRule(t *Trace, i int, rule bytecode.RuleHeader,
 	})
 }
 
-// appendActionParams is eachActionParam writing into a Matches buffer. It is
-// a separate loop, not a callback, so the hot path does not allocate a
-// closure.
+// appendActionParams evaluates action parameters into a Matches buffer.
 func (vm *VM) appendActionParams(instrs []byte, params []bytecode.ActionParam, dc DataContext, out *Matches) error {
 	if len(params) == 0 {
 		return nil
 	}
-	base := vm.pushFrame()
-	defer vm.popFrame(base)
-	for i, p := range params {
-		vm.sp = 0
-		vm.iters = vm.iters[:0]
-		vm.err = nil
-		if i > 0 {
-			vm.restoreFrame(base)
-		}
-		vm.evalCondition(instrs, p.ValueOff, p.ValueLen, dc)
-		if vm.err != nil {
-			return vm.err
-		}
-		if vm.sp > 0 {
-			out.params = append(out.params, Param{Key: vm.strPool.Get(p.KeyIdx), Value: vm.pop()})
-		}
-		if i == 0 && len(params) > 1 {
-			vm.saveFrame(base)
-		}
-	}
-	return nil
+	return vm.eachActionParam(instrs, params, dc, func(key string, v Value) {
+		out.params = append(out.params, Param{Key: key, Value: v})
+	})
 }
 
 func withinWindow(rule bytecode.RuleHeader, nowUnixNano int64) bool {
