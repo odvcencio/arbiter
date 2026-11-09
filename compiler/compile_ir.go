@@ -152,12 +152,14 @@ func (c *irCompiler) compileRule(rule *ir.Rule, rs *CompiledRuleset) (RuleHeader
 		if err := checkExprStackDepth(c.program, fmt.Sprintf("rule %s condition", rule.Name), rule.Lets, rule.Condition); err != nil {
 			return RuleHeader{}, err
 		}
-		condOff := uint32(len(rs.Instructions))
 		var code []byte
 		for _, binding := range rule.Lets {
 			code = c.compileLet(code, binding)
 		}
 		code = c.compileExpr(code, rule.Condition)
+		// Take the offset only now: compiling a lookup appends its where and
+		// else code to rs.Instructions first.
+		condOff := uint32(len(rs.Instructions))
 		rs.Instructions = append(rs.Instructions, code...)
 		rh.ConditionOff = condOff
 		rh.ConditionLen = uint32(len(code))
@@ -214,13 +216,14 @@ func (c *irCompiler) compileAction(action ir.Action, rs *CompiledRuleset) Action
 			}
 			return entry
 		}
-		paramOff := uint32(len(rs.Instructions))
 		var code []byte
 		// Prepend let bindings to the first param so locals are set up.
 		if i == 0 && len(letCode) > 0 {
 			code = append(code, letCode...)
 		}
 		code = c.compileExpr(code, param.Value)
+		// Take the offset after compiling, as for conditions.
+		paramOff := uint32(len(rs.Instructions))
 		rs.Instructions = append(rs.Instructions, code...)
 		entry.Params = append(entry.Params, ActionParam{
 			KeyIdx:   c.pool.String(param.Key),
@@ -463,9 +466,9 @@ func (c *irCompiler) compileLookup(code []byte, expr *ir.Expr) []byte {
 
 	// Compile the where clause into the instruction stream.
 	if expr.Where != 0 {
-		whereOff := uint32(len(c.rs.Instructions))
 		var whereCode []byte
 		whereCode = c.compileExpr(whereCode, expr.Where)
+		whereOff := uint32(len(c.rs.Instructions)) // after any nested lookup's code
 		c.rs.Instructions = append(c.rs.Instructions, whereCode...)
 		meta.WhereOff = whereOff
 		meta.WhereLen = uint32(len(whereCode))
@@ -476,11 +479,11 @@ func (c *irCompiler) compileLookup(code []byte, expr *ir.Expr) []byte {
 	if len(expr.ElseKeys) > 0 {
 		meta.ElseKeys = make([]string, len(expr.ElseKeys))
 		copy(meta.ElseKeys, expr.ElseKeys)
-		elseOff := uint32(len(c.rs.Instructions))
 		var elseCode []byte
 		for _, valExpr := range expr.ElseVals {
 			elseCode = c.compileExpr(elseCode, valExpr)
 		}
+		elseOff := uint32(len(c.rs.Instructions)) // after any nested lookup's code
 		c.rs.Instructions = append(c.rs.Instructions, elseCode...)
 		meta.ElseOff = elseOff
 		meta.ElseLen = uint32(len(elseCode))

@@ -57,7 +57,7 @@ type iterState struct {
 	result   bool
 	aggSum   float64
 	aggCount int
-	prev     any
+	prev     Value
 	hadPrev  bool
 }
 
@@ -69,7 +69,15 @@ type VM struct {
 	pool      *intern.Pool
 	strPool   *StringPool
 	rs        *bytecode.CompiledRuleset
-	locals    map[string]any // iterator variable bindings
+	locals    []local // let, iterator and table-column bindings; names are unique
+	frames    [][]local
+	rowRefs   [][]tableRow
+	elseRows  []*elseRow
+	elseUsed  int
+	idc       IndexedDataContext
+	trace     *Trace
+	strs      []string // string pool snapshot for constant indices
+	localMask []bool   // per string index: can the name be a local? nil = unknown
 	iters     []iterState
 	regexes   map[string]*regexp.Regexp
 	regexLRU  []string
@@ -103,7 +111,39 @@ func newVM(rs *bytecode.CompiledRuleset, sp *StringPool) *VM {
 		pool:    rs.Constants,
 		strPool: sp,
 		rs:      rs,
+		strs:    sp.snapshot(),
 	}
+}
+
+// localNameMask marks, per string-pool index, the names that a let binding,
+// a quantifier or aggregate variable, or a table column can bind, together
+// with dotted names below them. Other names always come from the data
+// context, so the VM can skip the local lookup for them.
+func localNameMask(rs *bytecode.CompiledRuleset, strs []string) []bool {
+	names := map[string]bool{}
+	instrs := rs.Instructions
+	for ip := 0; ip+bytecode.InstrSize <= len(instrs); ip += bytecode.InstrSize {
+		var buf [bytecode.InstrSize]byte
+		copy(buf[:], instrs[ip:ip+bytecode.InstrSize])
+		op, _, arg := bytecode.DecodeInstr(buf)
+		switch op {
+		case bytecode.OpSetLocal, bytecode.OpIterBegin, bytecode.OpAggBegin:
+			if int(arg) < len(strs) {
+				names[strs[arg]] = true
+			}
+		}
+	}
+	for _, table := range rs.Tables {
+		for _, col := range table.Columns {
+			names[col] = true
+		}
+	}
+	mask := make([]bool, len(strs))
+	for i, s := range strs {
+		base, _, _ := strings.Cut(s, ".")
+		mask[i] = names[s] || names[base]
+	}
+	return mask
 }
 
 func (vm *VM) push(v Value) {
@@ -167,6 +207,7 @@ func EvalWithTagFilter(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringP
 func evalRuleSelection(rs *bytecode.CompiledRuleset, dc DataContext, evaluator *VM, rules []bytecode.RuleHeader, tags []string) ([]MatchedRule, error) {
 	var matched []MatchedRule
 	evalTime := resolveEvalTime(dc)
+	evaluator.resetElseRows()
 	defer evaluator.resetTransient()
 
 	for _, rule := range rules {
@@ -223,7 +264,9 @@ func (vm *VM) resetTransient() {
 		clear(vm.stack[:vm.stackHigh])
 	}
 	vm.sp, vm.stackHigh = 0, 0
-	clear(vm.locals)
+	vm.clearLocals()
+	vm.clearFrames()
+	vm.idc = nil
 	clear(vm.iters[:cap(vm.iters)])
 	vm.iters = vm.iters[:0]
 	vm.err = nil
@@ -265,7 +308,7 @@ func EvalDebugWithTagFilter(rs *bytecode.CompiledRuleset, dc DataContext, sp *St
 			continue
 		}
 		vm.sp = 0
-		clear(vm.locals)
+		vm.clearLocals()
 		vm.iters = vm.iters[:0]
 		vm.err = nil
 
@@ -379,6 +422,7 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 
 	end := off + length
 	ip := off
+	vm.idc, _ = dc.(IndexedDataContext)
 
 	for ip < end {
 		vm.budgetSteps++
@@ -391,9 +435,33 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 		}
 		vm.ip = ip
 
-		var buf [bytecode.InstrSize]byte
-		copy(buf[:], instrs[ip:ip+bytecode.InstrSize])
-		op, flags, arg := bytecode.DecodeInstr(buf)
+		op := bytecode.OpCode(instrs[ip])
+		flags := instrs[ip+1]
+		arg := uint16(instrs[ip+2]) | uint16(instrs[ip+3])<<8
+
+		if vm.fastOp(op, flags, arg, dc) {
+			if vm.err != nil {
+				return false
+			}
+			ip += bytecode.InstrSize
+			continue
+		}
+		switch op {
+		case bytecode.OpJumpIfFalse:
+			if !vm.peek().AsBool() {
+				ip += uint32(arg)
+			} else {
+				ip += bytecode.InstrSize
+			}
+			continue
+		case bytecode.OpJumpIfTrue:
+			if vm.peek().AsBool() {
+				ip += uint32(arg)
+			} else {
+				ip += bytecode.InstrSize
+			}
+			continue
+		}
 
 		if nextIP, handled, matched, done := vm.dispatchConditionOp(instrs, end, ip, op, flags, arg, dc); handled {
 			if vm.err != nil {
@@ -419,29 +487,149 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 	return false
 }
 
+// fastOp runs the commonest opcodes without the general dispatch: constant
+// and variable loads, boolean logic, and comparisons and +, -, * of two
+// numbers. It reports false for anything else, including any operand mix
+// the general path treats specially, and when tracing (so comparisons are
+// recorded) or under the integer profile (so arithmetic is checked).
+func (vm *VM) fastOp(op bytecode.OpCode, flags uint8, arg uint16, dc DataContext) bool {
+	switch op {
+	case bytecode.OpLoadVar:
+		vm.loadVar(arg, dc)
+		return true
+	case bytecode.OpLoadNum:
+		vm.push(NumVal(vm.pool.GetNumber(arg)))
+		return true
+	case bytecode.OpLoadBool:
+		vm.push(BoolVal(arg == 1))
+		return true
+	case bytecode.OpLoadStr:
+		if flags != 0 {
+			return false
+		}
+		vm.push(StrVal(arg))
+		return true
+	case bytecode.OpAnd, bytecode.OpOr:
+		if vm.sp < 2 {
+			return false
+		}
+		b, a := vm.stack[vm.sp-1].AsBool(), vm.stack[vm.sp-2].AsBool()
+		vm.sp--
+		if op == bytecode.OpAnd {
+			vm.stack[vm.sp-1] = BoolVal(a && b)
+		} else {
+			vm.stack[vm.sp-1] = BoolVal(a || b)
+		}
+		return true
+	case bytecode.OpNot:
+		if vm.sp < 1 {
+			return false
+		}
+		vm.stack[vm.sp-1] = BoolVal(!vm.stack[vm.sp-1].AsBool())
+		return true
+	case bytecode.OpEq, bytecode.OpNeq, bytecode.OpGt, bytecode.OpGte, bytecode.OpLt, bytecode.OpLte:
+		if vm.sp < 2 || vm.trace != nil {
+			return false
+		}
+		a, b := &vm.stack[vm.sp-2], &vm.stack[vm.sp-1]
+		if a.Typ != TypeNumber || b.Typ != TypeNumber {
+			return false
+		}
+		cmp := 0
+		switch {
+		case a.Num < b.Num:
+			cmp = -1
+		case a.Num > b.Num:
+			cmp = 1
+		}
+		var result bool
+		switch op {
+		case bytecode.OpEq:
+			result = a.Num == b.Num
+		case bytecode.OpNeq:
+			result = a.Num != b.Num
+		case bytecode.OpGt:
+			result = cmp > 0
+		case bytecode.OpGte:
+			result = cmp >= 0
+		case bytecode.OpLt:
+			result = cmp < 0
+		default:
+			result = cmp <= 0
+		}
+		vm.stack[vm.sp-1] = Value{}
+		vm.sp--
+		vm.stack[vm.sp-1] = BoolVal(result)
+		return true
+	case bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul:
+		if vm.sp < 2 || vm.profile != NumericDefault {
+			return false
+		}
+		a, b := &vm.stack[vm.sp-2], &vm.stack[vm.sp-1]
+		if a.Typ != TypeNumber || b.Typ != TypeNumber {
+			return false
+		}
+		var r Value
+		switch op {
+		case bytecode.OpAdd:
+			r = numResult(a.Num + b.Num)
+		case bytecode.OpSub:
+			r = numResult(a.Num - b.Num)
+		default:
+			// float64(...) rounds the product and keeps it from fusing with
+			// a later add on arm64; see the general OpMul.
+			r = numResult(float64(a.Num * b.Num))
+		}
+		vm.stack[vm.sp-1] = Value{}
+		vm.sp--
+		vm.stack[vm.sp-1] = r
+		return true
+	}
+	return false
+}
+
 func (vm *VM) evalActionParams(instrs []byte, params []bytecode.ActionParam, dc DataContext) (map[string]any, error) {
 	if len(params) == 0 {
 		return nil, nil
 	}
-	baseLocals := cloneLocals(vm.locals)
 	result := make(map[string]any, len(params))
-	for _, p := range params {
+	err := vm.eachActionParam(instrs, params, dc, func(key string, v Value) {
+		result[key] = vm.valueToAny(v)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// eachActionParam evaluates action parameters in declaration order and calls
+// emit for each one that produced a value. Every parameter starts from the
+// locals that were bound when the action began, plus the action's own let
+// bindings: the compiler prepends those to the first parameter's bytecode, so
+// the locals after the first parameter become the base for the rest. When it
+// returns, the locals are those the action began with.
+func (vm *VM) eachActionParam(instrs []byte, params []bytecode.ActionParam, dc DataContext, emit func(key string, v Value)) error {
+	base := vm.pushFrame()
+	defer vm.popFrame(base)
+	for i, p := range params {
 		vm.sp = 0
-		vm.locals = cloneLocals(baseLocals)
 		vm.iters = vm.iters[:0]
 		vm.err = nil
+		if i > 0 {
+			vm.restoreFrame(base)
+		}
 		vm.evalCondition(instrs, p.ValueOff, p.ValueLen, dc)
 		if vm.err != nil {
-			return nil, vm.err
+			return vm.err
 		}
 		if vm.sp > 0 {
-			v := vm.pop()
-			key := vm.strPool.Get(p.KeyIdx)
-			result[key] = vm.valueToAny(v)
+			emit(vm.strPool.Get(p.KeyIdx), vm.pop())
+		}
+		if i == 0 && len(params) > 1 {
+			vm.saveFrame(base)
 		}
 	}
-	vm.locals = baseLocals
-	return result, nil
+	return nil
 }
 
 func (vm *VM) valueToAny(v Value) any {
@@ -463,6 +651,12 @@ func (vm *VM) valueToAny(v Value) any {
 		}
 		return vm.poolListToAny(v.ListIdx, v.ListLen)
 	case TypeObject:
+		switch obj := v.Any.(type) {
+		case *tableRow:
+			return obj.toMap(vm.strPool)
+		case *elseRow:
+			return obj.toMap(vm)
+		}
 		return v.Any
 	case TypeDecimal:
 		if value, ok := v.Any.(dec.Value); ok {
@@ -727,19 +921,135 @@ func (vm *VM) poolValueToValue(item intern.PoolValue) Value {
 	}
 }
 
-func (vm *VM) lookupLocal(key string) (any, bool) {
-	if v, ok := vm.locals[key]; ok {
-		return v, true
+func (vm *VM) lookupLocal(key string) (Value, bool) {
+	if len(vm.locals) == 0 {
+		return Value{}, false
+	}
+	if i := vm.findLocal(key); i >= 0 {
+		return vm.locals[i].v, true
 	}
 	dot := strings.IndexByte(key, '.')
 	if dot <= 0 {
-		return nil, false
+		return Value{}, false
 	}
-	base, ok := vm.locals[key[:dot]]
-	if !ok {
-		return nil, false
+	i := vm.findLocal(key[:dot])
+	if i < 0 {
+		return Value{}, false
 	}
-	return resolve(base, key[dot+1:]), true
+	return vm.resolveValue(vm.locals[i].v, key[dot+1:]), true
+}
+
+// resolveValue walks a dotted path below a local value.
+func (vm *VM) resolveValue(base Value, path string) Value {
+	if base.Typ != TypeObject {
+		return NullVal()
+	}
+	switch obj := base.Any.(type) {
+	case *tableRow:
+		part, rest, nested := strings.Cut(path, ".")
+		field := obj.field(part, vm.strPool)
+		if !nested {
+			return field
+		}
+		return vm.resolveValue(field, rest)
+	case *elseRow:
+		part, rest, nested := strings.Cut(path, ".")
+		field := obj.field(part)
+		if !nested {
+			return field
+		}
+		return vm.resolveValue(field, rest)
+	default:
+		return anyToValue(resolve(base.Any, path), vm.strPool)
+	}
+}
+
+// local is one bound local variable. Rules bind few locals at a time, so a
+// slice searched from the end is cheaper than a map, and saving or restoring
+// all of them is one copy.
+type local struct {
+	name string
+	v    Value
+}
+
+func (vm *VM) findLocal(name string) int {
+	for i := len(vm.locals) - 1; i >= 0; i-- {
+		if vm.locals[i].name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// bindLocal sets a local variable.
+func (vm *VM) bindLocal(name string, v Value) {
+	if i := vm.findLocal(name); i >= 0 {
+		vm.locals[i].v = v
+		return
+	}
+	vm.locals = append(vm.locals, local{name: name, v: v})
+}
+
+// unbindLocal removes a local variable.
+func (vm *VM) unbindLocal(name string) {
+	if i := vm.findLocal(name); i >= 0 {
+		last := len(vm.locals) - 1
+		copy(vm.locals[i:], vm.locals[i+1:])
+		vm.locals[last] = local{}
+		vm.locals = vm.locals[:last]
+	}
+}
+
+func (vm *VM) clearLocals() {
+	clear(vm.locals)
+	vm.locals = vm.locals[:0]
+}
+
+// pushFrame saves a copy of the current locals and returns its depth. Frames
+// are reused across evaluations, so saving and restoring does not allocate in
+// steady state.
+func (vm *VM) pushFrame() int {
+	depth := len(vm.frames)
+	if depth < cap(vm.frames) {
+		vm.frames = vm.frames[:depth+1]
+	} else {
+		vm.frames = append(vm.frames, nil)
+	}
+	vm.saveFrame(depth)
+	return depth
+}
+
+// saveFrame overwrites frame depth with the current locals.
+func (vm *VM) saveFrame(depth int) {
+	frame := vm.frames[depth]
+	clear(frame)
+	vm.frames[depth] = append(frame[:0], vm.locals...)
+}
+
+// restoreFrame replaces the current locals with frame depth.
+func (vm *VM) restoreFrame(depth int) {
+	vm.clearLocals()
+	vm.locals = append(vm.locals, vm.frames[depth]...)
+}
+
+// popFrame restores frame depth and discards it and every frame above it.
+func (vm *VM) popFrame(depth int) {
+	vm.restoreFrame(depth)
+	for i := depth; i < len(vm.frames); i++ {
+		clear(vm.frames[i])
+		vm.frames[i] = vm.frames[i][:0]
+	}
+	vm.frames = vm.frames[:depth]
+}
+
+// clearFrames drops saved frames so they do not retain caller data.
+func (vm *VM) clearFrames() {
+	all := vm.frames[:cap(vm.frames)]
+	for i := range all {
+		clear(all[i])
+		all[i] = all[i][:0]
+	}
+	vm.frames = vm.frames[:0]
 }
 
 func (vm *VM) findMatchingLoopMid(instrs []byte, beginIP, end uint32, beginOp, midOp, endOp bytecode.OpCode) (uint32, bool) {
@@ -898,13 +1208,13 @@ func (vm *VM) betweenValues(val, low, high Value, includeLow, includeHigh bool) 
 	return lowOK && highOK, nil
 }
 
-func cloneLocals(src map[string]any) map[string]any {
-	if len(src) == 0 {
-		return nil
+// localValue normalizes a value stored by a let binding. A let used to store
+// the Go form of the value and convert it back on load, which dropped the
+// exact quotient that an integer-profile division carries; dropping it here
+// keeps that behaviour.
+func localValue(v Value) Value {
+	if v.Typ == TypeNumber {
+		v.Any = nil
 	}
-	dst := make(map[string]any, len(src))
-	for key, value := range src {
-		dst[key] = value
-	}
-	return dst
+	return v
 }

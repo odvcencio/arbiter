@@ -16,9 +16,11 @@ type Evaluator struct {
 // selection. It applies active windows and skips other governance gates.
 // It reuses VM scratch state and is not safe for concurrent use.
 type PreparedEvaluator struct {
-	rs    *bytecode.CompiledRuleset
-	rules []bytecode.RuleHeader
-	vm    *VM
+	rs         *bytecode.CompiledRuleset
+	rules      []bytecode.RuleHeader
+	index      []int // index of each prepared rule in rs.Rules
+	hasWindows bool
+	vm         *VM
 }
 
 // NewPreparedEvaluator selects matching rules once. The caller must not mutate
@@ -28,12 +30,14 @@ func NewPreparedEvaluator(rs *bytecode.CompiledRuleset, sp *StringPool, tags []s
 		return nil, fmt.Errorf("nil ruleset")
 	}
 	rules := make([]bytecode.RuleHeader, 0, len(rs.Rules))
-	for _, rule := range rs.Rules {
+	index := make([]int, 0, len(rs.Rules))
+	for i, rule := range rs.Rules {
 		if rs.RuleMatchesTags(rule, tags) {
 			rules = append(rules, rule)
+			index = append(index, i)
 		}
 	}
-	return &PreparedEvaluator{rs: rs, rules: rules, vm: newVM(rs, sp)}, nil
+	return newPrepared(rs, sp, rules, index), nil
 }
 
 // Eval evaluates the prepared rule selection. Active windows are checked
@@ -45,6 +49,7 @@ func (e *PreparedEvaluator) Eval(dc DataContext) ([]MatchedRule, error) {
 	// PreparedEvaluator reuses its VM across repeated calls, so each call is
 	// its own logical request and needs its own instruction budget.
 	e.vm.resetBudget()
+	e.vm.resetElseRows()
 	return evalRuleSelection(e.rs, dc, e.vm, e.rules, nil)
 }
 
@@ -74,9 +79,10 @@ func (e *Evaluator) String(idx uint16) string {
 // EvalRuleCondition evaluates one rule's condition.
 func (e *Evaluator) EvalRuleCondition(rule bytecode.RuleHeader, dc DataContext) (bool, error) {
 	e.vm.sp = 0
-	clear(e.vm.locals)
+	e.vm.clearLocals()
 	e.vm.iters = e.vm.iters[:0]
 	e.vm.err = nil
+	e.vm.resetElseRows()
 
 	ok := e.vm.evalCondition(e.rs.Instructions, rule.ConditionOff, rule.ConditionLen, dc)
 	if e.vm.err != nil {

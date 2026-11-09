@@ -29,39 +29,23 @@ func BenchmarkVMPushPop(b *testing.B) {
 	}
 }
 
-func BenchmarkCloneLocals(b *testing.B) {
+func BenchmarkLocalFrames(b *testing.B) {
 	cases := []struct {
 		name string
-		src  map[string]any
+		src  []local
 	}{
 		{name: "empty", src: nil},
-		{name: "small", src: map[string]any{"user": "u_1", "score": 720.0, "country": "US", "vip": true}},
-		{name: "medium", src: map[string]any{
-			"user":      "u_1",
-			"score":     720.0,
-			"country":   "US",
-			"vip":       true,
-			"cart":      199.0,
-			"plan":      "enterprise",
-			"region":    "na",
-			"segment":   "beta",
-			"orders":    12,
-			"lifetime":  4812.0,
-			"eligible":  true,
-			"channel":   "web",
-			"device":    "desktop",
-			"currency":  "USD",
-			"risk":      "low",
-			"warehouse": "west",
-		}},
+		{name: "small", src: []local{{"user", Value{Typ: TypeString, Any: "u_1"}}, {"score", NumVal(720)}, {"country", Value{Typ: TypeString, Any: "US"}}, {"vip", BoolVal(true)}}},
 	}
 
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) {
+			vm := benchmarkVM()
+			vm.locals = tc.src
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				_ = cloneLocals(tc.src)
+				vm.popFrame(vm.pushFrame())
 			}
 		})
 	}
