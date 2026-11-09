@@ -3,6 +3,7 @@ package compiler
 import (
 	"fmt"
 
+	"m31labs.dev/arbiter/bytecode"
 	"m31labs.dev/arbiter/ir"
 )
 
@@ -14,7 +15,7 @@ import (
 // at eval time, with a VM "stack overflow" error whose trigger point depends
 // on runtime data (see TestCompileRejectsExcessiveStackDepth). Rejecting it
 // here instead gives a clear, deterministic diagnostic at compile time.
-const MaxValueStackDepth = 256
+const MaxValueStackDepth = bytecode.MaxValueStackDepth
 
 // maxConstDepthGuard bounds recursion into const_ref chains while computing
 // stack depth. Constant cycles are already rejected by validateProgram and

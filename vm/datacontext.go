@@ -46,6 +46,16 @@ func NewStringPool(strs []string) *StringPool {
 	return sp
 }
 
+// snapshot returns the strings interned so far. Indices below its length
+// never change, so a VM may read compile-time constants from it directly.
+func (sp *StringPool) snapshot() []string {
+	if sp == nil {
+		return nil
+	}
+	strs, _ := sp.view.Load().([]string)
+	return strs
+}
+
 func (sp *StringPool) Get(idx uint16) string {
 	if sp == nil {
 		return ""
@@ -90,6 +100,16 @@ func (sp *StringPool) Err() error {
 // DataContext provides variable lookup for the VM.
 type DataContext interface {
 	Get(key string) Value
+}
+
+// IndexedDataContext is an optional DataContext extension for contexts that
+// resolve variable names ahead of time. The VM calls GetIndexed instead of Get,
+// passing the name's index in the program's string pool along with the name,
+// so a context bound to one program can find a field by index instead of by
+// hashing the name. GetIndexed must return what Get(key) would return.
+type IndexedDataContext interface {
+	DataContext
+	GetIndexed(idx uint16, key string) Value
 }
 
 // mapContext wraps a map[string]any with dot-notation key traversal.

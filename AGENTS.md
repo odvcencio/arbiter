@@ -41,6 +41,8 @@ go run ./cmd/arbiter check testdata/fraud.arb   # validate a rule file
 |------|---------|
 | `compiler/` | Bytecode compiler pipeline |
 | `vm/` | Virtual machine execution |
+| `bytecode/` | Opcodes and compiled ruleset types shared by compiler, VM and bundle codec (no parser) |
+| `gameai/` | Parser-free game AI runtime: bundles as CPU decisions, deterministic on every target |
 | `ir/` | Intermediate representation |
 | `expert/` | Forward-chaining expert inference |
 | `workflow/` | Continuous arbiter runtime |

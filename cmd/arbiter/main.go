@@ -57,6 +57,7 @@ import (
 	explorepkg "m31labs.dev/arbiter/explore"
 	"m31labs.dev/arbiter/flags"
 	"m31labs.dev/arbiter/format"
+	gamebuild "m31labs.dev/arbiter/gameai/build"
 	"m31labs.dev/arbiter/gostruct"
 	"m31labs.dev/arbiter/grpcserver"
 	"m31labs.dev/arbiter/internal/buildinfo"
@@ -2286,7 +2287,7 @@ func runFmt(args []string) error {
 
 func runBundle(args []string) error {
 	if len(args) < 1 {
-		return usageError("Usage: arbiter bundle <file.arb> [-o output.arbb] [--risk-policy policy.arb] [--force] [--sign key.pem]\n       arbiter bundle --verify <file.arbb> --pub <public-key.pem>")
+		return usageError("Usage: arbiter bundle <file.arb> [-o output.arbb] [--game] [--keep-names] [--risk-policy policy.arb] [--force] [--sign key.pem]\n       arbiter bundle --verify <file.arbb> --pub <public-key.pem>")
 	}
 
 	// Check for --verify mode first.
@@ -2315,8 +2316,14 @@ func runBundle(args []string) error {
 	riskPolicyPath := ""
 	signKeyPath := ""
 	force := false
+	game := false
+	keepNames := false
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
+		case "--game":
+			game = true
+		case "--keep-names":
+			keepNames = true
 		case "-o":
 			if i+1 < len(args) {
 				outPath = args[i+1]
@@ -2335,6 +2342,12 @@ func runBundle(args []string) error {
 		case "--force":
 			force = true
 		}
+	}
+	if outPath == "" {
+		outPath = strings.TrimSuffix(path, ".arb") + ".arbb"
+	}
+	if game {
+		return bundleGame(path, outPath, keepNames, signKeyPath)
 	}
 	prog, err := arbiter.CompileFile(path)
 	if err != nil {
@@ -2370,8 +2383,8 @@ func runBundle(args []string) error {
 	}
 
 	opts := bundle.ObfuscateOptions{
-		HashRuleNames:       true,
-		HashSegmentNames:    true,
+		HashRuleNames:       !keepNames,
+		HashSegmentNames:    !keepNames,
 		StripRolloutDetails: true,
 		StripPrereqs:        true,
 	}
@@ -2380,15 +2393,37 @@ func runBundle(args []string) error {
 		return fmt.Errorf("bundle %s: %w", path, err)
 	}
 
-	if outPath == "" {
-		outPath = strings.TrimSuffix(path, ".arb") + ".arbb"
-	}
 	if err := os.WriteFile(outPath, blob, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", outPath, err)
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d rules, %d bytes, obfuscated)\n", outPath, len(prog.Ruleset.Rules), len(blob))
+	return signBundleSidecar(blob, outPath, signKeyPath)
+}
 
-	// Sign into a detached sidecar (<bundle>.sig); the ARB1 bytes stay pristine.
+// bundleGame writes a bundle for package gameai: it checks that the rules can
+// run in a game runtime (no wall clock, no governance, plain rules only) and
+// skips the edge-export risk policy, because a game ships its decision logic
+// to clients on purpose so they can predict.
+func bundleGame(path, outPath string, keepNames bool, signKeyPath string) error {
+	res, err := gamebuild.CompileFile(path, gamebuild.Options{KeepNames: keepNames})
+	if err != nil {
+		return fmt.Errorf("bundle %s: %w", path, err)
+	}
+	if err := os.WriteFile(outPath, res.Bundle, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", outPath, err)
+	}
+	names := "hashed rule names"
+	if keepNames {
+		names = "readable rule names"
+	}
+	fmt.Fprintf(os.Stderr, "wrote %s (game bundle, %d rules, %d bytes, %s, decisions: %s, sha256 %s)\n",
+		outPath, res.Rules, len(res.Bundle), names, strings.Join(res.Tags, " "), res.Digest)
+	return signBundleSidecar(res.Bundle, outPath, signKeyPath)
+}
+
+// signBundleSidecar signs blob into a detached sidecar (<bundle>.sig) when a
+// key is given; the ARB1 bytes stay pristine.
+func signBundleSidecar(blob []byte, outPath, signKeyPath string) error {
 	if signKeyPath != "" {
 		privKey, err := loadPrivateKey(signKeyPath)
 		if err != nil {

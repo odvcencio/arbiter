@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"math"
 
+	"m31labs.dev/arbiter/bytecode"
 	"m31labs.dev/arbiter/intern"
 )
 
 // MaxSafeInteger is 2^53 - 1, the largest magnitude the integer numeric profile
 // accepts for a literal or an arithmetic result.
-const MaxSafeInteger = 1<<53 - 1
+const MaxSafeInteger = bytecode.MaxSafeInteger
 
 // NumericViolation is one place where compiled bytecode breaks the integer
 // numeric profile.

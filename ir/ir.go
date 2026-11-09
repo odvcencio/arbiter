@@ -1,6 +1,10 @@
 package ir
 
-import "regexp"
+import (
+	"regexp"
+
+	"m31labs.dev/arbiter/bytecode"
+)
 
 // ExprID indexes into Program.Exprs.
 type ExprID uint32
@@ -163,24 +167,15 @@ type Segment struct {
 }
 
 // KillSwitchState records whether a declaration omitted kill_switch, enabled it,
-// or explicitly set it off.
-type KillSwitchState string
+// or explicitly set it off. It is defined in package bytecode because compiled
+// rule headers carry it, and the runtime must not import the IR.
+type KillSwitchState = bytecode.KillSwitchState
 
 const (
-	KillSwitchUnset KillSwitchState = ""
-	KillSwitchOn    KillSwitchState = "on"
-	KillSwitchOff   KillSwitchState = "off"
+	KillSwitchUnset = bytecode.KillSwitchUnset
+	KillSwitchOn    = bytecode.KillSwitchOn
+	KillSwitchOff   = bytecode.KillSwitchOff
 )
-
-// IsSet reports whether the declaration mentioned kill_switch explicitly.
-func (s KillSwitchState) IsSet() bool {
-	return s != KillSwitchUnset
-}
-
-// Enabled reports whether the declaration enables the kill switch.
-func (s KillSwitchState) Enabled() bool {
-	return s == KillSwitchOn
-}
 
 // Rule is one top-level standard rule declaration.
 type Rule struct {

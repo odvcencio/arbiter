@@ -369,3 +369,42 @@ rule Allow {
 	}
 	return blob
 }
+
+// Hashing rule names must not hash a string literal that shares the rule's
+// name: the rule would then compare against the hash.
+func TestObfuscationKeepsStringsTheRulesUse(t *testing.T) {
+	prog, err := arbiter.Compile([]byte(`
+table tiers {
+    name: string | rank: number
+    "Gold"       | 1
+}
+rule Gold { when { tier == "Gold" and tier in ["Gold", "Silver"] } then Pick { v: "Gold" } }
+rule Ranked {
+    when { let row = lookup tiers where name == tier
+           row.rank == 1 }
+    then Pick { v: row.name }
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := bundle.MarshalObfuscated(prog.Ruleset, bundle.ObfuscateOptions{HashRuleNames: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, err := bundle.Unmarshal(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := vm.NewStringPool(rs.Constants.Strings())
+	got, err := vm.EvalWithTagFilter(rs, vm.DataFromMap(map[string]any{"tier": "Gold"}, pool), pool, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Params["v"] != "Gold" || got[1].Params["v"] != "Gold" {
+		t.Fatalf("obfuscated bundle matched %+v, want both rules with v=Gold", got)
+	}
+	if got[1].Name == "Ranked" {
+		t.Fatal("rule name Ranked was not hashed")
+	}
+}

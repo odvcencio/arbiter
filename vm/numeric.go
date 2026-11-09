@@ -5,7 +5,7 @@ import (
 	"math"
 	"math/bits"
 
-	"m31labs.dev/arbiter/compiler"
+	"m31labs.dev/arbiter/bytecode"
 )
 
 // NumericProfile selects the arithmetic rules the VM enforces at run time.
@@ -25,7 +25,7 @@ const (
 // accepts. Every integer up to it is exact in float64, and rounding any larger
 // integer to float64 gives a value above it, so an inexact input is always
 // caught by the range check.
-const MaxSafeInteger = compiler.MaxSafeInteger
+const MaxSafeInteger = bytecode.MaxSafeInteger
 
 // SetNumericProfile selects the numeric profile for later evaluations.
 func (e *Evaluator) SetNumericProfile(p NumericProfile) {
@@ -84,7 +84,7 @@ func integerSum(sum float64, item Value) (float64, error) {
 
 // evalIntegerMathOp runs one math opcode under the integer profile. It pushes
 // the result, or records an error and pushes null.
-func (vm *VM) evalIntegerMathOp(op compiler.OpCode) {
+func (vm *VM) evalIntegerMathOp(op bytecode.OpCode) {
 	v, err := vm.integerMath(op)
 	if err != nil {
 		vm.setErr(err)
@@ -93,9 +93,9 @@ func (vm *VM) evalIntegerMathOp(op compiler.OpCode) {
 	vm.push(v)
 }
 
-func (vm *VM) integerMath(op compiler.OpCode) (Value, error) {
+func (vm *VM) integerMath(op bytecode.OpCode) (Value, error) {
 	switch op {
-	case compiler.OpAbs:
+	case bytecode.OpAbs:
 		a := vm.pop()
 		x, err := asInteger("abs", a)
 		if err != nil {
@@ -105,12 +105,12 @@ func (vm *VM) integerMath(op compiler.OpCode) (Value, error) {
 			x = -x
 		}
 		return integerResult("abs", x)
-	case compiler.OpRound, compiler.OpFloor, compiler.OpCeil:
+	case bytecode.OpRound, bytecode.OpFloor, bytecode.OpCeil:
 		a := vm.pop()
 		name := "round"
-		if op == compiler.OpFloor {
+		if op == bytecode.OpFloor {
 			name = "floor"
-		} else if op == compiler.OpCeil {
+		} else if op == bytecode.OpCeil {
 			name = "ceil"
 		}
 		if a.Typ != TypeNumber || math.IsNaN(a.Num) || math.IsInf(a.Num, 0) || math.Abs(a.Num) > MaxSafeInteger {
@@ -124,9 +124,9 @@ func (vm *VM) integerMath(op compiler.OpCode) (Value, error) {
 		}
 		var r float64
 		switch op {
-		case compiler.OpFloor:
+		case bytecode.OpFloor:
 			r = math.Floor(a.Num)
-		case compiler.OpCeil:
+		case bytecode.OpCeil:
 			r = math.Ceil(a.Num)
 		default:
 			r = math.Round(a.Num)
@@ -145,11 +145,11 @@ func (vm *VM) integerMath(op compiler.OpCode) (Value, error) {
 		return NullVal(), err
 	}
 	switch op {
-	case compiler.OpAdd:
+	case bytecode.OpAdd:
 		return integerResult(name, x+y)
-	case compiler.OpSub:
+	case bytecode.OpSub:
 		return integerResult(name, x-y)
-	case compiler.OpMul:
+	case bytecode.OpMul:
 		ax, ay := absUint(x), absUint(y)
 		hi, lo := bits.Mul64(ax, ay)
 		if hi != 0 || lo > MaxSafeInteger {
@@ -160,7 +160,7 @@ func (vm *VM) integerMath(op compiler.OpCode) (Value, error) {
 			r = -r
 		}
 		return NumVal(float64(r)), nil
-	case compiler.OpDiv:
+	case bytecode.OpDiv:
 		if y == 0 {
 			return NullVal(), integerError("division by zero")
 		}
@@ -168,17 +168,17 @@ func (vm *VM) integerMath(op compiler.OpCode) (Value, error) {
 		// of magnitude at most 2^53-1, floor of the quotient equals integer floor
 		// division, so floor(a / b) is exact.
 		return quotientValue(x, y), nil
-	case compiler.OpMod:
+	case bytecode.OpMod:
 		if y == 0 {
 			return NullVal(), integerError("modulo by zero")
 		}
 		return integerResult(name, x%y)
-	case compiler.OpMin:
+	case bytecode.OpMin:
 		if x <= y {
 			return NumVal(float64(x)), nil
 		}
 		return NumVal(float64(y)), nil
-	case compiler.OpMax:
+	case bytecode.OpMax:
 		if x >= y {
 			return NumVal(float64(x)), nil
 		}
@@ -197,7 +197,7 @@ func quotientValue(n, d int64) Value {
 
 // round applies floor, ceil or round (half away from zero, as math.Round) to
 // n/d exactly. |n| <= 2^53-1 and |d| <= 2^53-1, so 2*rem cannot overflow.
-func (q quotient) round(op compiler.OpCode) int64 {
+func (q quotient) round(op bytecode.OpCode) int64 {
 	n, d := q.n, q.d
 	if d < 0 {
 		n, d = -n, -d
@@ -210,9 +210,9 @@ func (q quotient) round(op compiler.OpCode) int64 {
 	}
 	// n/d = fl + rem/d with 0 <= rem < d.
 	switch op {
-	case compiler.OpFloor:
+	case bytecode.OpFloor:
 		return fl
-	case compiler.OpCeil:
+	case bytecode.OpCeil:
 		if rem != 0 {
 			return fl + 1
 		}
@@ -252,21 +252,21 @@ func absUint(x int64) uint64 {
 	return uint64(x)
 }
 
-func integerOpName(op compiler.OpCode) string {
+func integerOpName(op bytecode.OpCode) string {
 	switch op {
-	case compiler.OpAdd:
+	case bytecode.OpAdd:
 		return "+"
-	case compiler.OpSub:
+	case bytecode.OpSub:
 		return "-"
-	case compiler.OpMul:
+	case bytecode.OpMul:
 		return "*"
-	case compiler.OpDiv:
+	case bytecode.OpDiv:
 		return "/"
-	case compiler.OpMod:
+	case bytecode.OpMod:
 		return "%"
-	case compiler.OpMin:
+	case bytecode.OpMin:
 		return "min"
-	case compiler.OpMax:
+	case bytecode.OpMax:
 		return "max"
 	}
 	return "arithmetic"

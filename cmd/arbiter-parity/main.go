@@ -555,6 +555,7 @@ func run(dump string) error {
 		{"tables", tableSection},
 		{"expert-segments", expertSegmentSection},
 		{"expert-temporal", expertTemporalSection},
+		{"gameai", gameaiSection},
 	} {
 		l, err := extra.run()
 		if err := add(extra.name, l, err); err != nil {

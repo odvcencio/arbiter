@@ -1,128 +1,102 @@
 // compiler/opcode.go
 package compiler
 
-import "encoding/binary"
+import "m31labs.dev/arbiter/bytecode"
+
+// The instruction set lives in package bytecode so that the VM and the bundle
+// codec can use it without importing the compiler, the IR, or the parser.
+// These aliases keep the compiler names working.
 
 // OpCode represents a single bytecode operation.
-type OpCode uint8
+type OpCode = bytecode.OpCode
 
 const (
-	// Stack operations
-	OpLoadStr  OpCode = iota // push Constants.strings[arg]
-	OpLoadNum                // push Constants.numbers[arg]
-	OpLoadDec                // push Constants.decimals[arg]
-	OpLoadBool               // push true (arg=1) or false (arg=0)
-	OpLoadNull               // push null
-	OpLoadVar                // push DataContext.Get(Constants.strings[arg])
-
-	// Comparison (pop 2, push bool)
-	OpEq
-	OpNeq
-	OpGt
-	OpGte
-	OpLt
-	OpLte
-
-	// Collection (pop 2, push bool)
-	OpIn
-	OpNotIn
-	OpContains
-	OpNotContains
-	OpRetains
-	OpNotRetains
-	OpVagueContains
-	OpSubsetOf
-	OpSupersetOf
-
-	// String (pop 2, push bool)
-	OpStartsWith
-	OpEndsWith
-	OpMatches
-
-	// Range (pop 3: value, low, high — push bool)
-	OpBetweenCC // [a,b]
-	OpBetweenOO // (a,b)
-	OpBetweenCO // [a,b)
-	OpBetweenOC // (a,b]
-
-	// Null (pop 1, push bool)
-	OpIsNull
-	OpIsNotNull
-
-	// Math (pop 2, push number)
-	OpAdd
-	OpSub
-	OpMul
-	OpDiv
-	OpMod
-	OpAbs
-	OpMin
-	OpMax
-	OpRound
-	OpFloor
-	OpCeil
-
-	// Logic
-	OpAnd // pop 2, push bool
-	OpOr  // pop 2, push bool
-	OpNot // pop 1, push !bool
-
-	// Control flow
-	OpJumpIfFalse // skip arg bytes forward if top is false
-	OpJumpIfTrue  // skip arg bytes forward if top is true
-
-	// Quantifiers
-	OpIterBegin // pop collection, begin iteration
-	OpIterNext  // advance iterator or jump if exhausted
-	OpIterEnd   // push final result, cleanup
-
-	// Rule boundary
-	OpRuleMatch // pop bool — if true, record rule as matched
-
-	// Future-facing statement/value helpers.
-	OpAggBegin // pop collection, begin aggregation
-	OpAggAccum // pop value, accumulate
-	OpAggEnd   // push aggregate result, cleanup
-	OpSetLocal // pop value, store in locals
-
-	// Table lookup
-	OpLookup     // execute table lookup — arg is index into LookupMetas
-	OpTableField // pop table-row object, push named field — arg is field name string index
+	OpLoadStr       = bytecode.OpLoadStr
+	OpLoadNum       = bytecode.OpLoadNum
+	OpLoadDec       = bytecode.OpLoadDec
+	OpLoadBool      = bytecode.OpLoadBool
+	OpLoadNull      = bytecode.OpLoadNull
+	OpLoadVar       = bytecode.OpLoadVar
+	OpEq            = bytecode.OpEq
+	OpNeq           = bytecode.OpNeq
+	OpGt            = bytecode.OpGt
+	OpGte           = bytecode.OpGte
+	OpLt            = bytecode.OpLt
+	OpLte           = bytecode.OpLte
+	OpIn            = bytecode.OpIn
+	OpNotIn         = bytecode.OpNotIn
+	OpContains      = bytecode.OpContains
+	OpNotContains   = bytecode.OpNotContains
+	OpRetains       = bytecode.OpRetains
+	OpNotRetains    = bytecode.OpNotRetains
+	OpVagueContains = bytecode.OpVagueContains
+	OpSubsetOf      = bytecode.OpSubsetOf
+	OpSupersetOf    = bytecode.OpSupersetOf
+	OpStartsWith    = bytecode.OpStartsWith
+	OpEndsWith      = bytecode.OpEndsWith
+	OpMatches       = bytecode.OpMatches
+	OpBetweenCC     = bytecode.OpBetweenCC
+	OpBetweenOO     = bytecode.OpBetweenOO
+	OpBetweenCO     = bytecode.OpBetweenCO
+	OpBetweenOC     = bytecode.OpBetweenOC
+	OpIsNull        = bytecode.OpIsNull
+	OpIsNotNull     = bytecode.OpIsNotNull
+	OpAdd           = bytecode.OpAdd
+	OpSub           = bytecode.OpSub
+	OpMul           = bytecode.OpMul
+	OpDiv           = bytecode.OpDiv
+	OpMod           = bytecode.OpMod
+	OpAbs           = bytecode.OpAbs
+	OpMin           = bytecode.OpMin
+	OpMax           = bytecode.OpMax
+	OpRound         = bytecode.OpRound
+	OpFloor         = bytecode.OpFloor
+	OpCeil          = bytecode.OpCeil
+	OpAnd           = bytecode.OpAnd
+	OpOr            = bytecode.OpOr
+	OpNot           = bytecode.OpNot
+	OpJumpIfFalse   = bytecode.OpJumpIfFalse
+	OpJumpIfTrue    = bytecode.OpJumpIfTrue
+	OpIterBegin     = bytecode.OpIterBegin
+	OpIterNext      = bytecode.OpIterNext
+	OpIterEnd       = bytecode.OpIterEnd
+	OpRuleMatch     = bytecode.OpRuleMatch
+	OpAggBegin      = bytecode.OpAggBegin
+	OpAggAccum      = bytecode.OpAggAccum
+	OpAggEnd        = bytecode.OpAggEnd
+	OpSetLocal      = bytecode.OpSetLocal
+	OpLookup        = bytecode.OpLookup
+	OpTableField    = bytecode.OpTableField
 )
 
 // Iterator flags for OpIterBegin.
 const (
-	FlagAny  uint8 = 0
-	FlagAll  uint8 = 1
-	FlagNone uint8 = 2
+	FlagAny  = bytecode.FlagAny
+	FlagAll  = bytecode.FlagAll
+	FlagNone = bytecode.FlagNone
 )
 
 // Aggregate flags for OpAggBegin/OpAggAccum/OpAggEnd.
 const (
-	FlagSum   uint8 = 0
-	FlagCount uint8 = 1
-	FlagAvg   uint8 = 2
+	FlagSum   = bytecode.FlagSum
+	FlagCount = bytecode.FlagCount
+	FlagAvg   = bytecode.FlagAvg
 )
 
 // InstrSize is the fixed width of every instruction in bytes.
-const InstrSize = 4
+const InstrSize = bytecode.InstrSize
 
 // EncodeInstr encodes an instruction into 4 bytes: [opcode, flags, arg_lo, arg_hi].
 func EncodeInstr(op OpCode, flags uint8, arg uint16) [InstrSize]byte {
-	var buf [InstrSize]byte
-	buf[0] = uint8(op)
-	buf[1] = flags
-	binary.LittleEndian.PutUint16(buf[2:], arg)
-	return buf
+	return bytecode.EncodeInstr(op, flags, arg)
 }
 
 // DecodeInstr decodes 4 bytes into opcode, flags, and arg.
 func DecodeInstr(buf [InstrSize]byte) (OpCode, uint8, uint16) {
-	return OpCode(buf[0]), buf[1], binary.LittleEndian.Uint16(buf[2:])
+	return bytecode.DecodeInstr(buf)
 }
 
 // Emit appends an encoded instruction to a byte slice and returns the new slice.
 func Emit(dst []byte, op OpCode, flags uint8, arg uint16) []byte {
-	instr := EncodeInstr(op, flags, arg)
-	return append(dst, instr[:]...)
+	return bytecode.Emit(dst, op, flags, arg)
 }

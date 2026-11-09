@@ -51,6 +51,14 @@ jobs:
       - name: Build WASM
         run: GOOS=js GOARCH=wasm go build -tags grammar_blobs_external -o /dev/null ./cmd/arbiter-wasm
 
+      - name: Game AI runtime size (js/wasm)
+        run: go test ./gameai -run '^TestWasmSize$' -v -count=1
+
+      - name: Game AI tests on js/wasm (determinism digests, zero allocations)
+        run: |
+          export PATH="$PATH:$(go env GOROOT)/lib/wasm"
+          GOOS=js GOARCH=wasm go test ./gameai ./examples/gameai/arena -short -count=1
+
       - name: Check grammar
         run: go run ./cmd/arbiter check testdata/fraud.arb
 

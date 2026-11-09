@@ -1,6 +1,8 @@
 // Package wire is the binary codec for compiled Arbiter rulesets. It does not
-// import the .arb parser or grammar packages, so a program that only loads
-// precompiled bundles stays small. Package bundle re-exports it.
+// import the .arb parser, the IR, the compiler or gotreesitter (the test
+// TestRuntimeDoesNotLinkParser in package gameai checks this), so a program
+// that only loads precompiled bundles stays small and builds for js/wasm.
+// Package bundle re-exports it.
 package wire
 
 import (
@@ -11,10 +13,9 @@ import (
 	"fmt"
 	"io"
 
-	"m31labs.dev/arbiter/compiler"
+	"m31labs.dev/arbiter/bytecode"
 	dec "m31labs.dev/arbiter/decimal"
 	"m31labs.dev/arbiter/intern"
-	"m31labs.dev/arbiter/ir"
 )
 
 // Magic bytes and version for the binary format.
@@ -44,12 +45,12 @@ type ObfuscateOptions struct {
 }
 
 // Marshal serializes a CompiledRuleset to a binary blob.
-func Marshal(rs *compiler.CompiledRuleset) ([]byte, error) {
+func Marshal(rs *bytecode.CompiledRuleset) ([]byte, error) {
 	return MarshalObfuscated(rs, ObfuscateOptions{})
 }
 
 // MarshalObfuscated serializes a CompiledRuleset with obfuscation applied.
-func MarshalObfuscated(rs *compiler.CompiledRuleset, opts ObfuscateOptions) ([]byte, error) {
+func MarshalObfuscated(rs *bytecode.CompiledRuleset, opts ObfuscateOptions) ([]byte, error) {
 	if rs == nil {
 		return nil, fmt.Errorf("nil ruleset")
 	}
@@ -195,7 +196,7 @@ func MarshalObfuscated(rs *compiler.CompiledRuleset, opts ObfuscateOptions) ([]b
 }
 
 // Unmarshal deserializes a binary blob back into a CompiledRuleset.
-func Unmarshal(data []byte) (*compiler.CompiledRuleset, error) {
+func Unmarshal(data []byte) (*bytecode.CompiledRuleset, error) {
 	d := newBundleDecoder(data)
 
 	var m [4]byte
@@ -294,7 +295,7 @@ func Unmarshal(data []byte) (*compiler.CompiledRuleset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read rule count: %w", err)
 	}
-	rules := make([]compiler.RuleHeader, ruleCount)
+	rules := make([]bytecode.RuleHeader, ruleCount)
 	for i := range ruleCount {
 		rules[i], err = d.readRuleHeader()
 		if err != nil {
@@ -307,7 +308,7 @@ func Unmarshal(data []byte) (*compiler.CompiledRuleset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read action count: %w", err)
 	}
-	actions := make([]compiler.ActionEntry, actionCount)
+	actions := make([]bytecode.ActionEntry, actionCount)
 	for i := range actionCount {
 		actions[i].NameIdx, err = d.readU16()
 		if err != nil {
@@ -317,7 +318,7 @@ func Unmarshal(data []byte) (*compiler.CompiledRuleset, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read action param count: %w", err)
 		}
-		actions[i].Params = make([]compiler.ActionParam, paramCount)
+		actions[i].Params = make([]bytecode.ActionParam, paramCount)
 		for j := range paramCount {
 			keyIdx, err := d.readU16()
 			if err != nil {
@@ -331,7 +332,7 @@ func Unmarshal(data []byte) (*compiler.CompiledRuleset, error) {
 			if err != nil {
 				return nil, fmt.Errorf("read action param length: %w", err)
 			}
-			actions[i].Params[j] = compiler.ActionParam{
+			actions[i].Params[j] = bytecode.ActionParam{
 				KeyIdx:   keyIdx,
 				ValueOff: valueOff,
 				ValueLen: valueLen,
@@ -381,9 +382,9 @@ func Unmarshal(data []byte) (*compiler.CompiledRuleset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read table count: %w", err)
 	}
-	tables := make([]compiler.CompiledTable, tableCount)
+	tables := make([]bytecode.CompiledTable, tableCount)
 	for i := range tableCount {
-		tbl := compiler.CompiledTable{}
+		tbl := bytecode.CompiledTable{}
 		tbl.Name, err = d.readString()
 		if err != nil {
 			return nil, fmt.Errorf("read table name: %w", err)
@@ -424,9 +425,9 @@ func Unmarshal(data []byte) (*compiler.CompiledRuleset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read lookup meta count: %w", err)
 	}
-	lookupMetas := make([]compiler.LookupMeta, metaCount)
+	lookupMetas := make([]bytecode.LookupMeta, metaCount)
 	for i := range metaCount {
-		lm := compiler.LookupMeta{}
+		lm := bytecode.LookupMeta{}
 		lm.TableIdx, err = d.readU16()
 		if err != nil {
 			return nil, fmt.Errorf("read lookup meta table index: %w", err)
@@ -475,7 +476,7 @@ func Unmarshal(data []byte) (*compiler.CompiledRuleset, error) {
 		return nil, fmt.Errorf("bundle has %d trailing bytes", d.r.Len())
 	}
 
-	return &compiler.CompiledRuleset{
+	return &bytecode.CompiledRuleset{
 		Constants:    pool,
 		Instructions: instructions,
 		Rules:        rules,
@@ -490,7 +491,7 @@ func Unmarshal(data []byte) (*compiler.CompiledRuleset, error) {
 
 // computePreservedStrings finds string indices that must stay readable:
 // action names and param keys (the caller reads these from results).
-func computePreservedStrings(rs *compiler.CompiledRuleset) map[uint16]bool {
+func computePreservedStrings(rs *bytecode.CompiledRuleset) map[uint16]bool {
 	keep := make(map[uint16]bool)
 	for _, a := range rs.Actions {
 		keep[a.NameIdx] = true
@@ -498,10 +499,42 @@ func computePreservedStrings(rs *compiler.CompiledRuleset) map[uint16]bool {
 			keep[p.KeyIdx] = true
 		}
 	}
+	// A rule or segment name can share its pool entry with a string the
+	// rules use as a value or variable name (rule Gold { when { tier ==
+	// "Gold" } }). Hashing that entry would change what the rule compares,
+	// so keep every string the bytecode, lists or tables reference.
+	instrs := rs.Instructions
+	for ip := 0; ip+bytecode.InstrSize <= len(instrs); ip += bytecode.InstrSize {
+		op, flags, arg := bytecode.OpCode(instrs[ip]), instrs[ip+1], uint16(instrs[ip+2])|uint16(instrs[ip+3])<<8
+		switch op {
+		case bytecode.OpLoadStr:
+			if flags == 0 {
+				keep[arg] = true
+			}
+		case bytecode.OpLoadVar, bytecode.OpSetLocal, bytecode.OpIterBegin, bytecode.OpAggBegin, bytecode.OpTableField:
+			keep[arg] = true
+		}
+	}
+	if rs.Constants != nil {
+		for _, item := range rs.Constants.Lists() {
+			if item.Typ == intern.TypeString {
+				keep[item.Str] = true
+			}
+		}
+	}
+	for _, table := range rs.Tables {
+		for _, row := range table.Rows {
+			for _, cell := range row {
+				if cell.Typ == intern.TypeString {
+					keep[cell.Str] = true
+				}
+			}
+		}
+	}
 	return keep
 }
 
-func shouldObfuscateString(idx uint16, rs *compiler.CompiledRuleset, opts ObfuscateOptions, preserve map[uint16]bool) bool {
+func shouldObfuscateString(idx uint16, rs *bytecode.CompiledRuleset, opts ObfuscateOptions, preserve map[uint16]bool) bool {
 	if preserve[idx] {
 		return false
 	}
@@ -540,11 +573,11 @@ func writeBool(w *bytes.Buffer, v bool) {
 		w.WriteByte(0)
 	}
 }
-func writeKillSwitchState(w *bytes.Buffer, v ir.KillSwitchState) {
+func writeKillSwitchState(w *bytes.Buffer, v bytecode.KillSwitchState) {
 	switch v {
-	case ir.KillSwitchOn:
+	case bytecode.KillSwitchOn:
 		w.WriteByte(1)
-	case ir.KillSwitchOff:
+	case bytecode.KillSwitchOff:
 		w.WriteByte(2)
 	default:
 		w.WriteByte(0)
@@ -554,7 +587,7 @@ func writeString(w *bytes.Buffer, s string) {
 	writeU32(w, uint32(len(s)))
 	w.WriteString(s)
 }
-func writeRuleHeader(w *bytes.Buffer, r compiler.RuleHeader) {
+func writeRuleHeader(w *bytes.Buffer, r bytecode.RuleHeader) {
 	writeU16(w, r.NameIdx)
 	binary.Write(w, binary.LittleEndian, r.Priority)
 	writeU32(w, r.ConditionOff)
@@ -687,18 +720,18 @@ func (d *bundleDecoder) readBool() (bool, error) {
 	return v != 0, nil
 }
 
-func (d *bundleDecoder) readKillSwitchState() (ir.KillSwitchState, error) {
+func (d *bundleDecoder) readKillSwitchState() (bytecode.KillSwitchState, error) {
 	v, err := d.readU8()
 	if err != nil {
-		return ir.KillSwitchUnset, err
+		return bytecode.KillSwitchUnset, err
 	}
 	switch v {
 	case 1:
-		return ir.KillSwitchOn, nil
+		return bytecode.KillSwitchOn, nil
 	case 2:
-		return ir.KillSwitchOff, nil
+		return bytecode.KillSwitchOff, nil
 	default:
-		return ir.KillSwitchUnset, nil
+		return bytecode.KillSwitchUnset, nil
 	}
 }
 
@@ -757,108 +790,108 @@ func (d *bundleDecoder) readPoolValue() (intern.PoolValue, error) {
 	}, nil
 }
 
-func (d *bundleDecoder) readRuleHeader() (compiler.RuleHeader, error) {
+func (d *bundleDecoder) readRuleHeader() (bytecode.RuleHeader, error) {
 	nameIdx, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	priority, err := d.readI32()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	conditionOff, err := d.readU32()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	conditionLen, err := d.readU32()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	actionIdx, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	fallbackIdx, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	killSwitch, err := d.readKillSwitchState()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	hasActiveFrom, err := d.readBool()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	activeFromUnixNano, err := d.readI64()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	hasActiveUntil, err := d.readBool()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	activeUntilUnixNano, err := d.readI64()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	hasRollout, err := d.readBool()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	rolloutBps, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	rolloutSubjectIdx, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	rolloutNamespaceIdx, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	hasRolloutSubject, err := d.readBool()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	hasRolloutNamespace, err := d.readBool()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	prereqOff, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	prereqLen, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	tagOff, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	tagLen, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	excludeOff, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	excludeLen, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	segmentNameIdx, err := d.readU16()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
 	hasSegment, err := d.readBool()
 	if err != nil {
-		return compiler.RuleHeader{}, err
+		return bytecode.RuleHeader{}, err
 	}
-	return compiler.RuleHeader{
+	return bytecode.RuleHeader{
 		NameIdx:             nameIdx,
 		Priority:            priority,
 		ConditionOff:        conditionOff,

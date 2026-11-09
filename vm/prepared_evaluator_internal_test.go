@@ -28,7 +28,7 @@ func TestPreparedEvaluatorClearsPoppedIteratorBackingAndRecoversAfterError(t *te
 
 	retained := make([]any, 1024)
 	prepared.vm.iters = make([]iterState, 1, 4)
-	prepared.vm.iters[0] = iterState{items: retained, prev: retained, hadPrev: true}
+	prepared.vm.iters[0] = iterState{items: retained, prev: DynListVal(retained), hadPrev: true}
 	prepared.vm.iters = prepared.vm.iters[:0]
 
 	_, err = prepared.Eval(DataFromMap(map[string]any{"a": Value{Typ: TypeDecimal, Any: "bad"}, "b": 2}, sp))
@@ -36,7 +36,7 @@ func TestPreparedEvaluatorClearsPoppedIteratorBackingAndRecoversAfterError(t *te
 		t.Fatalf("unexpected prepared error: %v", err)
 	}
 	for i, state := range prepared.vm.iters[:cap(prepared.vm.iters)] {
-		if state.items != nil || state.prev != nil {
+		if state.items != nil || state.prev.Any != nil {
 			t.Fatalf("iterator backing slot %d retained transient data: %+v", i, state)
 		}
 	}
