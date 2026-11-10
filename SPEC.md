@@ -77,6 +77,8 @@ expert rule <Name> [priority <N>] [per_fact] [cooldown <dur>] [debounce <dur>] {
   `stable_for <N> cycles` -- must hold across N consecutive fixpoint rounds.
   `cooldown <D>` -- suppressed for D after firing.
   `debounce <D>` -- waits D after condition becomes true; resets if interrupted.
+  A duration `<D>` is a number plus one unit: `ms`, `s`, `m`, `hr`, `h` or `d`.
+  `h` is an alias of `hr` (`for 1h` equals `for 1hr`).
 - **Action kinds**: `assert` (upsert fact), `emit` (produce outcome),
   `retract` (remove fact), `modify` (update fields via `set` block).
 

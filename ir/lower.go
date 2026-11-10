@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 	"m31labs.dev/arbiter/internal/parseutil"
@@ -42,15 +43,57 @@ func Lower(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) 
 	return l.program, nil
 }
 
-// The parser can discard an incomplete operator without setting HasError.
-// Reject an unrepresented arithmetic operator instead of compiling a partial expression.
+// The parser can discard source without setting HasError: error recovery may
+// drop a whole declaration and leave loose fragments under the root.
+// Reject any byte that no parsed leaf covers, unless it is whitespace.
+// Comments, strings and other literals are leaves, so their contents are covered.
 // Recovery can truncate the root span, so check the entire source buffer.
-// Parsed strings and comments are leaf spans, so their contents are excluded.
 func checkArithmeticTokens(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) error {
 	cursor := uint32(0)
+	// The grammar defines >=, <= and != as hidden tokens (_ge_op, _le_op,
+	// _ne_op). They are real source in comparison_expr, but are not child
+	// nodes. Collect the span between the operands when it is exactly one of
+	// them, so the gap check treats it as covered.
+	var hidden [][2]uint32
+	var collectHidden func(*gotreesitter.Node)
+	collectHidden = func(n *gotreesitter.Node) {
+		if n.ChildCount() == 0 {
+			return
+		}
+		if n.Type(lang) == "comparison_expr" {
+			left := n.ChildByFieldName("left", lang)
+			right := n.ChildByFieldName("right", lang)
+			if left != nil && right != nil && right.StartByte() > left.EndByte() {
+				between := source[left.EndByte():right.StartByte()]
+				switch op := bytes.TrimSpace(between); string(op) {
+				case ">=", "<=", "!=":
+					start := left.EndByte() + uint32(bytes.Index(between, op))
+					hidden = append(hidden, [2]uint32{start, start + uint32(len(op))})
+				}
+			}
+		}
+		for i := 0; i < int(n.ChildCount()); i++ {
+			collectHidden(n.Child(i))
+		}
+	}
+	collectHidden(root)
 	checkGap := func(end uint32) error {
-		if end > cursor && bytes.IndexAny(source[cursor:end], "+-*/%") >= 0 {
-			return fmt.Errorf("invalid or incomplete arithmetic expression; use pct for percentage quantities")
+		from := cursor
+		for _, h := range hidden {
+			if h[1] <= from || h[0] >= end {
+				continue
+			}
+			if h[0] > from {
+				if err := unparsedGapError(source, from, h[0]); err != nil {
+					return err
+				}
+			}
+			if h[1] > from {
+				from = h[1]
+			}
+		}
+		if end > from {
+			return unparsedGapError(source, from, end)
 		}
 		return nil
 	}
@@ -117,6 +160,40 @@ func checkArithmeticTokens(root *gotreesitter.Node, source []byte, lang *gotrees
 		return err
 	}
 	return checkGap(uint32(len(source)))
+}
+
+// unparsedGapError reports the first non-whitespace byte in source[start:end].
+// A lone "%" keeps the percentage-specific message; any other text is reported
+// with its line, column and a short snippet.
+func unparsedGapError(source []byte, start, end uint32) error {
+	if end > uint32(len(source)) {
+		end = uint32(len(source))
+	}
+	gap := source[start:end]
+	trimmed := bytes.TrimSpace(gap)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if string(trimmed) == "%" {
+		return fmt.Errorf("invalid or incomplete arithmetic expression; use pct for percentage quantities")
+	}
+	pos := int(start) + bytes.Index(gap, trimmed)
+	line := 1 + bytes.Count(source[:pos], []byte("\n"))
+	col := pos - (bytes.LastIndexByte(source[:pos], '\n') + 1) + 1
+	snippet := source[pos:]
+	if i := bytes.IndexByte(snippet, '\n'); i >= 0 {
+		snippet = snippet[:i]
+	}
+	const maxSnippet = 24
+	suffix := ""
+	if len(snippet) > maxSnippet {
+		snippet = snippet[:maxSnippet]
+		for len(snippet) > 0 && !utf8.Valid(snippet) {
+			snippet = snippet[:len(snippet)-1]
+		}
+		suffix = "..."
+	}
+	return fmt.Errorf("unparsed source at %d:%d near %q: the rule was not compiled", line, col, strings.TrimSpace(string(snippet))+suffix)
 }
 
 type lowerer struct {

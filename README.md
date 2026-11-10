@@ -871,6 +871,11 @@ Use `pct` for percentage quantities, such as `50 pct`. The former `50 %` suffix
 is rejected because it conflicts with remainder expressions. Percent characters
 inside strings and comments are unaffected.
 
+The compiler rejects source that the parser did not turn into syntax. Any text
+outside whitespace, comments and parsed tokens is an error with its line and
+column, for example `unparsed source at 77:7 near "} for 1h": the rule was not
+compiled`. Previously, error recovery could drop a whole rule silently.
+
 These are breaking source-language changes after v1.12.0. v1.12.0 also grouped
 many chains of five or more terms from the right: `1000 - 2 - 3 - 4 - 5` gave
 `1002` instead of `986`. Chains now always group left to right, so long `-` and
@@ -1074,6 +1079,8 @@ expert rule RouteManualReview {
     }
 }
 ```
+
+Temporal durations (`for`, `within`, `cooldown`, `debounce`) take a number and a unit: `ms`, `s`, `m`, `hr`, `h` or `d`. `h` is an alias of `hr`, so `for 1h` and `for 1hr` mean the same.
 
 ### Operators
 
