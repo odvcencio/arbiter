@@ -2,12 +2,15 @@
 
 ## Unreleased
 
+## [1.13.1] — 2026-11-10
+
 ### Changed
 
 - **Only space, tab, carriage return and newline count as whitespace.** The grammar's whitespace set is `[ \t\r\n]`. A no-break space (U+00A0) or form feed outside a string or comment was already not valid syntax, but error recovery could skip it silently. It is now reported as unparsed source.
 
 ### Fixed
 
+- **Long `and` / `or` chains.** An `and` or `or` chain of about 450 or more terms is now rejected as unparsed source. gotreesitter v0.20.1 cannot parse a chain that long and used to drop the rule silently. Split such a condition into smaller rules, segments or constants.
 - **Silently dropped rules.** Invalid syntax inside a rule could make the parser drop the whole declaration without setting an error, so the compiler emitted nothing for it. The dropped text also took the next rule with it, so one bad line could silently remove two rules. The compiler now rejects any source byte that no parsed token covers (other than whitespace and comments) with `unparsed source at LINE:COL near "...": the declaration was not compiled`, on the in-memory path and on the file and include path (where it carries the file name). A declaration with a missing final `}` is now rejected too instead of being dropped. A lone `%` keeps its `use pct` message. If a policy that compiled before now fails, the rule was never running; fix the text the error points at.
 - **Comparisons with a comment next to the operator.** Earlier versions compiled `>=`, `<=` or `!=` as `==` when a comment sat next to the operator, for example `x != // note` then `5`, `x >= /* min */ 5` or `x /* max */ <= 5`. Such a rule fired only when the two values were equal. These now compile with the written operator. The compiler also rejects a comparison with two operators (`x == != 5`) and no longer falls back to `==` when it cannot find the operator. Neither the policies we scanned nor the repository testdata contain this form, but recompile and re-test any policy that has a comment beside a comparison operator.
 - **`for 1h` in expert rules.** Temporal durations (`for`, `within`, `cooldown`, `debounce`) accepted `hr` but not `h`, so `for 1h` triggered the dropped-rule defect above. `h` is now an alias of `hr`.

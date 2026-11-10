@@ -1,10 +1,12 @@
 # arbiter
 
-## What's new in v1.13.0
+## What's new in v1.13.1
 
-**Correct arithmetic grouping** — multiplication, division and remainder bind before addition and subtraction, and chains group left to right. Adjacent subtraction such as `10-3-2` evaluates to 5. These are source-language changes: audit policy outcomes before recompiling. Write percentage quantities as `50 pct`; `%` now always means remainder. See the [migration details](CHANGELOG.md#1130--2026-10-22).
+**No more silently dropped rules** — invalid syntax inside a rule could make the parser drop the whole declaration, and the rule after it, without an error. The compiler now rejects any source the parser did not parse, with a line, column and snippet. Policies that compiled before may now fail; the rule they lost was never running.
 
-**Patched build foundation** — Go 1.26.10 and patched dependencies, dependency-integrity and vulnerability checks, and cross-target parity on amd64, native arm64 and WebAssembly. Existing bytecode and wire-format versions are unchanged from v1.12.0.
+**Comparison operators beside comments** — `>=`, `<=` and `!=` with a comment next to the operator were compiled as `==`. They now keep the written operator.
+
+**`h` as hours** — temporal durations (`for 1h`, `within`, `cooldown`, `debounce`) accept `h` as an alias of `hr`.
 
 ---
 
