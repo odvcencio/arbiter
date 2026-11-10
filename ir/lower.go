@@ -1363,7 +1363,11 @@ func (l *lowerer) lowerExpr(n *gotreesitter.Node, scope *scope) ExprID {
 			Operand: l.lowerExpr(n.ChildByFieldName("operand", l.lang), scope),
 		})
 	case "comparison_expr":
-		return l.lowerBinary(n, scope, comparisonOp(n, l.source, l.lang))
+		op, ok := comparisonOp(n, l.source, l.lang)
+		if !ok {
+			l.errs = append(l.errs, fmt.Errorf("unrecognised comparison operator at byte %d", n.StartByte()))
+		}
+		return l.lowerBinary(n, scope, op)
 	case "in_expr":
 		return l.lowerBinary(n, scope, BinaryIn)
 	case "not_in_expr":
@@ -1929,59 +1933,31 @@ func spanForNode(n *gotreesitter.Node) Span {
 	}
 }
 
-func comparisonOp(n *gotreesitter.Node, source []byte, lang *gotreesitter.Language) BinaryOpKind {
-	if opNode := n.ChildByFieldName("op", lang); opNode != nil {
-		switch strings.TrimSpace(string(source[opNode.StartByte():opNode.EndByte()])) {
-		case "==":
-			return BinaryEq
-		case "!=":
-			return BinaryNeq
-		case ">":
-			return BinaryGt
-		case ">=":
-			return BinaryGte
-		case "<":
-			return BinaryLt
-		case "<=":
-			return BinaryLte
-		}
+// comparisonOp returns the operator of a comparison_expr. A visible operator
+// comes from the "op" field. >=, <= and != are hidden tokens, so they are
+// found in the gaps between the operands, skipping comment children. It
+// returns false when there is not exactly one operator, so a comparison is
+// never silently compiled as ==.
+func comparisonOp(n *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (BinaryOpKind, bool) {
+	text, ok := comparisonOperatorText(n, source, lang)
+	if !ok {
+		return BinaryEq, false
 	}
-	for i := 0; i < int(n.ChildCount()); i++ {
-		text := strings.TrimSpace(string(source[n.Child(i).StartByte():n.Child(i).EndByte()]))
-		switch text {
-		case "==":
-			return BinaryEq
-		case "!=":
-			return BinaryNeq
-		case ">":
-			return BinaryGt
-		case ">=":
-			return BinaryGte
-		case "<":
-			return BinaryLt
-		case "<=":
-			return BinaryLte
-		}
+	switch text {
+	case "==":
+		return BinaryEq, true
+	case "!=":
+		return BinaryNeq, true
+	case ">":
+		return BinaryGt, true
+	case ">=":
+		return BinaryGte, true
+	case "<":
+		return BinaryLt, true
+	case "<=":
+		return BinaryLte, true
 	}
-	leftNode := n.ChildByFieldName("left", lang)
-	rightNode := n.ChildByFieldName("right", lang)
-	if leftNode != nil && rightNode != nil {
-		switch strings.TrimSpace(string(source[leftNode.EndByte():rightNode.StartByte()])) {
-		case "==":
-			return BinaryEq
-		case "!=":
-			return BinaryNeq
-		case ">":
-			return BinaryGt
-		case ">=":
-			return BinaryGte
-		case "<":
-			return BinaryLt
-		case "<=":
-			return BinaryLte
-		}
-	}
-	return BinaryEq
+	return BinaryEq, false
 }
 
 func mathOp(n *gotreesitter.Node, source []byte, lang *gotreesitter.Language) BinaryOpKind {

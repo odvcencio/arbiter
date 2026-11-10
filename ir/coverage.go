@@ -18,6 +18,9 @@ const (
 	CoverageUnparsed CoverageKind = iota
 	// CoveragePercent is a "%" the grammar did not consume as remainder.
 	CoveragePercent
+	// CoverageOperator is a dangling "+", "-", "*" or "/" followed by text
+	// that was not parsed, such as the unsupported unary minus in "-x".
+	CoverageOperator
 )
 
 // SourceCoverageError reports source the parser did not turn into syntax.
@@ -39,6 +42,9 @@ type SourceCoverageError struct {
 // Message is the error text without the position, for callers that add their
 // own file and position prefix.
 func (e *SourceCoverageError) Message() string {
+	if e.Kind == CoverageOperator {
+		return fmt.Sprintf("invalid or incomplete arithmetic expression near %q: use (0 - value) to negate an expression", e.Snippet)
+	}
 	if e.Kind == CoveragePercent {
 		return fmt.Sprintf("invalid or incomplete arithmetic expression near %q: use pct for percentage quantities", e.Snippet)
 	}
@@ -53,6 +59,9 @@ func (e *SourceCoverageError) consequence() string {
 }
 
 func (e *SourceCoverageError) Error() string {
+	if e.Kind == CoverageOperator {
+		return fmt.Sprintf("invalid or incomplete arithmetic expression at %d:%d near %q: use (0 - value) to negate an expression", e.Line, e.Col, e.Snippet)
+	}
 	if e.Kind == CoveragePercent {
 		return fmt.Sprintf("invalid or incomplete arithmetic expression at %d:%d near %q: use pct for percentage quantities", e.Line, e.Col, e.Snippet)
 	}
@@ -154,10 +163,15 @@ type coverageWalker struct {
 	// declaration or comment, or -1. Such tokens are what recovery leaves
 	// behind when it drops a declaration.
 	looseStart int
+	// hiddenUsed holds the comparisons whose single hidden operator has been
+	// seen, keyed by span.
+	hiddenUsed map[[2]uint32]struct{}
+	// lastLeaf and lastParent are the token that last advanced the cursor.
+	lastLeaf, lastParent *gotreesitter.Node
 }
 
 func checkSource(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language, arith bool) error {
-	w := &coverageWalker{source: source, lang: lang, arith: arith, looseStart: -1}
+	w := &coverageWalker{source: source, lang: lang, arith: arith, looseStart: -1, hiddenUsed: map[[2]uint32]struct{}{}}
 	if bytes.HasPrefix(source, []byte{0xEF, 0xBB, 0xBF}) {
 		w.cursor = 3
 	}
@@ -197,14 +211,22 @@ func (w *coverageWalker) inDeclaration(pos uint32) bool {
 	return w.next < len(w.decls) && w.decls[w.next][0] <= pos
 }
 
-// hiddenOperator reports whether text is a comparison operator that the
-// grammar defines as a hidden token (_ge_op, _le_op, _ne_op), so it is real
-// source but not a child node. It must sit between the operands of an
-// enclosing comparison_expr.
-func (w *coverageWalker) hiddenOperator(text []byte, start, end uint32) bool {
+// hiddenOperatorTexts are the comparison operators the grammar defines as
+// hidden tokens (_ge_op, _le_op, _ne_op): real source, but not child nodes.
+func isHiddenOperator(text []byte) bool {
 	switch string(text) {
 	case ">=", "<=", "!=":
-	default:
+		return true
+	}
+	return false
+}
+
+// hiddenOperator reports whether text between start and end is the one
+// hidden operator of an enclosing comparison_expr that has no visible
+// operator. A comparison may use at most one operator, so a second operator
+// (for example "x == != 5") is left uncovered and reported.
+func (w *coverageWalker) hiddenOperator(text []byte, start, end uint32) bool {
+	if !isHiddenOperator(text) {
 		return false
 	}
 	for i := len(w.stack) - 1; i >= 0; i-- {
@@ -212,13 +234,69 @@ func (w *coverageWalker) hiddenOperator(text []byte, start, end uint32) bool {
 		if c.Type(w.lang) != "comparison_expr" {
 			continue
 		}
+		if c.ChildByFieldName("op", w.lang) != nil {
+			continue
+		}
 		left := c.ChildByFieldName("left", w.lang)
 		right := c.ChildByFieldName("right", w.lang)
-		if left != nil && right != nil && left.EndByte() <= start && end <= right.StartByte() {
-			return true
+		if left == nil || right == nil || left.EndByte() > start || end > right.StartByte() {
+			continue
 		}
+		key := [2]uint32{c.StartByte(), c.EndByte()}
+		if _, used := w.hiddenUsed[key]; used {
+			return false
+		}
+		w.hiddenUsed[key] = struct{}{}
+		return true
 	}
 	return false
+}
+
+// comparisonOperatorText returns the operator text of a comparison_expr: the
+// visible "op" field, or the single hidden operator found in the gaps between
+// neighbouring children (comments are children, so each gap is checked on its
+// own). It returns false unless there is exactly one operator.
+func comparisonOperatorText(n *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (string, bool) {
+	if op := n.ChildByFieldName("op", lang); op != nil {
+		return strings.TrimSpace(string(source[op.StartByte():op.EndByte()])), true
+	}
+	left := n.ChildByFieldName("left", lang)
+	right := n.ChildByFieldName("right", lang)
+	if left == nil || right == nil || right.StartByte() < left.EndByte() {
+		return "", false
+	}
+	found := ""
+	count := 0
+	pos := left.EndByte()
+	check := func(end uint32) {
+		if end > pos {
+			if text := trimGrammarSpace(source[pos:end]); isHiddenOperator(text) {
+				found = string(text)
+				count++
+			}
+		}
+	}
+	for i := 0; i < int(n.ChildCount()); i++ {
+		c := n.Child(i)
+		if c.StartByte() < left.EndByte() || c.EndByte() > right.StartByte() {
+			continue
+		}
+		check(c.StartByte())
+		pos = c.EndByte()
+	}
+	check(right.StartByte())
+	return found, count == 1
+}
+
+func trimGrammarSpace(b []byte) []byte {
+	i, j := 0, len(b)
+	for i < j && isGrammarSpace(b[i]) {
+		i++
+	}
+	for j > i && isGrammarSpace(b[j-1]) {
+		j--
+	}
+	return b[i:j]
 }
 
 // gap checks the bytes from the cursor up to end, which no token covers.
@@ -249,6 +327,13 @@ func (w *coverageWalker) gap(end uint32) error {
 	kind := CoverageUnparsed
 	if gap[first] == '%' {
 		kind = CoveragePercent
+	} else if op := w.lastLeaf; op != nil && !op.IsNamed() && op.EndByte() == start && op.EndByte() == op.StartByte()+1 &&
+		bytes.IndexByte([]byte("+-*/"), w.source[op.StartByte()]) >= 0 &&
+		(w.lastParent == nil || w.lastParent.Type(w.lang) != "arbiter_wildcard") {
+		// A dangling arithmetic operator: report the operator with the
+		// negation guidance, as before the unparsed-source check existed.
+		pos = int(op.StartByte())
+		kind = CoverageOperator
 	}
 	inDecl := w.inDeclaration(uint32(pos)) || (w.looseStart >= 0 && pos >= w.looseStart)
 	return newCoverageError(w.source, pos, kind, inDecl)
@@ -284,6 +369,7 @@ func (w *coverageWalker) walk(n, parent *gotreesitter.Node) error {
 		}
 		if end := n.EndByte(); end > w.cursor {
 			w.cursor = end
+			w.lastLeaf, w.lastParent = n, parent
 		}
 		return nil
 	}

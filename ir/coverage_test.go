@@ -79,6 +79,7 @@ func TestCoverageErrorsCarryExactPosition(t *testing.T) {
 		{"then", "rule R priority 1 {\n    when { x > 1 }\n    then ok { a: 1 } @@\n}\n", ir.CoverageUnparsed, 3, 22, `"@@"`},
 		{"duration unit", "expert rule R priority 0 {\n    when { any r in facts.F { r.x > 1 } } for 1w\n    then emit O { a: 1, }\n}\n", ir.CoverageUnparsed, 2, 47, `1w`},
 		{"missing final brace", "rule A { when { x > 1 } then ok {} }\n\nrule B { when { x > 2 } then ok {\n", ir.CoverageUnparsed, 3, 1, `rule`},
+		{"unary minus", "rule R {\n    when { true }\n    then ok { value: -x }\n}\n", ir.CoverageOperator, 3, 22, "use (0 - value)"},
 		{"percent value", "rule R { when { true } then Out { value: % } }\n", ir.CoveragePercent, 1, 42, "use pct"},
 	}
 	for _, tc := range cases {
