@@ -1,12 +1,9 @@
 package ir
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 	"m31labs.dev/arbiter/internal/parseutil"
@@ -23,7 +20,7 @@ func Lower(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) 
 	if root.HasError() {
 		return nil, fmt.Errorf("parse errors in arbiter source")
 	}
-	if err := checkArithmeticTokens(root, source, lang); err != nil {
+	if err := checkSource(root, source, lang, true); err != nil {
 		return nil, err
 	}
 
@@ -41,159 +38,6 @@ func Lower(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) 
 	}
 	l.program.rebuildIndexes()
 	return l.program, nil
-}
-
-// The parser can discard source without setting HasError: error recovery may
-// drop a whole declaration and leave loose fragments under the root.
-// Reject any byte that no parsed leaf covers, unless it is whitespace.
-// Comments, strings and other literals are leaves, so their contents are covered.
-// Recovery can truncate the root span, so check the entire source buffer.
-func checkArithmeticTokens(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) error {
-	cursor := uint32(0)
-	// The grammar defines >=, <= and != as hidden tokens (_ge_op, _le_op,
-	// _ne_op). They are real source in comparison_expr, but are not child
-	// nodes. Collect the span between the operands when it is exactly one of
-	// them, so the gap check treats it as covered.
-	var hidden [][2]uint32
-	var collectHidden func(*gotreesitter.Node)
-	collectHidden = func(n *gotreesitter.Node) {
-		if n.ChildCount() == 0 {
-			return
-		}
-		if n.Type(lang) == "comparison_expr" {
-			left := n.ChildByFieldName("left", lang)
-			right := n.ChildByFieldName("right", lang)
-			if left != nil && right != nil && right.StartByte() > left.EndByte() {
-				between := source[left.EndByte():right.StartByte()]
-				switch op := bytes.TrimSpace(between); string(op) {
-				case ">=", "<=", "!=":
-					start := left.EndByte() + uint32(bytes.Index(between, op))
-					hidden = append(hidden, [2]uint32{start, start + uint32(len(op))})
-				}
-			}
-		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			collectHidden(n.Child(i))
-		}
-	}
-	collectHidden(root)
-	checkGap := func(end uint32) error {
-		from := cursor
-		for _, h := range hidden {
-			if h[1] <= from || h[0] >= end {
-				continue
-			}
-			if h[0] > from {
-				if err := unparsedGapError(source, from, h[0]); err != nil {
-					return err
-				}
-			}
-			if h[1] > from {
-				from = h[1]
-			}
-		}
-		if end > from {
-			return unparsedGapError(source, from, end)
-		}
-		return nil
-	}
-	var walk func(*gotreesitter.Node, *gotreesitter.Node) error
-	walk = func(n, parent *gotreesitter.Node) error {
-		kind := n.Type(lang)
-		numericLiteral := kind == "number_literal" || kind == "decimal_literal" || kind == "quantity_literal"
-		if numericLiteral {
-			// Signed literals contain a visible sign and a hidden immediate
-			// token. Recovery can retain only the sign, without HasError.
-			// Check the whole literal before treating its span as opaque.
-			text := string(source[n.StartByte():n.EndByte()])
-			if kind != "number_literal" {
-				parts := strings.Fields(text)
-				if len(parts) != 2 {
-					return fmt.Errorf("invalid %s", kind)
-				}
-				text = parts[0]
-			}
-			if _, err := strconv.ParseFloat(text, 64); err != nil {
-				return fmt.Errorf("invalid %s: %w", kind, err)
-			}
-		}
-		if n.ChildCount() == 0 || numericLiteral {
-			if err := checkGap(n.StartByte()); err != nil {
-				return err
-			}
-			// Recovery may retain an anonymous operator outside an expression.
-			// A minus may also introduce a signed literal, and arbiter targets
-			// have a wildcard token. Named leaves (strings, paths, comments,
-			// timestamps and exponents) retain their contents as literal text.
-			if !n.IsNamed() && n.EndByte() == n.StartByte()+1 && bytes.IndexByte([]byte("+-*/%"), source[n.StartByte()]) >= 0 {
-				if parent == nil {
-					return fmt.Errorf("arithmetic operator outside an expression")
-				}
-				opChar := source[n.StartByte()]
-				kind := parent.Type(lang)
-				wildcard := opChar == '*' && kind == "arbiter_wildcard"
-				if !wildcard {
-					if kind != "math_expr" && kind != "product_expr" {
-						return fmt.Errorf("invalid or incomplete arithmetic expression; use (0 - value) to negate an expression")
-					}
-					op := parent.ChildByFieldName("op", lang)
-					left := parent.ChildByFieldName("left", lang)
-					right := parent.ChildByFieldName("right", lang)
-					if op == nil || op.StartByte() != n.StartByte() || left == nil || right == nil || left.EndByte() == left.StartByte() || right.EndByte() == right.StartByte() {
-						return fmt.Errorf("invalid or incomplete arithmetic expression")
-					}
-				}
-			}
-			if end := n.EndByte(); end > cursor {
-				cursor = end
-			}
-			return nil
-		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			if err := walk(n.Child(i), n); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := walk(root, nil); err != nil {
-		return err
-	}
-	return checkGap(uint32(len(source)))
-}
-
-// unparsedGapError reports the first non-whitespace byte in source[start:end].
-// A lone "%" keeps the percentage-specific message; any other text is reported
-// with its line, column and a short snippet.
-func unparsedGapError(source []byte, start, end uint32) error {
-	if end > uint32(len(source)) {
-		end = uint32(len(source))
-	}
-	gap := source[start:end]
-	trimmed := bytes.TrimSpace(gap)
-	if len(trimmed) == 0 {
-		return nil
-	}
-	if string(trimmed) == "%" {
-		return fmt.Errorf("invalid or incomplete arithmetic expression; use pct for percentage quantities")
-	}
-	pos := int(start) + bytes.Index(gap, trimmed)
-	line := 1 + bytes.Count(source[:pos], []byte("\n"))
-	col := pos - (bytes.LastIndexByte(source[:pos], '\n') + 1) + 1
-	snippet := source[pos:]
-	if i := bytes.IndexByte(snippet, '\n'); i >= 0 {
-		snippet = snippet[:i]
-	}
-	const maxSnippet = 24
-	suffix := ""
-	if len(snippet) > maxSnippet {
-		snippet = snippet[:maxSnippet]
-		for len(snippet) > 0 && !utf8.Valid(snippet) {
-			snippet = snippet[:len(snippet)-1]
-		}
-		suffix = "..."
-	}
-	return fmt.Errorf("unparsed source at %d:%d near %q: the rule was not compiled", line, col, strings.TrimSpace(string(snippet))+suffix)
 }
 
 type lowerer struct {
@@ -2038,6 +1882,8 @@ func parseTemporalDurationExpr(text string) (float64, string) {
 	switch strings.TrimSpace(text[unitStart:]) {
 	case "m":
 		return value, "min"
+	case "h":
+		return value, "hr"
 	default:
 		return value, strings.TrimSpace(text[unitStart:])
 	}
@@ -2055,9 +1901,14 @@ func (l *lowerer) lowerTemporalDuration(n *gotreesitter.Node) *Duration {
 			break
 		}
 	}
+	unit := strings.TrimSpace(text[unitStart:])
+	if unit == "h" {
+		// "h" is an alias of "hr" in temporal durations; later stages see one unit.
+		unit = "hr"
+	}
 	return &Duration{
 		Value: parseutil.ParseFloat(strings.TrimSpace(text[:unitStart])),
-		Unit:  strings.TrimSpace(text[unitStart:]),
+		Unit:  unit,
 		Span:  spanForNode(n),
 	}
 }

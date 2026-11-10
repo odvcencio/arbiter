@@ -873,8 +873,11 @@ inside strings and comments are unaffected.
 
 The compiler rejects source that the parser did not turn into syntax. Any text
 outside whitespace, comments and parsed tokens is an error with its line and
-column, for example `unparsed source at 77:7 near "} for 1h": the rule was not
-compiled`. Previously, error recovery could drop a whole rule silently.
+column, for example `unparsed source at 77:7 near "} for 1w": the declaration
+was not compiled`. A declaration that error recovery dropped, such as one
+missing its final `}`, is rejected the same way. Errors from files and includes
+name the file. Previously, recovery could drop a whole rule, and the rule after
+it, silently.
 
 These are breaking source-language changes after v1.12.0. v1.12.0 also grouped
 many chains of five or more terms from the right: `1000 - 2 - 3 - 4 - 5` gave

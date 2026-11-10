@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- **Silently dropped rules.** Invalid syntax inside a rule could make the parser drop the whole declaration without setting an error, so the compiler emitted nothing for it. The dropped text also took the next rule with it, so one bad line could silently remove two rules. The compiler now rejects any source byte that no parsed token covers (other than whitespace and comments) with `unparsed source at LINE:COL near "...": the rule was not compiled`. A lone `%` keeps its `use pct` message. If a policy that compiled before now fails, the rule was never running; fix the text the error points at.
+- **Silently dropped rules.** Invalid syntax inside a rule could make the parser drop the whole declaration without setting an error, so the compiler emitted nothing for it. The dropped text also took the next rule with it, so one bad line could silently remove two rules. The compiler now rejects any source byte that no parsed token covers (other than whitespace and comments) with `unparsed source at LINE:COL near "...": the declaration was not compiled`, on the in-memory path and on the file and include path (where it carries the file name). A declaration with a missing final `}` is now rejected too instead of being dropped. A lone `%` keeps its `use pct` message. If a policy that compiled before now fails, the rule was never running; fix the text the error points at.
 - **`for 1h` in expert rules.** Temporal durations (`for`, `within`, `cooldown`, `debounce`) accepted `hr` but not `h`, so `for 1h` triggered the dropped-rule defect above. `h` is now an alias of `hr`.
 
 ## [1.13.0] — 2026-10-22
