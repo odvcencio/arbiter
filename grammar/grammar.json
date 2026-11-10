@@ -4925,7 +4925,7 @@
     "temporal_duration_literal": {
       "content": {
         "type": "PATTERN",
-        "value": "[0-9]+(\\.[0-9]+)?(ms|s|m|hr|d)"
+        "value": "[0-9]+(\\.[0-9]+)?(ms|s|m|hr|h|d)"
       },
       "type": "TOKEN"
     },

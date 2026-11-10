@@ -1,10 +1,8 @@
 package ir
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
@@ -22,7 +20,7 @@ func Lower(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) 
 	if root.HasError() {
 		return nil, fmt.Errorf("parse errors in arbiter source")
 	}
-	if err := checkArithmeticTokens(root, source, lang); err != nil {
+	if err := checkSource(root, source, lang, true); err != nil {
 		return nil, err
 	}
 
@@ -40,83 +38,6 @@ func Lower(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) 
 	}
 	l.program.rebuildIndexes()
 	return l.program, nil
-}
-
-// The parser can discard an incomplete operator without setting HasError.
-// Reject an unrepresented arithmetic operator instead of compiling a partial expression.
-// Recovery can truncate the root span, so check the entire source buffer.
-// Parsed strings and comments are leaf spans, so their contents are excluded.
-func checkArithmeticTokens(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) error {
-	cursor := uint32(0)
-	checkGap := func(end uint32) error {
-		if end > cursor && bytes.IndexAny(source[cursor:end], "+-*/%") >= 0 {
-			return fmt.Errorf("invalid or incomplete arithmetic expression; use pct for percentage quantities")
-		}
-		return nil
-	}
-	var walk func(*gotreesitter.Node, *gotreesitter.Node) error
-	walk = func(n, parent *gotreesitter.Node) error {
-		kind := n.Type(lang)
-		numericLiteral := kind == "number_literal" || kind == "decimal_literal" || kind == "quantity_literal"
-		if numericLiteral {
-			// Signed literals contain a visible sign and a hidden immediate
-			// token. Recovery can retain only the sign, without HasError.
-			// Check the whole literal before treating its span as opaque.
-			text := string(source[n.StartByte():n.EndByte()])
-			if kind != "number_literal" {
-				parts := strings.Fields(text)
-				if len(parts) != 2 {
-					return fmt.Errorf("invalid %s", kind)
-				}
-				text = parts[0]
-			}
-			if _, err := strconv.ParseFloat(text, 64); err != nil {
-				return fmt.Errorf("invalid %s: %w", kind, err)
-			}
-		}
-		if n.ChildCount() == 0 || numericLiteral {
-			if err := checkGap(n.StartByte()); err != nil {
-				return err
-			}
-			// Recovery may retain an anonymous operator outside an expression.
-			// A minus may also introduce a signed literal, and arbiter targets
-			// have a wildcard token. Named leaves (strings, paths, comments,
-			// timestamps and exponents) retain their contents as literal text.
-			if !n.IsNamed() && n.EndByte() == n.StartByte()+1 && bytes.IndexByte([]byte("+-*/%"), source[n.StartByte()]) >= 0 {
-				if parent == nil {
-					return fmt.Errorf("arithmetic operator outside an expression")
-				}
-				opChar := source[n.StartByte()]
-				kind := parent.Type(lang)
-				wildcard := opChar == '*' && kind == "arbiter_wildcard"
-				if !wildcard {
-					if kind != "math_expr" && kind != "product_expr" {
-						return fmt.Errorf("invalid or incomplete arithmetic expression; use (0 - value) to negate an expression")
-					}
-					op := parent.ChildByFieldName("op", lang)
-					left := parent.ChildByFieldName("left", lang)
-					right := parent.ChildByFieldName("right", lang)
-					if op == nil || op.StartByte() != n.StartByte() || left == nil || right == nil || left.EndByte() == left.StartByte() || right.EndByte() == right.StartByte() {
-						return fmt.Errorf("invalid or incomplete arithmetic expression")
-					}
-				}
-			}
-			if end := n.EndByte(); end > cursor {
-				cursor = end
-			}
-			return nil
-		}
-		for i := 0; i < int(n.ChildCount()); i++ {
-			if err := walk(n.Child(i), n); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := walk(root, nil); err != nil {
-		return err
-	}
-	return checkGap(uint32(len(source)))
 }
 
 type lowerer struct {
@@ -1442,7 +1363,11 @@ func (l *lowerer) lowerExpr(n *gotreesitter.Node, scope *scope) ExprID {
 			Operand: l.lowerExpr(n.ChildByFieldName("operand", l.lang), scope),
 		})
 	case "comparison_expr":
-		return l.lowerBinary(n, scope, comparisonOp(n, l.source, l.lang))
+		op, ok := comparisonOp(n, l.source, l.lang)
+		if !ok {
+			l.errs = append(l.errs, fmt.Errorf("unrecognised comparison operator at byte %d", n.StartByte()))
+		}
+		return l.lowerBinary(n, scope, op)
 	case "in_expr":
 		return l.lowerBinary(n, scope, BinaryIn)
 	case "not_in_expr":
@@ -1961,6 +1886,8 @@ func parseTemporalDurationExpr(text string) (float64, string) {
 	switch strings.TrimSpace(text[unitStart:]) {
 	case "m":
 		return value, "min"
+	case "h":
+		return value, "hr"
 	default:
 		return value, strings.TrimSpace(text[unitStart:])
 	}
@@ -1978,9 +1905,14 @@ func (l *lowerer) lowerTemporalDuration(n *gotreesitter.Node) *Duration {
 			break
 		}
 	}
+	unit := strings.TrimSpace(text[unitStart:])
+	if unit == "h" {
+		// "h" is an alias of "hr" in temporal durations; later stages see one unit.
+		unit = "hr"
+	}
 	return &Duration{
 		Value: parseutil.ParseFloat(strings.TrimSpace(text[:unitStart])),
-		Unit:  strings.TrimSpace(text[unitStart:]),
+		Unit:  unit,
 		Span:  spanForNode(n),
 	}
 }
@@ -2001,59 +1933,31 @@ func spanForNode(n *gotreesitter.Node) Span {
 	}
 }
 
-func comparisonOp(n *gotreesitter.Node, source []byte, lang *gotreesitter.Language) BinaryOpKind {
-	if opNode := n.ChildByFieldName("op", lang); opNode != nil {
-		switch strings.TrimSpace(string(source[opNode.StartByte():opNode.EndByte()])) {
-		case "==":
-			return BinaryEq
-		case "!=":
-			return BinaryNeq
-		case ">":
-			return BinaryGt
-		case ">=":
-			return BinaryGte
-		case "<":
-			return BinaryLt
-		case "<=":
-			return BinaryLte
-		}
+// comparisonOp returns the operator of a comparison_expr. A visible operator
+// comes from the "op" field. >=, <= and != are hidden tokens, so they are
+// found in the gaps between the operands, skipping comment children. It
+// returns false when there is not exactly one operator, so a comparison is
+// never silently compiled as ==.
+func comparisonOp(n *gotreesitter.Node, source []byte, lang *gotreesitter.Language) (BinaryOpKind, bool) {
+	text, ok := comparisonOperatorText(n, source, lang)
+	if !ok {
+		return BinaryEq, false
 	}
-	for i := 0; i < int(n.ChildCount()); i++ {
-		text := strings.TrimSpace(string(source[n.Child(i).StartByte():n.Child(i).EndByte()]))
-		switch text {
-		case "==":
-			return BinaryEq
-		case "!=":
-			return BinaryNeq
-		case ">":
-			return BinaryGt
-		case ">=":
-			return BinaryGte
-		case "<":
-			return BinaryLt
-		case "<=":
-			return BinaryLte
-		}
+	switch text {
+	case "==":
+		return BinaryEq, true
+	case "!=":
+		return BinaryNeq, true
+	case ">":
+		return BinaryGt, true
+	case ">=":
+		return BinaryGte, true
+	case "<":
+		return BinaryLt, true
+	case "<=":
+		return BinaryLte, true
 	}
-	leftNode := n.ChildByFieldName("left", lang)
-	rightNode := n.ChildByFieldName("right", lang)
-	if leftNode != nil && rightNode != nil {
-		switch strings.TrimSpace(string(source[leftNode.EndByte():rightNode.StartByte()])) {
-		case "==":
-			return BinaryEq
-		case "!=":
-			return BinaryNeq
-		case ">":
-			return BinaryGt
-		case ">=":
-			return BinaryGte
-		case "<":
-			return BinaryLt
-		case "<=":
-			return BinaryLte
-		}
-	}
-	return BinaryEq
+	return BinaryEq, false
 }
 
 func mathOp(n *gotreesitter.Node, source []byte, lang *gotreesitter.Language) BinaryOpKind {

@@ -1013,7 +1013,7 @@ func ArbiterGrammar() *Grammar {
 	g.Define("number_literal", signedLiteral(Pat(`[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?`)))
 	g.Define("unit_literal", Pat(`(?:gal/min|L/min|L/hr|m3/s|fl_oz|km/h|m/s|mm2|cm2|km2|m2|kWh|kHz|MHz|GHz|mL|kPa|hPa|atm|psi|pct|ppm|ppb|acre|mph|min|hr|ms|mm|cm|km|in|ft|yd|mi|mg|kg|lb|oz|Pa|bar|ha|kn|mA|mV|kV|kW|MW|cal|kJ|kcal|Hz|KB|MB|GB|TB|gal|L|C|F|K|m|g|s|d|A|V|W|J|B|hp)`))
 	g.Define("duration_literal", Pat(`([0-9]+(ns|us|µs|ms|s|m|h))+`))
-	g.Define("temporal_duration_literal", Token(Pat(`[0-9]+(\.[0-9]+)?(ms|s|m|hr|d)`)))
+	g.Define("temporal_duration_literal", Token(Pat(`[0-9]+(\.[0-9]+)?(ms|s|m|hr|h|d)`)))
 	g.Define("string_literal", Pat(`"[^"]*"`))
 	g.Define("slack_channel_literal", Token(Prec(1, Pat(`#[^\s{}"]+`))))
 	g.Define("resource_literal", Pat(`[^\s{}"#]+`))

@@ -602,6 +602,10 @@ func (l *sourceUnitLoader) expandInto(path string, out *strings.Builder, generat
 	}
 	root, err := parseTreeWithLanguage(source, l.lang)
 	if err != nil {
+		var cov *ir.SourceCoverageError
+		if errors.As(err, &cov) {
+			return coverageDiagnostic(path, cov)
+		}
 		return fmt.Errorf("%s: %w", path, err)
 	}
 
@@ -715,7 +719,27 @@ func parseTreeWithLanguage(source []byte, lang *gotreesitter.Language) (*gotrees
 	if root.HasError() {
 		return nil, buildParseError(root, source, lang)
 	}
+	// Recovery can drop whole declarations without setting HasError. Check the
+	// original bytes here, so every path (Compile, ParseSource, CompileFile and
+	// includes) reports the same line and column.
+	if err := ir.CheckSourceCoverage(root, source, lang); err != nil {
+		return nil, coverageDiagnostic("", err)
+	}
 	return root, nil
+}
+
+// coverageDiagnostic turns a source-coverage failure into a positioned
+// diagnostic. Other errors pass through unchanged.
+func coverageDiagnostic(file string, err error) error {
+	var cov *ir.SourceCoverageError
+	if !errors.As(err, &cov) {
+		return err
+	}
+	message := cov.Error()
+	if file != "" {
+		message = cov.Message()
+	}
+	return &DiagnosticError{File: file, Line: cov.Line, Column: cov.Col, Message: message, Err: cov}
 }
 
 func rejectIncludeDeclarations(root *gotreesitter.Node, source []byte, lang *gotreesitter.Language) error {

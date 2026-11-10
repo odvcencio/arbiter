@@ -958,7 +958,7 @@ func parseStepOffset(text string) (time.Duration, error) {
 		scale = time.Second
 	case "m":
 		scale = time.Minute
-	case "hr":
+	case "hr", "h":
 		scale = time.Hour
 	case "d":
 		scale = 24 * time.Hour
