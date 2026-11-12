@@ -35,6 +35,11 @@ type Diagnostic struct {
 
 // Program is the compiled output of an Arbiter source. It contains all
 // artifacts needed for evaluation: bytecode, segments, strategies, etc.
+//
+// Treat a Program's ruleset as read-only once Eval has run. Eval remembers
+// which rules each tag set selects, so a rule, tag or header changed in place
+// afterwards is not seen. Assigning a different ruleset to Ruleset is
+// detected and starts a new selection cache.
 type Program struct {
 	Ruleset    *compiler.CompiledRuleset
 	Segments   *govern.SegmentSet
