@@ -50,6 +50,7 @@ func (e *PreparedEvaluator) Eval(dc DataContext) ([]MatchedRule, error) {
 	// its own logical request and needs its own instruction budget.
 	e.vm.resetBudget()
 	e.vm.resetElseRows()
+	defer e.vm.resetVarCache()
 	return evalRuleSelection(e.rs, dc, e.vm, e.rules, nil)
 }
 

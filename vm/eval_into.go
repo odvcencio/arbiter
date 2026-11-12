@@ -140,6 +140,10 @@ func NewPreparedEvaluatorRules(rs *bytecode.CompiledRuleset, sp *StringPool, ind
 func newPrepared(rs *bytecode.CompiledRuleset, sp *StringPool, rules []bytecode.RuleHeader, index []int) *PreparedEvaluator {
 	e := &PreparedEvaluator{rs: rs, rules: rules, index: index, vm: newVM(rs, sp)}
 	e.vm.localMask = localNameMask(rs, e.vm.strs)
+	var n int
+	e.vm.varSlot, n = contextVarSlots(rs, e.vm.localMask)
+	e.vm.varVals = make([]Value, n)
+	e.vm.varLoaded = make([]bool, n)
 	for _, rule := range rules {
 		if rule.HasActiveFrom || rule.HasActiveUntil {
 			e.hasWindows = true
@@ -179,6 +183,7 @@ func (e *PreparedEvaluator) EvalInto(dc DataContext, out *Matches) error {
 	vm.trace = out.Trace
 	defer func() {
 		vm.resetTransient()
+		vm.resetVarCache()
 		vm.trace = nil
 	}()
 

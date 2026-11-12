@@ -83,23 +83,26 @@ func (rs *CompiledRuleset) RuleMatchesTags(rule RuleHeader, tags []string) bool 
 	if end-start < len(tags) {
 		return false
 	}
-	remaining := make(map[string]struct{}, len(tags))
+	// Every requested tag must be one of the rule's tags. Both lists are
+	// short, so a nested scan beats building a set (the old code allocated a
+	// map for every rule on every evaluation).
+	ruleTags := rs.Tags[start:end]
 	for _, tag := range tags {
 		if tag == "" {
 			continue
 		}
-		remaining[tag] = struct{}{}
-	}
-	if len(remaining) == 0 {
-		return true
-	}
-	for _, idx := range rs.Tags[start:end] {
-		delete(remaining, rs.Constants.GetString(idx))
-		if len(remaining) == 0 {
-			return true
+		found := false
+		for _, idx := range ruleTags {
+			if rs.Constants.GetString(idx) == tag {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
 		}
 	}
-	return len(remaining) == 0
+	return true
 }
 
 // ActionEntry stores a rule's action or fallback.

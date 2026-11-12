@@ -78,6 +78,13 @@ type VM struct {
 	trace     *Trace
 	strs      []string // string pool snapshot for constant indices
 	localMask []bool   // per string index: can the name be a local? nil = unknown
+	// Prepared evaluators read each context variable at most once per
+	// evaluation. varSlot maps a string index to slot+1 in varVals (0 = not
+	// cached); varLoaded marks the slots read during the current evaluation.
+	varSlot   []uint16
+	varVals   []Value
+	varLoaded []bool
+	varDirty  bool
 	iters     []iterState
 	regexes   map[string]*regexp.Regexp
 	regexLRU  []string
@@ -115,6 +122,36 @@ func newVM(rs *bytecode.CompiledRuleset, sp *StringPool) *VM {
 	}
 }
 
+// contextVarSlots numbers the context variables the ruleset reads: every
+// LoadVar operand whose name cannot be a local. It returns the slot table
+// (string index -> slot+1) and the number of slots.
+func contextVarSlots(rs *bytecode.CompiledRuleset, mask []bool) ([]uint16, int) {
+	slots := make([]uint16, len(mask))
+	n := 0
+	instrs := rs.Instructions
+	for ip := 0; ip+bytecode.InstrSize <= len(instrs); ip += bytecode.InstrSize {
+		if bytecode.OpCode(instrs[ip]) != bytecode.OpLoadVar {
+			continue
+		}
+		arg := int(instrs[ip+2]) | int(instrs[ip+3])<<8
+		if arg >= len(mask) || mask[arg] || slots[arg] != 0 || n >= 1<<16-2 {
+			continue
+		}
+		n++
+		slots[arg] = uint16(n)
+	}
+	return slots, n
+}
+
+// resetVarCache forgets the variables read during the last evaluation.
+func (vm *VM) resetVarCache() {
+	if vm.varDirty {
+		clear(vm.varVals)
+		clear(vm.varLoaded)
+		vm.varDirty = false
+	}
+}
+
 // localNameMask marks, per string-pool index, the names that a let binding,
 // a quantifier or aggregate variable, or a table column can bind, together
 // with dotted names below them. Other names always come from the data
@@ -146,18 +183,121 @@ func localNameMask(rs *bytecode.CompiledRuleset, strs []string) []bool {
 	return mask
 }
 
+// push copies v onto the value stack one field at a time. A Value arrives in
+// registers and is spilled with one narrow store per field; copying it as a
+// block would then load 16 bytes that span those stores, which the CPU cannot
+// forward from the store buffer (a stall of about ten cycles per push).
+// Field-sized loads forward. The same reason is why the fast path below reads
+// and writes stack slots through pointers instead of copying whole Values.
 func (vm *VM) push(v Value) {
 	if vm.sp >= maxStack {
-		if vm.err == nil {
-			vm.err = fmt.Errorf("stack overflow at instruction %d", vm.ip)
-		}
+		vm.stackOverflow()
 		return
 	}
-	vm.stack[vm.sp] = v
+	s := &vm.stack[vm.sp]
+	s.Typ, s.Bool, s.Str, s.ListIdx, s.ListLen, s.Num, s.Any = v.Typ, v.Bool, v.Str, v.ListIdx, v.ListLen, v.Num, v.Any
 	vm.sp++
 	if vm.sp > vm.stackHigh {
 		vm.stackHigh = vm.sp
 	}
+}
+
+// pushFrom is push for a Value the caller holds in memory.
+func (vm *VM) pushFrom(v *Value) {
+	if vm.sp >= maxStack {
+		vm.stackOverflow()
+		return
+	}
+	s := &vm.stack[vm.sp]
+	s.Typ, s.Bool, s.Str, s.ListIdx, s.ListLen, s.Num, s.Any = v.Typ, v.Bool, v.Str, v.ListIdx, v.ListLen, v.Num, v.Any
+	vm.sp++
+	if vm.sp > vm.stackHigh {
+		vm.stackHigh = vm.sp
+	}
+}
+
+//go:noinline
+func (vm *VM) stackOverflow() {
+	if vm.err == nil {
+		vm.err = fmt.Errorf("stack overflow at instruction %d", vm.ip)
+	}
+}
+
+// pushNum, pushBool and pushStr push a constant without building a Value.
+func (vm *VM) pushNum(n float64) {
+	if vm.sp >= maxStack {
+		vm.stackOverflow()
+		return
+	}
+	s := &vm.stack[vm.sp]
+	*s = Value{}
+	s.Typ, s.Num = TypeNumber, n
+	vm.sp++
+	if vm.sp > vm.stackHigh {
+		vm.stackHigh = vm.sp
+	}
+}
+
+func (vm *VM) pushBool(b bool) {
+	if vm.sp >= maxStack {
+		vm.stackOverflow()
+		return
+	}
+	s := &vm.stack[vm.sp]
+	*s = Value{}
+	s.Typ, s.Bool = TypeBool, b
+	vm.sp++
+	if vm.sp > vm.stackHigh {
+		vm.stackHigh = vm.sp
+	}
+}
+
+func (vm *VM) pushStr(idx uint16) {
+	if vm.sp >= maxStack {
+		vm.stackOverflow()
+		return
+	}
+	s := &vm.stack[vm.sp]
+	*s = Value{}
+	s.Typ, s.Str = TypeString, idx
+	vm.sp++
+	if vm.sp > vm.stackHigh {
+		vm.stackHigh = vm.sp
+	}
+}
+
+// topBool is peek().AsBool() without copying the Value.
+func (vm *VM) topBool() bool {
+	if vm.sp <= 0 {
+		return false
+	}
+	s := &vm.stack[vm.sp-1]
+	return s.Typ == TypeBool && s.Bool
+}
+
+// setBool and setNum overwrite a stack slot in place.
+func setBool(s *Value, b bool) {
+	*s = Value{}
+	s.Typ, s.Bool = TypeBool, b
+}
+
+func setNum(s *Value, n float64) {
+	if n != n {
+		n = math.NaN() // canonical NaN, as numResult
+	}
+	*s = Value{}
+	s.Typ, s.Num = TypeNumber, n
+}
+
+// strAt is toStr for a string Value read through a pointer.
+func (vm *VM) strAt(v *Value) string {
+	if s, ok := v.Any.(string); ok {
+		return s
+	}
+	if int(v.Str) < len(vm.strs) {
+		return vm.strs[v.Str]
+	}
+	return vm.strPool.Get(v.Str)
 }
 
 func (vm *VM) pop() Value {
@@ -204,17 +344,29 @@ func EvalWithTagFilter(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringP
 	return evalRuleSelection(rs, dc, newVM(rs, sp), rs.Rules, tags)
 }
 
+// EvalRules evaluates the given rules of rs in the order given. Like
+// EvalWithTagFilter it applies active windows and skips other governance
+// gates; it does no tag filtering, so a caller that selects by tag does that
+// once and reuses the selection.
+func EvalRules(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringPool, rules []bytecode.RuleHeader) ([]MatchedRule, error) {
+	if rs == nil {
+		return nil, fmt.Errorf("nil ruleset")
+	}
+	return evalRuleSelection(rs, dc, newVM(rs, sp), rules, nil)
+}
+
 func evalRuleSelection(rs *bytecode.CompiledRuleset, dc DataContext, evaluator *VM, rules []bytecode.RuleHeader, tags []string) ([]MatchedRule, error) {
 	var matched []MatchedRule
-	evalTime := resolveEvalTime(dc)
+	evalNanos := resolveEvalTime(dc).UTC().UnixNano()
 	evaluator.resetElseRows()
 	defer evaluator.resetTransient()
 
-	for _, rule := range rules {
-		if !rs.RuleMatchesTags(rule, tags) {
+	for i := range rules {
+		rule := &rules[i]
+		if len(tags) != 0 && !rs.RuleMatchesTags(*rule, tags) {
 			continue
 		}
-		if !ruleWithinActiveWindow(rule, evalTime) {
+		if (rule.HasActiveFrom || rule.HasActiveUntil) && !withinWindow(*rule, evalNanos) {
 			continue
 		}
 		evaluator.resetTransient()
@@ -448,14 +600,14 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 		}
 		switch op {
 		case bytecode.OpJumpIfFalse:
-			if !vm.peek().AsBool() {
+			if !vm.topBool() {
 				ip += uint32(arg)
 			} else {
 				ip += bytecode.InstrSize
 			}
 			continue
 		case bytecode.OpJumpIfTrue:
-			if vm.peek().AsBool() {
+			if vm.topBool() {
 				ip += uint32(arg)
 			} else {
 				ip += bytecode.InstrSize
@@ -481,10 +633,7 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 	}
 
 	// If we ran off the end without RuleMatch, check stack
-	if vm.sp > 0 {
-		return vm.peek().AsBool()
-	}
-	return false
+	return vm.topBool()
 }
 
 // fastOp runs the commonest opcodes without the general dispatch: constant
@@ -498,34 +647,36 @@ func (vm *VM) fastOp(op bytecode.OpCode, flags uint8, arg uint16, dc DataContext
 		vm.loadVar(arg, dc)
 		return true
 	case bytecode.OpLoadNum:
-		vm.push(NumVal(vm.pool.GetNumber(arg)))
+		vm.pushNum(vm.pool.GetNumber(arg))
 		return true
 	case bytecode.OpLoadBool:
-		vm.push(BoolVal(arg == 1))
+		vm.pushBool(arg == 1)
 		return true
 	case bytecode.OpLoadStr:
 		if flags != 0 {
 			return false
 		}
-		vm.push(StrVal(arg))
+		vm.pushStr(arg)
 		return true
 	case bytecode.OpAnd, bytecode.OpOr:
 		if vm.sp < 2 {
 			return false
 		}
-		b, a := vm.stack[vm.sp-1].AsBool(), vm.stack[vm.sp-2].AsBool()
+		pb, pa := &vm.stack[vm.sp-1], &vm.stack[vm.sp-2]
+		b, a := pb.Typ == TypeBool && pb.Bool, pa.Typ == TypeBool && pa.Bool
 		vm.sp--
 		if op == bytecode.OpAnd {
-			vm.stack[vm.sp-1] = BoolVal(a && b)
+			setBool(pa, a && b)
 		} else {
-			vm.stack[vm.sp-1] = BoolVal(a || b)
+			setBool(pa, a || b)
 		}
 		return true
 	case bytecode.OpNot:
 		if vm.sp < 1 {
 			return false
 		}
-		vm.stack[vm.sp-1] = BoolVal(!vm.stack[vm.sp-1].AsBool())
+		p := &vm.stack[vm.sp-1]
+		setBool(p, !(p.Typ == TypeBool && p.Bool))
 		return true
 	case bytecode.OpEq, bytecode.OpNeq, bytecode.OpGt, bytecode.OpGte, bytecode.OpLt, bytecode.OpLte:
 		if vm.sp < 2 || vm.trace != nil {
@@ -533,7 +684,31 @@ func (vm *VM) fastOp(op bytecode.OpCode, flags uint8, arg uint16, dc DataContext
 		}
 		a, b := &vm.stack[vm.sp-2], &vm.stack[vm.sp-1]
 		if a.Typ != TypeNumber || b.Typ != TypeNumber {
-			return false
+			if op != bytecode.OpEq && op != bytecode.OpNeq {
+				return false
+			}
+			// Equality of the other scalar types, as valEqual: values of
+			// different types are never equal, null equals null, and strings
+			// compare by pool index or by content.
+			var eq bool
+			switch {
+			case a.Typ != b.Typ:
+				if a.Typ > TypeString || b.Typ > TypeString {
+					return false
+				}
+			case a.Typ == TypeNull:
+				eq = true
+			case a.Typ == TypeBool:
+				eq = a.Bool == b.Bool
+			case a.Typ == TypeString:
+				eq = (a.Any == nil && b.Any == nil && a.Str == b.Str) || vm.strAt(a) == vm.strAt(b)
+			default:
+				return false
+			}
+			*b = Value{}
+			vm.sp--
+			setBool(a, eq == (op == bytecode.OpEq))
+			return true
 		}
 		cmp := 0
 		switch {
@@ -557,9 +732,9 @@ func (vm *VM) fastOp(op bytecode.OpCode, flags uint8, arg uint16, dc DataContext
 		default:
 			result = cmp <= 0
 		}
-		vm.stack[vm.sp-1] = Value{}
+		*b = Value{}
 		vm.sp--
-		vm.stack[vm.sp-1] = BoolVal(result)
+		setBool(a, result)
 		return true
 	case bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul:
 		if vm.sp < 2 || vm.profile != NumericDefault {
@@ -569,20 +744,20 @@ func (vm *VM) fastOp(op bytecode.OpCode, flags uint8, arg uint16, dc DataContext
 		if a.Typ != TypeNumber || b.Typ != TypeNumber {
 			return false
 		}
-		var r Value
+		var r float64
 		switch op {
 		case bytecode.OpAdd:
-			r = numResult(a.Num + b.Num)
+			r = a.Num + b.Num
 		case bytecode.OpSub:
-			r = numResult(a.Num - b.Num)
+			r = a.Num - b.Num
 		default:
 			// float64(...) rounds the product and keeps it from fusing with
 			// a later add on arm64; see the general OpMul.
-			r = numResult(float64(a.Num * b.Num))
+			r = float64(a.Num * b.Num)
 		}
-		vm.stack[vm.sp-1] = Value{}
+		*b = Value{}
 		vm.sp--
-		vm.stack[vm.sp-1] = r
+		setNum(a, r)
 		return true
 	}
 	return false

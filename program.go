@@ -1,7 +1,10 @@
 package arbiter
 
 import (
+	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	"m31labs.dev/arbiter/compiler"
 	"m31labs.dev/arbiter/govern"
@@ -43,6 +46,7 @@ type Program struct {
 	Warnings   []Diagnostic   // non-fatal diagnostics collected during compilation
 	pool       *vm.StringPool // internal, sealed from public API
 	poolOnce   sync.Once
+	selections atomic.Pointer[ruleSelections] // tag set -> selected rules, built on first use
 }
 
 // stringPool returns the string pool, lazily initializing from the ruleset if needed.
@@ -56,6 +60,74 @@ func (p *Program) stringPool() *vm.StringPool {
 		}
 	})
 	return p.pool
+}
+
+// maxCachedSelections bounds the tag sets one Program remembers. A program
+// declares a handful of tags, but tag sets can come from callers (a service
+// may pass them through from a request), so the cache must not grow with
+// every distinct set it is shown. Past the bound a miss is computed and not
+// stored, which is what Eval did before the cache existed.
+const maxCachedSelections = 64
+
+// ruleSelections caches, per tag set, the rules Eval selects from one ruleset.
+// The table is immutable; a miss publishes a copy with the new entry.
+type ruleSelections struct {
+	rs    *compiler.CompiledRuleset
+	byTag map[string]*ruleSelection
+}
+
+// ruleSelection is the rules one tag set selects, in declaration order, and
+// the error plain evaluation returns when one of them needs governance.
+type ruleSelection struct {
+	rules []compiler.RuleHeader
+	err   error
+}
+
+// selection returns the rules the tag set selects. Eval used to test every
+// rule's tags on every call, building a map per rule; a program's rules and
+// tags do not change, so the answer is computed once per tag set.
+func (p *Program) selection(rs *compiler.CompiledRuleset, tags []string) *ruleSelection {
+	key := ""
+	if len(tags) == 1 {
+		key = tags[0]
+	} else if len(tags) > 1 {
+		key = strings.Join(tags, "\x00")
+	}
+	table := p.selections.Load()
+	if table != nil && table.rs == rs {
+		if sel, ok := table.byTag[key]; ok {
+			return sel
+		}
+	}
+	sel := &ruleSelection{}
+	if len(tags) == 0 {
+		sel.rules = rs.Rules
+	}
+	for _, rule := range rs.Rules {
+		if !rs.RuleMatchesTags(rule, tags) {
+			continue
+		}
+		if sel.err == nil && ruleRequiresGovernance(rule) {
+			sel.err = fmt.Errorf("rule %s: %w", rs.Constants.GetString(rule.NameIdx), ErrGovernanceRequired)
+		}
+		if len(tags) != 0 {
+			sel.rules = append(sel.rules, rule)
+		}
+	}
+	if table != nil && table.rs == rs && len(table.byTag) >= maxCachedSelections {
+		return sel
+	}
+	next := &ruleSelections{rs: rs, byTag: map[string]*ruleSelection{key: sel}}
+	if table != nil && table.rs == rs {
+		for k, v := range table.byTag {
+			if _, ok := next.byTag[k]; !ok {
+				next.byTag[k] = v
+			}
+		}
+	}
+	// A lost race only drops a cache entry; the next call rebuilds it.
+	p.selections.CompareAndSwap(table, next)
+	return sel
 }
 
 // Option configures optional Compile behavior.
