@@ -2,9 +2,19 @@
 
 ## Unreleased
 
+### Added
+
+- `vm.EvalRules` evaluates a given list of rule headers against a ruleset. The headers must be the ruleset's own: its `Rules` slice, a subslice of it, or copies of its elements.
+
 ### Changed
 
+- **`Eval` remembers which rules a tag set selects.** A `Program` now keeps, per tag set, the list of rules that `WithTags` selects and the governance refusal that goes with it, so a tagged `Eval` no longer tests every rule's tags on every call. Results, order and errors are unchanged. The cache holds at most 64 tag sets; a tag set naming a tag that no rule carries selects nothing and is not stored. Do not change a `Program`'s ruleset in place (its rules, their tags or their headers) after the first `Eval`: the cached selection would keep answering for the old rules. Assigning a different ruleset to `Program.Ruleset` is detected and starts a new cache.
+- Faster value-stack handling in the VM for constants, boolean jumps and equality of null, boolean and string values. Results are unchanged.
 - **Prepared evaluators read each fact once per evaluation, which adds a contract for data contexts.** A `vm.PreparedEvaluator` that is used more than once (a `gameai.Decider` and `gameai.Brain` use one) now reads a fact from the data context the first time a rule needs it during one `Eval` or `EvalInto` call and reuses that value for every later rule and action parameter in the same call. It reads every fact again on the next call. Before, it read the fact each time a rule tested it. A `vm.DataContext` passed to a prepared evaluator must therefore behave as a snapshot for the length of one call: `Get` and `GetIndexed` must return equal values for the same key, and a returned `Value`, including any slice or map it references, must not change until the call returns. Check a custom context before you upgrade. A context that computes a new value on each read (a counter, a clock, a random draw) now gives every rule in the call the first value. A context that returns lists backed by one reused buffer can now hand a rule a list that a later `Get` has refilled. The contexts in this module (`DataFromMap`, `DataFromJSON`, `DataFromStruct` and the `gameai` struct binding) meet the contract when the data behind them does not change during the call. Names that a `let` binding, a quantifier or aggregate variable, or a table column can bind are not cached. `Eval`, `EvalGoverned`, the expert engine and the other evaluation paths are unchanged.
+
+### Security
+
+- Require Go 1.26.11. It fixes GO-2026-6859, an HTTP/1 server crash in `net/http` that `govulncheck` reports as reachable from the HTTP servers and clients in this module when it is built with Go 1.26.10. CI, parity and release builds read the Go version from `go.mod`, and the Docker builder image moves to the same version.
 
 ## [1.13.1] — 2026-11-10
 
