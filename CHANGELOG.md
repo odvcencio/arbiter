@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+
+- Require Go 1.26.11. It fixes GO-2026-6859, an HTTP/1 server crash in `net/http` that `govulncheck` reports as reachable from the HTTP servers and clients in this module when it is built with Go 1.26.10. CI, parity and release builds read the Go version from `go.mod`, and the Docker builder image moves to the same version.
+
 ## [1.13.1] — 2026-11-10
 
 ### Changed
