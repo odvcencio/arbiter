@@ -78,13 +78,6 @@ type VM struct {
 	trace     *Trace
 	strs      []string // string pool snapshot for constant indices
 	localMask []bool   // per string index: can the name be a local? nil = unknown
-	// Prepared evaluators read each context variable at most once per
-	// evaluation. varSlot maps a string index to slot+1 in varVals (0 = not
-	// cached); varLoaded marks the slots read during the current evaluation.
-	varSlot   []uint16
-	varVals   []Value
-	varLoaded []bool
-	varDirty  bool
 	iters     []iterState
 	regexes   map[string]*regexp.Regexp
 	regexLRU  []string
@@ -119,36 +112,6 @@ func newVM(rs *bytecode.CompiledRuleset, sp *StringPool) *VM {
 		strPool: sp,
 		rs:      rs,
 		strs:    sp.snapshot(),
-	}
-}
-
-// contextVarSlots numbers the context variables the ruleset reads: every
-// LoadVar operand whose name cannot be a local. It returns the slot table
-// (string index -> slot+1) and the number of slots.
-func contextVarSlots(rs *bytecode.CompiledRuleset, mask []bool) ([]uint16, int) {
-	slots := make([]uint16, len(mask))
-	n := 0
-	instrs := rs.Instructions
-	for ip := 0; ip+bytecode.InstrSize <= len(instrs); ip += bytecode.InstrSize {
-		if bytecode.OpCode(instrs[ip]) != bytecode.OpLoadVar {
-			continue
-		}
-		arg := int(instrs[ip+2]) | int(instrs[ip+3])<<8
-		if arg >= len(mask) || mask[arg] || slots[arg] != 0 || n >= 1<<16-2 {
-			continue
-		}
-		n++
-		slots[arg] = uint16(n)
-	}
-	return slots, n
-}
-
-// resetVarCache forgets the variables read during the last evaluation.
-func (vm *VM) resetVarCache() {
-	if vm.varDirty {
-		clear(vm.varVals)
-		clear(vm.varLoaded)
-		vm.varDirty = false
 	}
 }
 

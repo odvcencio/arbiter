@@ -104,25 +104,8 @@ func (vm *VM) loadVar(arg uint16, dc DataContext) {
 	// a variable shared by the branches, makes the compiler copy the Value as
 	// a block, which stalls on store forwarding (see push).
 	if vm.localMask != nil && (int(arg) >= len(vm.localMask) || !vm.localMask[arg]) {
-		// Prepared evaluators know which names can be locals, and read each
-		// context variable once per evaluation: a rule set tests the same few
-		// facts in most of its rules.
-		if int(arg) < len(vm.varSlot) && vm.varSlot[arg] != 0 {
-			slot := vm.varSlot[arg] - 1
-			c := &vm.varVals[slot]
-			if !vm.varLoaded[slot] {
-				if vm.idc != nil {
-					v := vm.idc.GetIndexed(arg, key)
-					c.Typ, c.Bool, c.Str, c.ListIdx, c.ListLen, c.Num, c.Any = v.Typ, v.Bool, v.Str, v.ListIdx, v.ListLen, v.Num, v.Any
-				} else {
-					v := dc.Get(key)
-					c.Typ, c.Bool, c.Str, c.ListIdx, c.ListLen, c.Num, c.Any = v.Typ, v.Bool, v.Str, v.ListIdx, v.ListLen, v.Num, v.Any
-				}
-				vm.varLoaded[slot] = true
-				vm.varDirty = true
-			}
-			vm.pushFrom(c)
-		} else if vm.idc != nil {
+		// Prepared evaluators know which names can be locals.
+		if vm.idc != nil {
 			v := vm.idc.GetIndexed(arg, key)
 			vm.pushFrom(&v)
 		} else {
