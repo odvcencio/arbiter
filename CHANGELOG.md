@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- **Prepared evaluators read each fact once per evaluation, which adds a contract for data contexts.** A `vm.PreparedEvaluator` that is used more than once (a `gameai.Decider` and `gameai.Brain` use one) now reads a fact from the data context the first time a rule needs it during one `Eval` or `EvalInto` call and reuses that value for every later rule and action parameter in the same call. It reads every fact again on the next call. Before, it read the fact each time a rule tested it. A `vm.DataContext` passed to a prepared evaluator must therefore behave as a snapshot for the length of one call: `Get` and `GetIndexed` must return equal values for the same key, and a returned `Value`, including any slice or map it references, must not change until the call returns. Check a custom context before you upgrade. A context that computes a new value on each read (a counter, a clock, a random draw) now gives every rule in the call the first value. A context that returns lists backed by one reused buffer can now hand a rule a list that a later `Get` has refilled. The contexts in this module (`DataFromMap`, `DataFromJSON`, `DataFromStruct` and the `gameai` struct binding) meet the contract when the data behind them does not change during the call. Names that a `let` binding, a quantifier or aggregate variable, or a table column can bind are not cached. `Eval`, `EvalGoverned`, the expert engine and the other evaluation paths are unchanged.
+
 ## [1.13.1] — 2026-11-10
 
 ### Changed
