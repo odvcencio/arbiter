@@ -85,3 +85,96 @@ func BenchmarkPreparedSharedFacts(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkPreparedSharedFactsMapContext is BenchmarkPreparedSharedFacts with
+// the facts in a nested map. Reading a fact from a map context costs a path
+// walk and a conversion, where the struct context above costs a switch.
+func BenchmarkPreparedSharedFactsMapContext(b *testing.B) {
+	prog, err := Compile([]byte(taggedBenchSource(19, 1)))
+	if err != nil {
+		b.Fatal(err)
+	}
+	pool := vm.NewStringPool(prog.Ruleset.Constants.Strings())
+	prepared, err := vm.NewPreparedEvaluator(prog.Ruleset, pool, []string{"t0"})
+	if err != nil {
+		b.Fatal(err)
+	}
+	facts := vm.DataFromMap(map[string]any{
+		"unit": map[string]any{"kind": "k3", "ready": true, "distance": 5.0},
+		"run":  map[string]any{"revision": 2},
+	}, pool)
+	if matches, err := prepared.Eval(facts); err != nil || len(matches) == 0 {
+		b.Fatalf("no rule matched: %d matches, %v", len(matches), err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := prepared.Eval(facts); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// largeProgramSource builds a program of many rules that each test two facts
+// of their own, plus one rule under the tag "only" that tests three other
+// facts. Preparing the tag "only" selects one rule out of the whole program.
+func largeProgramSource(rules int) string {
+	var b strings.Builder
+	b.WriteString("tag \"only\"\ntag \"rest\"\n")
+	b.WriteString("outcome Act { n: number }\n")
+	for r := 0; r < rules; r++ {
+		fmt.Fprintf(&b, "rule R%d tag \"rest\" { when { zone%d.level >= %d and zone%d.open == true } then Act { n: %d } }\n",
+			r, r, r%9, r, r)
+	}
+	b.WriteString("rule Only tag \"only\" { when { unit.kind == \"k3\" and unit.ready == true and unit.distance < 9 } then Act { n: 1 } }\n")
+	return b.String()
+}
+
+// BenchmarkPreparedOneRuleOfLargeProgram prepares one rule out of a program
+// of 1,001 rules whose other rules name 2,000 facts of their own. The cost of
+// an evaluation must follow the one rule and the three facts it reads, not
+// the size of the program.
+func BenchmarkPreparedOneRuleOfLargeProgram(b *testing.B) {
+	prog, err := Compile([]byte(largeProgramSource(1000)))
+	if err != nil {
+		b.Fatal(err)
+	}
+	prepared, err := vm.NewPreparedEvaluator(prog.Ruleset, vm.NewStringPool(prog.Ruleset.Constants.Strings()), []string{"only"})
+	if err != nil {
+		b.Fatal(err)
+	}
+	facts := &benchFacts{kind: vm.Value{Typ: vm.TypeString, Any: "k3"}, ready: true, distance: 5}
+	if matches, err := prepared.Eval(facts); err != nil || len(matches) != 1 {
+		b.Fatalf("the prepared rule did not match: %d matches, %v", len(matches), err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := prepared.Eval(facts); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkPreparedSingleUse builds a prepared evaluator, evaluates once and
+// drops it, which is what segment evaluation does. An evaluator used once
+// must not pay for state that only repeated evaluations use.
+func BenchmarkPreparedSingleUse(b *testing.B) {
+	prog, err := Compile([]byte(taggedBenchSource(19, 1)))
+	if err != nil {
+		b.Fatal(err)
+	}
+	pool := vm.NewStringPool(prog.Ruleset.Constants.Strings())
+	facts := &benchFacts{kind: vm.Value{Typ: vm.TypeString, Any: "k3"}, ready: true, distance: 5}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		prepared, err := vm.NewPreparedEvaluator(prog.Ruleset, pool, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := prepared.Eval(facts); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

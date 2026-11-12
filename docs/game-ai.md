@@ -187,6 +187,13 @@ For lower-level control, `gameai.NewDecider(prog, tag)` evaluates one tag
 against any `vm.DataContext`, and `gameai.Bind[T](prog)` gives the bound
 struct context that `Brain` uses.
 
+A decision may read a fact once and reuse the value for every rule, so a
+context you write yourself must behave as a snapshot while one decision runs:
+`Get` returns equal values for the same key, and a returned value, including
+any slice or map it references, does not change until the decision returns.
+The bound struct context meets this as long as the struct does not change
+during the decision. The `vm.DataContext` documentation states the contract.
+
 ## Selections: first, best, weighted
 
 The candidates of a decision are its matching rules in declaration order. A

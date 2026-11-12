@@ -78,6 +78,15 @@ type VM struct {
 	trace     *Trace
 	strs      []string // string pool snapshot for constant indices
 	localMask []bool   // per string index: can the name be a local? nil = unknown
+	// Fact cache of a prepared evaluator: the context facts read during the
+	// current evaluation, so each is read once (see PreparedEvaluator).
+	// varSlot maps a string index to 1 + the position of its value in varVals
+	// (0 = not read in this evaluation); it is nil while the cache is off.
+	// varVals holds the values in the order they were read, and varLoaded holds
+	// the string index of each, which is all resetVarCache needs to undo.
+	varSlot   []uint16
+	varVals   []Value
+	varLoaded []uint16
 	iters     []iterState
 	regexes   map[string]*regexp.Regexp
 	regexLRU  []string
@@ -115,6 +124,36 @@ func newVM(rs *bytecode.CompiledRuleset, sp *StringPool) *VM {
 	}
 }
 
+// maxCachedVars is the most facts one evaluation caches: a position plus one
+// must fit a varSlot entry. Facts read past it are read on every use.
+const maxCachedVars = 1<<16 - 1
+
+// cacheVar adds an entry for the fact whose name is string constant arg and
+// returns it for the caller to fill. The caller has checked that arg is inside
+// varSlot, that the fact was not read yet and that the cache is not full.
+func (vm *VM) cacheVar(arg uint16) *Value {
+	n := len(vm.varVals)
+	vm.varVals = append(vm.varVals, Value{})
+	vm.varLoaded = append(vm.varLoaded, arg)
+	vm.varSlot[arg] = uint16(n + 1)
+	return &vm.varVals[n]
+}
+
+// resetVarCache forgets the facts read during the last evaluation. It clears
+// only the entries that evaluation filled, so its cost follows the number of
+// facts read and not the number of facts the program names.
+func (vm *VM) resetVarCache() {
+	if len(vm.varLoaded) == 0 {
+		return
+	}
+	for _, idx := range vm.varLoaded {
+		vm.varSlot[idx] = 0
+	}
+	clear(vm.varVals) // drop what the Values reference
+	vm.varVals = vm.varVals[:0]
+	vm.varLoaded = vm.varLoaded[:0]
+}
+
 // localNameMask marks, per string-pool index, the names that a let binding,
 // a quantifier or aggregate variable, or a table column can bind, together
 // with dotted names below them. Other names always come from the data
@@ -146,10 +185,12 @@ func localNameMask(rs *bytecode.CompiledRuleset, strs []string) []bool {
 	return mask
 }
 
-// valueFields is the number of fields in Value. push and pushFrom copy a Value
-// by naming each field, so a field added to Value must be added to both
-// copies, or the stack silently drops it. TestValueStackCopiesEveryField
-// fails until this count and the copies are updated together.
+// valueFields is the number of fields in Value. Four places copy a Value by
+// naming each field: push and pushFrom here, and the two fact-cache fills in
+// loadVar. A field added to Value must be added to all four, or the copy
+// silently drops it. TestValueStackCopiesEveryField and
+// TestFactCacheCopiesEveryField fail until this count and the copies are
+// updated together.
 const valueFields = 7
 
 // push copies v onto the value stack one field at a time. A Value arrives in
