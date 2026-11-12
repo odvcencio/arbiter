@@ -99,19 +99,27 @@ func (vm *VM) loadVar(arg uint16, dc DataContext) {
 	} else {
 		key = vm.strPool.Get(arg)
 	}
+	// Each branch keeps the loaded Value in its own local and pushes it through
+	// a pointer. Passing the call result straight to push, or assigning it to
+	// a variable shared by the branches, makes the compiler copy the Value as
+	// a block, which stalls on store forwarding (see push).
 	if vm.localMask != nil && (int(arg) >= len(vm.localMask) || !vm.localMask[arg]) {
 		// Prepared evaluators know which names can be locals.
 		if vm.idc != nil {
-			vm.push(vm.idc.GetIndexed(arg, key))
+			v := vm.idc.GetIndexed(arg, key)
+			vm.pushFrom(&v)
 		} else {
-			vm.push(dc.Get(key))
+			v := dc.Get(key)
+			vm.pushFrom(&v)
 		}
 	} else if local, ok := vm.lookupLocal(key); ok {
-		vm.push(local)
+		vm.pushFrom(&local)
 	} else if vm.idc != nil {
-		vm.push(vm.idc.GetIndexed(arg, key))
+		v := vm.idc.GetIndexed(arg, key)
+		vm.pushFrom(&v)
 	} else {
-		vm.push(dc.Get(key))
+		v := dc.Get(key)
+		vm.pushFrom(&v)
 	}
 	if vm.sp == 0 {
 		return

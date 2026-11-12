@@ -125,15 +125,16 @@ func Eval(prog *Program, dc vm.DataContext, opts ...EvalOption) ([]vm.MatchedRul
 		return nil, fmt.Errorf("nil ruleset")
 	}
 	evalOpts := applyEvalOptions(opts)
-	if err := checkPlainEvaluation(rs, evalOpts.tags); err != nil {
-		return nil, err
+	sel := prog.selection(rs, evalOpts.tags)
+	if sel.err != nil {
+		return nil, sel.err
 	}
 	// If dc was created via DataFromMap/DataFromJSON, it shares a pool.
 	// Try to extract it; otherwise create a new one.
 	if ec, ok := dc.(*evalContextWrapper); ok {
-		return vm.EvalWithTagFilter(rs, ec.inner, ec.pool, evalOpts.tags)
+		return vm.EvalRules(rs, ec.inner, ec.pool, sel.rules)
 	}
-	return vm.EvalWithTagFilter(rs, dc, vm.NewStringPool(rs.Constants.Strings()), evalOpts.tags)
+	return vm.EvalRules(rs, dc, vm.NewStringPool(rs.Constants.Strings()), sel.rules)
 }
 
 // EvalDebug traces ordinary rule evaluation. For selected rules with
@@ -156,11 +157,14 @@ func EvalDebug(prog *Program, dc vm.DataContext, opts ...EvalOption) vm.DebugRes
 	return vm.EvalDebugWithTagFilter(rs, dc, vm.NewStringPool(rs.Constants.Strings()), evalOpts.tags)
 }
 
+func ruleRequiresGovernance(rule compiler.RuleHeader) bool {
+	return rule.KillSwitch.IsSet() || rule.HasSegment ||
+		rule.HasRollout || rule.PrereqLen > 0 || rule.ExcludeLen > 0
+}
+
 func checkPlainEvaluation(rs *compiler.CompiledRuleset, tags []string) error {
 	for _, rule := range rs.Rules {
-		requiresGovernance := rule.KillSwitch.IsSet() || rule.HasSegment ||
-			rule.HasRollout || rule.PrereqLen > 0 || rule.ExcludeLen > 0
-		if requiresGovernance && rs.RuleMatchesTags(rule, tags) {
+		if ruleRequiresGovernance(rule) && rs.RuleMatchesTags(rule, tags) {
 			return fmt.Errorf("rule %s: %w", rs.Constants.GetString(rule.NameIdx), ErrGovernanceRequired)
 		}
 	}
@@ -461,6 +465,14 @@ func nodeText(n *gotreesitter.Node, source []byte) string {
 func uniqueEvalTags(values []string) []string {
 	if len(values) == 0 {
 		return nil
+	}
+	if len(values) == 1 {
+		// One tag is the usual case: no set is needed to deduplicate it.
+		value := strings.TrimSpace(values[0])
+		if value == "" {
+			return nil
+		}
+		return []string{value}
 	}
 	out := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))

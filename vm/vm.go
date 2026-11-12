@@ -146,18 +146,127 @@ func localNameMask(rs *bytecode.CompiledRuleset, strs []string) []bool {
 	return mask
 }
 
+// valueFields is the number of fields in Value. push and pushFrom copy a Value
+// by naming each field, so a field added to Value must be added to both
+// copies, or the stack silently drops it. TestValueStackCopiesEveryField
+// fails until this count and the copies are updated together.
+const valueFields = 7
+
+// push copies v onto the value stack one field at a time. A Value arrives in
+// registers and is spilled with one narrow store per field; copying it as a
+// block would then load 16 bytes that span those stores, which the CPU cannot
+// forward from the store buffer (a stall of about ten cycles per push).
+// Field-sized loads forward. The same reason is why the fast path below reads
+// and writes stack slots through pointers instead of copying whole Values.
 func (vm *VM) push(v Value) {
 	if vm.sp >= maxStack {
-		if vm.err == nil {
-			vm.err = fmt.Errorf("stack overflow at instruction %d", vm.ip)
-		}
+		vm.stackOverflow()
 		return
 	}
-	vm.stack[vm.sp] = v
+	s := &vm.stack[vm.sp]
+	s.Typ, s.Bool, s.Str, s.ListIdx, s.ListLen, s.Num, s.Any = v.Typ, v.Bool, v.Str, v.ListIdx, v.ListLen, v.Num, v.Any
 	vm.sp++
 	if vm.sp > vm.stackHigh {
 		vm.stackHigh = vm.sp
 	}
+}
+
+// pushFrom is push for a Value the caller holds in memory.
+func (vm *VM) pushFrom(v *Value) {
+	if vm.sp >= maxStack {
+		vm.stackOverflow()
+		return
+	}
+	s := &vm.stack[vm.sp]
+	s.Typ, s.Bool, s.Str, s.ListIdx, s.ListLen, s.Num, s.Any = v.Typ, v.Bool, v.Str, v.ListIdx, v.ListLen, v.Num, v.Any
+	vm.sp++
+	if vm.sp > vm.stackHigh {
+		vm.stackHigh = vm.sp
+	}
+}
+
+//go:noinline
+func (vm *VM) stackOverflow() {
+	if vm.err == nil {
+		vm.err = fmt.Errorf("stack overflow at instruction %d", vm.ip)
+	}
+}
+
+// pushNum, pushBool and pushStr push a constant without building a Value.
+func (vm *VM) pushNum(n float64) {
+	if vm.sp >= maxStack {
+		vm.stackOverflow()
+		return
+	}
+	s := &vm.stack[vm.sp]
+	*s = Value{}
+	s.Typ, s.Num = TypeNumber, n
+	vm.sp++
+	if vm.sp > vm.stackHigh {
+		vm.stackHigh = vm.sp
+	}
+}
+
+func (vm *VM) pushBool(b bool) {
+	if vm.sp >= maxStack {
+		vm.stackOverflow()
+		return
+	}
+	s := &vm.stack[vm.sp]
+	*s = Value{}
+	s.Typ, s.Bool = TypeBool, b
+	vm.sp++
+	if vm.sp > vm.stackHigh {
+		vm.stackHigh = vm.sp
+	}
+}
+
+func (vm *VM) pushStr(idx uint16) {
+	if vm.sp >= maxStack {
+		vm.stackOverflow()
+		return
+	}
+	s := &vm.stack[vm.sp]
+	*s = Value{}
+	s.Typ, s.Str = TypeString, idx
+	vm.sp++
+	if vm.sp > vm.stackHigh {
+		vm.stackHigh = vm.sp
+	}
+}
+
+// topBool is peek().AsBool() without copying the Value.
+func (vm *VM) topBool() bool {
+	if vm.sp <= 0 {
+		return false
+	}
+	s := &vm.stack[vm.sp-1]
+	return s.Typ == TypeBool && s.Bool
+}
+
+// setBool and setNum overwrite a stack slot in place.
+func setBool(s *Value, b bool) {
+	*s = Value{}
+	s.Typ, s.Bool = TypeBool, b
+}
+
+func setNum(s *Value, n float64) {
+	if n != n {
+		n = math.NaN() // canonical NaN, as numResult
+	}
+	*s = Value{}
+	s.Typ, s.Num = TypeNumber, n
+}
+
+// strAt is toStr for a string Value read through a pointer.
+func (vm *VM) strAt(v *Value) string {
+	if s, ok := v.Any.(string); ok {
+		return s
+	}
+	if int(v.Str) < len(vm.strs) {
+		return vm.strs[v.Str]
+	}
+	return vm.strPool.Get(v.Str)
 }
 
 func (vm *VM) pop() Value {
@@ -204,17 +313,39 @@ func EvalWithTagFilter(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringP
 	return evalRuleSelection(rs, dc, newVM(rs, sp), rs.Rules, tags)
 }
 
+// EvalRules evaluates the given rules of rs in the order given. Like
+// EvalWithTagFilter it applies active windows and skips other governance
+// gates; it does no tag filtering, so a caller that selects by tag does that
+// once and reuses the selection.
+//
+// Every header in rules must be an element of rs.Rules: pass rs.Rules, a
+// subslice of it, or headers copied from it. A header holds offsets into
+// rs.Instructions and indices into rs.Actions and the string constants, and
+// EvalRules trusts them. It does not check that a header belongs to rs, so a
+// header from another ruleset, or one built by hand, runs bytecode the
+// compiler never checked as a condition and gives a meaningless result.
+//
+// EvalRules reads rules and neither modifies nor keeps the slice, so
+// concurrent calls may share one selection.
+func EvalRules(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringPool, rules []bytecode.RuleHeader) ([]MatchedRule, error) {
+	if rs == nil {
+		return nil, fmt.Errorf("nil ruleset")
+	}
+	return evalRuleSelection(rs, dc, newVM(rs, sp), rules, nil)
+}
+
 func evalRuleSelection(rs *bytecode.CompiledRuleset, dc DataContext, evaluator *VM, rules []bytecode.RuleHeader, tags []string) ([]MatchedRule, error) {
 	var matched []MatchedRule
-	evalTime := resolveEvalTime(dc)
+	evalNanos := resolveEvalTime(dc).UTC().UnixNano()
 	evaluator.resetElseRows()
 	defer evaluator.resetTransient()
 
-	for _, rule := range rules {
-		if !rs.RuleMatchesTags(rule, tags) {
+	for i := range rules {
+		rule := &rules[i]
+		if len(tags) != 0 && !rs.RuleMatchesTags(*rule, tags) {
 			continue
 		}
-		if !ruleWithinActiveWindow(rule, evalTime) {
+		if (rule.HasActiveFrom || rule.HasActiveUntil) && !withinWindow(*rule, evalNanos) {
 			continue
 		}
 		evaluator.resetTransient()
@@ -448,14 +579,14 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 		}
 		switch op {
 		case bytecode.OpJumpIfFalse:
-			if !vm.peek().AsBool() {
+			if !vm.topBool() {
 				ip += uint32(arg)
 			} else {
 				ip += bytecode.InstrSize
 			}
 			continue
 		case bytecode.OpJumpIfTrue:
-			if vm.peek().AsBool() {
+			if vm.topBool() {
 				ip += uint32(arg)
 			} else {
 				ip += bytecode.InstrSize
@@ -481,51 +612,53 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 	}
 
 	// If we ran off the end without RuleMatch, check stack
-	if vm.sp > 0 {
-		return vm.peek().AsBool()
-	}
-	return false
+	return vm.topBool()
 }
 
 // fastOp runs the commonest opcodes without the general dispatch: constant
-// and variable loads, boolean logic, and comparisons and +, -, * of two
-// numbers. It reports false for anything else, including any operand mix
-// the general path treats specially, and when tracing (so comparisons are
-// recorded) or under the integer profile (so arithmetic is checked).
+// and variable loads, boolean logic, comparisons and +, -, * of two numbers,
+// and == and != of null, bool and string values. It reports false for
+// anything else, including any operand mix the general path treats specially.
+// Comparisons, == and != included, take the general path when tracing, so
+// they are recorded. +, - and * take it under the integer profile, so
+// arithmetic is checked; the numeric profile does not change a comparison,
+// so comparisons stay on the fast path under every profile.
 func (vm *VM) fastOp(op bytecode.OpCode, flags uint8, arg uint16, dc DataContext) bool {
 	switch op {
 	case bytecode.OpLoadVar:
 		vm.loadVar(arg, dc)
 		return true
 	case bytecode.OpLoadNum:
-		vm.push(NumVal(vm.pool.GetNumber(arg)))
+		vm.pushNum(vm.pool.GetNumber(arg))
 		return true
 	case bytecode.OpLoadBool:
-		vm.push(BoolVal(arg == 1))
+		vm.pushBool(arg == 1)
 		return true
 	case bytecode.OpLoadStr:
 		if flags != 0 {
 			return false
 		}
-		vm.push(StrVal(arg))
+		vm.pushStr(arg)
 		return true
 	case bytecode.OpAnd, bytecode.OpOr:
 		if vm.sp < 2 {
 			return false
 		}
-		b, a := vm.stack[vm.sp-1].AsBool(), vm.stack[vm.sp-2].AsBool()
+		pb, pa := &vm.stack[vm.sp-1], &vm.stack[vm.sp-2]
+		b, a := pb.Typ == TypeBool && pb.Bool, pa.Typ == TypeBool && pa.Bool
 		vm.sp--
 		if op == bytecode.OpAnd {
-			vm.stack[vm.sp-1] = BoolVal(a && b)
+			setBool(pa, a && b)
 		} else {
-			vm.stack[vm.sp-1] = BoolVal(a || b)
+			setBool(pa, a || b)
 		}
 		return true
 	case bytecode.OpNot:
 		if vm.sp < 1 {
 			return false
 		}
-		vm.stack[vm.sp-1] = BoolVal(!vm.stack[vm.sp-1].AsBool())
+		p := &vm.stack[vm.sp-1]
+		setBool(p, !(p.Typ == TypeBool && p.Bool))
 		return true
 	case bytecode.OpEq, bytecode.OpNeq, bytecode.OpGt, bytecode.OpGte, bytecode.OpLt, bytecode.OpLte:
 		if vm.sp < 2 || vm.trace != nil {
@@ -533,7 +666,31 @@ func (vm *VM) fastOp(op bytecode.OpCode, flags uint8, arg uint16, dc DataContext
 		}
 		a, b := &vm.stack[vm.sp-2], &vm.stack[vm.sp-1]
 		if a.Typ != TypeNumber || b.Typ != TypeNumber {
-			return false
+			if op != bytecode.OpEq && op != bytecode.OpNeq {
+				return false
+			}
+			// Equality of the other scalar types, as valEqual: values of
+			// different types are never equal, null equals null, and strings
+			// compare by pool index or by content.
+			var eq bool
+			switch {
+			case a.Typ != b.Typ:
+				if a.Typ > TypeString || b.Typ > TypeString {
+					return false
+				}
+			case a.Typ == TypeNull:
+				eq = true
+			case a.Typ == TypeBool:
+				eq = a.Bool == b.Bool
+			case a.Typ == TypeString:
+				eq = (a.Any == nil && b.Any == nil && a.Str == b.Str) || vm.strAt(a) == vm.strAt(b)
+			default:
+				return false
+			}
+			*b = Value{}
+			vm.sp--
+			setBool(a, eq == (op == bytecode.OpEq))
+			return true
 		}
 		cmp := 0
 		switch {
@@ -557,9 +714,9 @@ func (vm *VM) fastOp(op bytecode.OpCode, flags uint8, arg uint16, dc DataContext
 		default:
 			result = cmp <= 0
 		}
-		vm.stack[vm.sp-1] = Value{}
+		*b = Value{}
 		vm.sp--
-		vm.stack[vm.sp-1] = BoolVal(result)
+		setBool(a, result)
 		return true
 	case bytecode.OpAdd, bytecode.OpSub, bytecode.OpMul:
 		if vm.sp < 2 || vm.profile != NumericDefault {
@@ -569,20 +726,20 @@ func (vm *VM) fastOp(op bytecode.OpCode, flags uint8, arg uint16, dc DataContext
 		if a.Typ != TypeNumber || b.Typ != TypeNumber {
 			return false
 		}
-		var r Value
+		var r float64
 		switch op {
 		case bytecode.OpAdd:
-			r = numResult(a.Num + b.Num)
+			r = a.Num + b.Num
 		case bytecode.OpSub:
-			r = numResult(a.Num - b.Num)
+			r = a.Num - b.Num
 		default:
 			// float64(...) rounds the product and keeps it from fusing with
 			// a later add on arm64; see the general OpMul.
-			r = numResult(float64(a.Num * b.Num))
+			r = float64(a.Num * b.Num)
 		}
-		vm.stack[vm.sp-1] = Value{}
+		*b = Value{}
 		vm.sp--
-		vm.stack[vm.sp-1] = r
+		setNum(a, r)
 		return true
 	}
 	return false

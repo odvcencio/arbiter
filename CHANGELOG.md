@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- `vm.EvalRules` evaluates a given list of rule headers against a ruleset. The headers must be the ruleset's own: its `Rules` slice, a subslice of it, or copies of its elements.
+
+### Changed
+
+- **`Eval` remembers which rules a tag set selects.** A `Program` now keeps, per tag set, the list of rules that `WithTags` selects and the governance refusal that goes with it, so a tagged `Eval` no longer tests every rule's tags on every call. Results, order and errors are unchanged. The cache holds at most 64 tag sets; a tag set naming a tag that no rule carries selects nothing and is not stored. Do not change a `Program`'s ruleset in place (its rules, their tags or their headers) after the first `Eval`: the cached selection would keep answering for the old rules. Assigning a different ruleset to `Program.Ruleset` is detected and starts a new cache.
+- Faster value-stack handling in the VM for constants, boolean jumps and equality of null, boolean and string values. Results are unchanged.
+
 ### Security
 
 - Require Go 1.26.11. It fixes GO-2026-6859, an HTTP/1 server crash in `net/http` that `govulncheck` reports as reachable from the HTTP servers and clients in this module when it is built with Go 1.26.10. CI, parity and release builds read the Go version from `go.mod`, and the Docker builder image moves to the same version.
