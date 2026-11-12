@@ -8,9 +8,10 @@ import (
 	"m31labs.dev/arbiter/vm"
 )
 
-// taggedBenchSource builds a ruleset shaped like a game director: many rules
-// in one file, split across a dozen tags, most of them testing the same few
-// facts. A tagged evaluation selects about one rule in twelve.
+// taggedBenchSource builds a ruleset shaped like one a host evaluates on every
+// simulation tick: many rules in one file, split across a dozen tags, most of
+// them testing the same few facts. A tagged evaluation selects about one rule
+// in twelve.
 func taggedBenchSource(rules, tags int) string {
 	var b strings.Builder
 	for t := 0; t < tags; t++ {
@@ -65,7 +66,7 @@ func BenchmarkEvalTaggedSelection(b *testing.B) {
 }
 
 // BenchmarkPreparedSharedFacts is a prepared evaluator over rules that all
-// test the same facts through a struct-backed context: a per-unit decision.
+// test the same facts through a struct-backed context.
 func BenchmarkPreparedSharedFacts(b *testing.B) {
 	prog, err := Compile([]byte(taggedBenchSource(19, 1)))
 	if err != nil {

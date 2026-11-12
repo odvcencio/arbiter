@@ -146,6 +146,12 @@ func localNameMask(rs *bytecode.CompiledRuleset, strs []string) []bool {
 	return mask
 }
 
+// valueFields is the number of fields in Value. push and pushFrom copy a Value
+// by naming each field, so a field added to Value must be added to both
+// copies, or the stack silently drops it. TestValueStackCopiesEveryField
+// fails until this count and the copies are updated together.
+const valueFields = 7
+
 // push copies v onto the value stack one field at a time. A Value arrives in
 // registers and is spilled with one narrow store per field; copying it as a
 // block would then load 16 bytes that span those stores, which the CPU cannot
@@ -311,6 +317,16 @@ func EvalWithTagFilter(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringP
 // EvalWithTagFilter it applies active windows and skips other governance
 // gates; it does no tag filtering, so a caller that selects by tag does that
 // once and reuses the selection.
+//
+// Every header in rules must be an element of rs.Rules: pass rs.Rules, a
+// subslice of it, or headers copied from it. A header holds offsets into
+// rs.Instructions and indices into rs.Actions and the string constants, and
+// EvalRules trusts them. It does not check that a header belongs to rs, so a
+// header from another ruleset, or one built by hand, runs bytecode the
+// compiler never checked as a condition and gives a meaningless result.
+//
+// EvalRules reads rules and neither modifies nor keeps the slice, so
+// concurrent calls may share one selection.
 func EvalRules(rs *bytecode.CompiledRuleset, dc DataContext, sp *StringPool, rules []bytecode.RuleHeader) ([]MatchedRule, error) {
 	if rs == nil {
 		return nil, fmt.Errorf("nil ruleset")
@@ -600,10 +616,13 @@ func (vm *VM) evalCondition(instrs []byte, off, length uint32, dc DataContext) b
 }
 
 // fastOp runs the commonest opcodes without the general dispatch: constant
-// and variable loads, boolean logic, and comparisons and +, -, * of two
-// numbers. It reports false for anything else, including any operand mix
-// the general path treats specially, and when tracing (so comparisons are
-// recorded) or under the integer profile (so arithmetic is checked).
+// and variable loads, boolean logic, comparisons and +, -, * of two numbers,
+// and == and != of null, bool and string values. It reports false for
+// anything else, including any operand mix the general path treats specially.
+// Comparisons, == and != included, take the general path when tracing, so
+// they are recorded. +, - and * take it under the integer profile, so
+// arithmetic is checked; the numeric profile does not change a comparison,
+// so comparisons stay on the fast path under every profile.
 func (vm *VM) fastOp(op bytecode.OpCode, flags uint8, arg uint16, dc DataContext) bool {
 	switch op {
 	case bytecode.OpLoadVar:
