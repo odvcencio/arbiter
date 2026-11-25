@@ -1,12 +1,14 @@
 # arbiter
 
-## What's new in v1.13.1
+## What's new in v1.14.0
 
-**No more silently dropped rules** — invalid syntax inside a rule could make the parser drop the whole declaration, and the rule after it, without an error. The compiler now rejects any source the parser did not parse, with a line, column and snippet. Policies that compiled before may now fail; the rule they lost was never running.
+**`and`, `or` and `not` group as documented** — conditions that mix them without parentheses, such as `a and not b and c`, could be grouped wrongly, so a rule could fire when it should not; they now follow the documented precedence (`not`, then `and`, then `or`). Recompile and re-test rules that mix these operators without parentheses. See the [details](CHANGELOG.md#1140--2026-11-25).
 
-**Comparison operators beside comments** — `>=`, `<=` and `!=` with a comment next to the operator were compiled as `==`. They now keep the written operator.
+**Long `and` / `or` chains compile again** — chains of a few hundred terms, which v1.13.1 rejected, now compile in milliseconds, up to the expression depth limit of 2,000 levels.
 
-**`h` as hours** — temporal durations (`for 1h`, `within`, `cooldown`, `debounce`) accept `h` as an alias of `hr`.
+**Faster tagged evaluation** — `Eval` with `WithTags` remembers which rules each tag set selects. Results are unchanged.
+
+**Security fixes** — Go 1.26.11 fixes GO-2026-6859 and OpenTelemetry v1.47.0 fixes GO-2026-6974.
 
 ---
 
