@@ -92,7 +92,8 @@ var rootNodeKinds = map[string]struct{}{
 
 // CheckSourceCoverage fails when part of source did not become syntax. The
 // parser can discard text, or a whole declaration, without setting HasError.
-// It rejects:
+// On a tree with errors it locates the first such text more precisely than
+// the outermost ERROR node does. It rejects:
 //
 //   - a root child that is not a declaration or a comment, such as the loose
 //     tokens left behind when recovery drops a declaration;
@@ -175,7 +176,9 @@ func checkSource(root *gotreesitter.Node, source []byte, lang *gotreesitter.Lang
 	if bytes.HasPrefix(source, []byte{0xEF, 0xBB, 0xBF}) {
 		w.cursor = 3
 	}
-	if root.Type(lang) == "source_file" {
+	// An ERROR root holds the declarations that parsed and the remains of
+	// the ones that did not, so its children are checked the same way.
+	if root.Type(lang) == "source_file" || root.IsError() {
 		for i := 0; i < int(root.ChildCount()); i++ {
 			c := root.Child(i)
 			if _, ok := rootNodeKinds[c.Type(lang)]; !ok {

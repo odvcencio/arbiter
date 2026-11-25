@@ -154,7 +154,9 @@ rule Broken {
 	if !strings.Contains(err.Error(), bad+":") {
 		t.Fatalf("expected included file path in parse error, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "parse error") {
+	// The detail is either the parser's own message or, when the coverage
+	// check can place the problem more precisely, an unparsed-source one.
+	if !strings.Contains(err.Error(), "parse error") && !strings.Contains(err.Error(), "unparsed source") {
 		t.Fatalf("expected parse error detail, got %v", err)
 	}
 }

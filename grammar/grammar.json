@@ -3318,9 +3318,27 @@
           "type": "SYMBOL"
         },
         {
+          "name": "_and_value",
+          "type": "SYMBOL"
+        }
+      ],
+      "type": "CHOICE"
+    },
+    "_and_value": {
+      "members": [
+        {
           "name": "and_expr",
           "type": "SYMBOL"
         },
+        {
+          "name": "_unary_value",
+          "type": "SYMBOL"
+        }
+      ],
+      "type": "CHOICE"
+    },
+    "_unary_value": {
+      "members": [
         {
           "name": "not_expr",
           "type": "SYMBOL"
@@ -3469,7 +3487,7 @@
           },
           {
             "content": {
-              "name": "_expr",
+              "name": "_and_value",
               "type": "SYMBOL"
             },
             "name": "right",
@@ -3486,7 +3504,7 @@
         "members": [
           {
             "content": {
-              "name": "_expr",
+              "name": "_and_value",
               "type": "SYMBOL"
             },
             "name": "left",
@@ -3498,7 +3516,7 @@
           },
           {
             "content": {
-              "name": "_expr",
+              "name": "_unary_value",
               "type": "SYMBOL"
             },
             "name": "right",
@@ -3519,7 +3537,7 @@
           },
           {
             "content": {
-              "name": "_expr",
+              "name": "_unary_value",
               "type": "SYMBOL"
             },
             "name": "operand",
@@ -5122,48 +5140,20 @@
   ],
   "conflicts": [
     [
-      "_expr",
-      "or_expr"
+      "arbiter_schedule_clause"
     ],
     [
-      "_expr",
-      "and_expr"
+      "aggregate_expr",
+      "_primary"
     ],
     [
-      "_expr",
-      "not_expr"
+      "aggregate_expr",
+      "call_expr",
+      "_primary"
     ],
     [
-      "_expr",
-      "_cond_expr"
-    ],
-    [
-      "_cond_expr",
-      "_value_expr"
-    ],
-    [
-      "_value_expr",
-      "math_expr"
-    ],
-    [
-      "not_expr",
-      "not_in_expr"
-    ],
-    [
-      "not_expr",
-      "not_contains_expr"
-    ],
-    [
-      "not_expr",
-      "not_retains_expr"
-    ],
-    [
-      "not_expr",
-      "is_not_null_expr"
-    ],
-    [
-      "between_expr",
-      "list_literal"
+      "join_expr_full",
+      "join_expr_shorthand"
     ]
   ],
   "externals": [],

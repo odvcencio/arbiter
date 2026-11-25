@@ -717,6 +717,13 @@ func parseTreeWithLanguage(source []byte, lang *gotreesitter.Language) (*gotrees
 	}
 	root := tree.RootNode()
 	if root.HasError() {
+		// Recovery can wrap a whole declaration in one ERROR node, whose
+		// start says nothing about where the text went wrong. The coverage
+		// check finds the first text no token covers and reports its exact
+		// position, with the pct or negation guidance where that applies.
+		if err := ir.CheckSourceCoverage(root, source, lang); err != nil {
+			return nil, coverageDiagnostic("", err)
+		}
 		return nil, buildParseError(root, source, lang)
 	}
 	// Recovery can drop whole declarations without setting HasError. Check the

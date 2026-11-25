@@ -322,11 +322,14 @@ rollout_clause     = "rollout" [ "percent" ] number_literal
 
 ## Expressions
 
+`not` binds tighter than `and`, and `and` binds tighter than `or`. `and` and
+`or` associate left to right: `a or b and not c` is `a or (b and (not c))`.
+
 ```ebnf
 expression         = or_expr ;
 or_expr            = and_expr { "or" and_expr } ;
 and_expr           = unary_expr { "and" unary_expr } ;
-unary_expr         = [ "not" ] conditional_expr ;
+unary_expr         = { "not" } conditional_expr ;
 
 conditional_expr   = value_expression
                      [ comparison_operator value_expression ] ;

@@ -739,16 +739,20 @@ func ArbiterGrammar() *Grammar {
 	g.Define("toggle_state", Choice(Str("on"), Str("off")))
 
 	// --- Expression hierarchy ---
-	// Two levels: _expr includes logical operators, _value_expr does not.
+	// Precedence, loosest first: or, and, not, conditions (comparisons and
+	// collection, string, range and null operators), then arithmetic.
+	// Each operator takes operands from its own tier or a tighter one, so the
+	// grammar itself fixes grouping and left association:
+	// `a and not b or c` is `((a and (not b)) or c)`. Do not rely on
+	// precedence numbers or declared conflicts for this; the parser generator
+	// once resolved them so that `a and not b and c` parsed as
+	// `a and (not (b and c))`.
 	// Comparisons only accept _value_expr on left/right so that
 	// `a >= 18 and b == true` parses as `(a >= 18) and (b == true)`.
 
-	g.Define("_expr", Choice(
-		Sym("or_expr"),
-		Sym("and_expr"),
-		Sym("not_expr"),
-		Sym("_cond_expr"),
-	))
+	g.Define("_expr", Choice(Sym("or_expr"), Sym("_and_value")))
+	g.Define("_and_value", Choice(Sym("and_expr"), Sym("_unary_value")))
+	g.Define("_unary_value", Choice(Sym("not_expr"), Sym("_cond_expr")))
 
 	// _cond_expr: comparisons and operators (no logical)
 	g.Define("_cond_expr", Choice(
@@ -778,22 +782,24 @@ func ArbiterGrammar() *Grammar {
 	g.Define("_product_value", Choice(Sym("product_expr"), Sym("_arithmetic_primary")))
 	g.Define("_arithmetic_primary", Choice(Sym("aggregate_expr"), Sym("_primary")))
 
-	// Logical — operate on _expr (full expressions)
+	// Logical operators. The right operand of `or` and `and` comes from the
+	// next tighter tier, which makes both left-associative; `not` applies to
+	// one condition or another `not`.
 	g.Define("or_expr", PrecLeft(1, Seq(
 		Field("left", Sym("_expr")),
 		Str("or"),
-		Field("right", Sym("_expr")),
+		Field("right", Sym("_and_value")),
 	)))
 
 	g.Define("and_expr", PrecLeft(2, Seq(
-		Field("left", Sym("_expr")),
+		Field("left", Sym("_and_value")),
 		Str("and"),
-		Field("right", Sym("_expr")),
+		Field("right", Sym("_unary_value")),
 	)))
 
 	g.Define("not_expr", PrecRight(3, Seq(
 		Str("not"),
-		Field("operand", Sym("_expr")),
+		Field("operand", Sym("_unary_value")),
 	)))
 
 	// Comparison — left/right are _value_expr (no logical operators)
@@ -1062,23 +1068,19 @@ func ArbiterGrammar() *Grammar {
 	g.SetWord("identifier")
 
 	// --- Conflicts ---
+	// Exactly the conflicts tree-sitter's own generator needs to accept the
+	// exported grammar.json; it reports none of them as unnecessary. Keep the
+	// expression tiers out of this list: a declared conflict there keeps both
+	// parses alive and lets the runtime choose the grouping.
 	g.SetConflicts(
-		// Logical level
-		[]string{"_expr", "or_expr"},
-		[]string{"_expr", "and_expr"},
-		[]string{"_expr", "not_expr"},
-		[]string{"_expr", "_cond_expr"},
-		// Condition level
-		[]string{"_cond_expr", "_value_expr"},
-		// Value level
-		[]string{"_value_expr", "math_expr"},
-		// not ambiguity: not_expr vs not_in/not_contains/not_retains
-		[]string{"not_expr", "not_in_expr"},
-		[]string{"not_expr", "not_contains_expr"},
-		[]string{"not_expr", "not_retains_expr"},
-		[]string{"not_expr", "is_not_null_expr"},
-		// between brackets vs list
-		[]string{"between_expr", "list_literal"},
+		// `schedule "..." source ...`: the source can end the schedule clause
+		// or start a separate source clause.
+		[]string{"arbiter_schedule_clause"},
+		// `name(x in xs)`: an aggregate or a call whose argument is `x in xs`.
+		[]string{"aggregate_expr", "_primary"},
+		[]string{"aggregate_expr", "call_expr", "_primary"},
+		// `join a: A, b: B on ...`: full form or shorthand until after `on`.
+		[]string{"join_expr_full", "join_expr_shorthand"},
 	)
 
 	g.EnableLRSplitting = true

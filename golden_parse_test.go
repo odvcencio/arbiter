@@ -127,10 +127,15 @@ func TestGoldenParseResults(t *testing.T) {
 			wantSExpr: `(source_file (worker_declaration (identifier) (worker_input_clause (identifier)) (worker_output_clause (identifier)) (worker_runtime_clause (worker_handler_kind) (arbiter_target (string_literal)))))`,
 		},
 		{
+			// This pins gotreesitter's error recovery, not a reference tree.
+			// tree-sitter's CLI (0.26.6) agrees that the input is an error
+			// but recovers differently: it keeps the rule and marks only the
+			// ">" as ERROR. The tree before the logical-operator tiers also
+			// leaked the hidden rule `_expr` into the output.
 			name:      "parse_error",
 			src:       `rule T { when { x > } then A {} }`,
 			wantError: true,
-			wantSExpr: `(ERROR (identifier) (comparison_expr (identifier) (identifier)) (_expr (ERROR)))`,
+			wantSExpr: `(ERROR (ERROR) (identifier) (comparison_expr (identifier) (identifier)) (ERROR))`,
 		},
 		{
 			name:      "const_cycle",
