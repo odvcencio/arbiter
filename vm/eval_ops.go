@@ -104,13 +104,40 @@ func (vm *VM) loadVar(arg uint16, dc DataContext) {
 	// a variable shared by the branches, makes the compiler copy the Value as
 	// a block, which stalls on store forwarding (see push).
 	if vm.localMask != nil && (int(arg) >= len(vm.localMask) || !vm.localMask[arg]) {
-		// Prepared evaluators know which names can be locals.
-		if vm.idc != nil {
+		// Prepared evaluators know which names can be locals. Any other name
+		// is a fact of the data context. With the fact cache on, the fact is
+		// read once per evaluation and later loads push the stored Value: a
+		// rule set tests the same few facts in most of its rules.
+		var at uint16
+		cacheable := int(arg) < len(vm.varSlot)
+		if cacheable {
+			at = vm.varSlot[arg]
+		}
+		switch {
+		case at != 0:
+			vm.pushFrom(&vm.varVals[at-1])
+		case !cacheable || len(vm.varVals) >= maxCachedVars:
+			// The cache is off or full, or the name was interned after the
+			// cache was built: read the fact on every use.
+			if vm.idc != nil {
+				v := vm.idc.GetIndexed(arg, key)
+				vm.pushFrom(&v)
+			} else {
+				v := dc.Get(key)
+				vm.pushFrom(&v)
+			}
+		case vm.idc != nil:
+			// The context is called before the cache is touched, so a context
+			// that panics leaves no half-filled entry behind.
 			v := vm.idc.GetIndexed(arg, key)
-			vm.pushFrom(&v)
-		} else {
+			c := vm.cacheVar(arg)
+			c.Typ, c.Bool, c.Str, c.ListIdx, c.ListLen, c.Num, c.Any = v.Typ, v.Bool, v.Str, v.ListIdx, v.ListLen, v.Num, v.Any
+			vm.pushFrom(c)
+		default:
 			v := dc.Get(key)
-			vm.pushFrom(&v)
+			c := vm.cacheVar(arg)
+			c.Typ, c.Bool, c.Str, c.ListIdx, c.ListLen, c.Num, c.Any = v.Typ, v.Bool, v.Str, v.ListIdx, v.ListLen, v.Num, v.Any
+			vm.pushFrom(c)
 		}
 	} else if local, ok := vm.lookupLocal(key); ok {
 		vm.pushFrom(&local)

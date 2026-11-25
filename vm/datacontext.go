@@ -98,6 +98,27 @@ func (sp *StringPool) Err() error {
 }
 
 // DataContext provides variable lookup for the VM.
+//
+// A context passed to a PreparedEvaluator must behave as a snapshot for the
+// length of one Eval or EvalInto call:
+//
+//   - Get must return equal values for the same key. With IndexedDataContext,
+//     GetIndexed must return equal values for the same key too.
+//   - A returned Value must not change until the call returns. That includes
+//     any slice or map the Value references.
+//
+// A prepared evaluator relies on both rules. It may read a fact once, keep
+// the Value and use it for every rule in that call, so it holds the Value
+// across later Get calls for other keys. A context that computes a new value
+// on every read (a counter, a clock, a random draw) breaks the first rule:
+// every rule in the call then sees the first value read. A context that
+// returns lists backed by one reused buffer breaks the second: a later Get
+// refills the buffer under a Value the evaluator still holds. Between calls
+// a context may change freely.
+//
+// The other evaluation entry points read a fact each time a rule tests it.
+// That is how they work today and not a promise; a context that meets the
+// two rules works with every entry point.
 type DataContext interface {
 	Get(key string) Value
 }
@@ -106,7 +127,8 @@ type DataContext interface {
 // resolve variable names ahead of time. The VM calls GetIndexed instead of Get,
 // passing the name's index in the program's string pool along with the name,
 // so a context bound to one program can find a field by index instead of by
-// hashing the name. GetIndexed must return what Get(key) would return.
+// hashing the name. GetIndexed must return what Get(key) would return, and it
+// is bound by the same contract as Get: see DataContext.
 type IndexedDataContext interface {
 	DataContext
 	GetIndexed(idx uint16, key string) Value

@@ -121,6 +121,8 @@ func (vm *VM) recordCheck(op bytecode.OpCode, a, b, c Value, result bool) {
 
 // NewPreparedEvaluatorRules prepares an explicit rule selection: the rules at
 // the given indices of rs.Rules, evaluated in the order given. It ignores tags.
+// The data contexts passed to the evaluator must meet the contract documented
+// on DataContext, as for NewPreparedEvaluator.
 func NewPreparedEvaluatorRules(rs *bytecode.CompiledRuleset, sp *StringPool, indices []int) (*PreparedEvaluator, error) {
 	if rs == nil {
 		return nil, fmt.Errorf("nil ruleset")
@@ -162,7 +164,8 @@ func (e *PreparedEvaluator) Rules() []int { return e.index }
 // active window. With a reused out and a context that does not allocate (see
 // IndexedDataContext), it does not allocate for rules that use numbers,
 // booleans, pooled strings, let bindings and table lookups. String
-// concatenation, decimals, and conversion of typed Go slices allocate.
+// concatenation, decimals, and conversion of typed Go slices allocate. The
+// second call on an evaluator builds its fact cache, which allocates once.
 //
 // Values in out stay valid until the next EvalInto on this evaluator.
 func (e *PreparedEvaluator) EvalInto(dc DataContext, out *Matches) error {
@@ -176,9 +179,11 @@ func (e *PreparedEvaluator) EvalInto(dc DataContext, out *Matches) error {
 	vm := e.vm
 	vm.resetBudget()
 	vm.resetElseRows()
+	e.useFactCache()
 	vm.trace = out.Trace
 	defer func() {
 		vm.resetTransient()
+		vm.resetVarCache()
 		vm.trace = nil
 	}()
 
