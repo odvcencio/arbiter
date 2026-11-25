@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [1.14.0] — 2026-11-25
+
 ### Added
 
 - `vm.EvalRules` evaluates a given list of rule headers against a ruleset. The headers must be the ruleset's own: its `Rules` slice, a subslice of it, or copies of its elements.
@@ -21,6 +23,7 @@
 ### Security
 
 - Require Go 1.26.11. It fixes GO-2026-6859, an HTTP/1 server crash in `net/http` that `govulncheck` reports as reachable from the HTTP servers and clients in this module when it is built with Go 1.26.10. CI, parity and release builds read the Go version from `go.mod`, and the Docker builder image moves to the same version.
+- Upgrade OpenTelemetry (`go.opentelemetry.io/otel`, `otel/sdk`, `otel/trace` and `otel/metric`) from v1.44.0 to v1.47.0. It fixes GO-2026-6974, an `AttributeValueLengthLimit` bypass through U+FFFD runes that `govulncheck` reports as reachable through `go.opentelemetry.io/otel/trace` from the gRPC server's tracing in `grpcserver`.
 
 ## [1.13.1] — 2026-11-10
 
