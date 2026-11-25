@@ -1103,6 +1103,13 @@ x >= 1          x <= 1
 a and b         a or b          not a
 ```
 
+`not` binds tighter than `and`, and `and` binds tighter than `or`. `and` and
+`or` associate left to right. So `a or b and not c` means
+`a or (b and (not c))`, and `a and not b and c` means `(a and (not b)) and c`.
+Comparison, collection, string, range and null operators bind tighter than
+`not`: `not role in ["banned"]` means `not (role in ["banned"])`. Use
+parentheses to group a condition differently.
+
 **Collection**
 
 ```text
